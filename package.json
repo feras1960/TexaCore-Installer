@@ -1,0 +1,126 @@
+{
+  "name": "texacore-installer",
+  "version": "1.0.0",
+  "description": "TexaCore ERP — Self-Hosted Installer",
+  "main": "src/main.js",
+  "author": "TexaCore <info@texacore.com>",
+  "license": "UNLICENSED",
+  "private": true,
+  "scripts": {
+    "start": "electron .",
+    "dev": "electron . --dev",
+    "build:mac": "electron-builder --mac",
+    "build:win": "electron-builder --win",
+    "build:all": "electron-builder --mac --win",
+    "build": "electron-builder",
+    "release:patch": "./release.sh patch",
+    "release:minor": "./release.sh minor",
+    "release:major": "./release.sh major",
+    "publish:mac": "electron-builder --mac --publish always",
+    "publish:win": "electron-builder --win --publish always",
+    "publish": "electron-builder --mac --win --publish always"
+  },
+  "dependencies": {
+    "electron-store": "^8.1.0",
+    "electron-updater": "^6.8.3"
+  },
+  "devDependencies": {
+    "electron": "^33.0.0",
+    "electron-builder": "^25.1.8"
+  },
+  "build": {
+    "appId": "com.texacore.installer",
+    "productName": "TexaCore ERP",
+    "copyright": "Copyright © 2026 TexaCore",
+    "publish": [
+      {
+        "provider": "github",
+        "owner": "feras1960",
+        "repo": "TexaCore-Installer",
+        "releaseType": "release"
+      }
+    ],
+    "directories": {
+      "output": "dist",
+      "buildResources": "build"
+    },
+    "files": [
+      "src/**/*",
+      "assets/**/*",
+      "docker-compose.yml",
+      "!node_modules/.cache"
+    ],
+    "extraResources": [
+      {
+        "from": "docker-compose.yml",
+        "to": "docker-compose.yml"
+      },
+      {
+        "from": "build/trayTemplate.png",
+        "to": "build/trayTemplate.png"
+      },
+      {
+        "from": "build/trayTemplate@2x.png",
+        "to": "build/trayTemplate@2x.png"
+      },
+      {
+        "from": "build/icon.png",
+        "to": "build/icon.png"
+      }
+    ],
+    "mac": {
+      "category": "public.app-category.business",
+      "icon": "build/icon.icns",
+      "target": [
+        {
+          "target": "dmg",
+          "arch": [
+            "universal"
+          ]
+        }
+      ],
+      "darkModeSupport": true,
+      "hardenedRuntime": true
+    },
+    "win": {
+      "icon": "build/icon.ico",
+      "target": [
+        {
+          "target": "nsis",
+          "arch": [
+            "x64"
+          ]
+        }
+      ]
+    },
+    "nsis": {
+      "oneClick": true,
+      "perMachine": true,
+      "allowToChangeInstallationDirectory": false,
+      "installerIcon": "build/icon.ico",
+      "uninstallerIcon": "build/icon.ico",
+      "installerHeaderIcon": "build/icon.ico",
+      "createDesktopShortcut": true,
+      "createStartMenuShortcut": true,
+      "shortcutName": "TexaCore ERP"
+    },
+    "dmg": {
+      "contents": [
+        {
+          "x": 130,
+          "y": 220
+        },
+        {
+          "x": 410,
+          "y": 220,
+          "type": "link",
+          "path": "/Applications"
+        }
+      ],
+      "window": {
+        "width": 540,
+        "height": 380
+      }
+    }
+  }
+}
