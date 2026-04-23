@@ -1,0 +1,159 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>TexaCore ERP — مدير النظام</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;600;700;800&display=swap" rel="stylesheet">
+  <link rel="stylesheet" href="styles.css">
+</head>
+<body>
+  <!-- ═══ Title Bar ═══ -->
+  <div class="titlebar" id="titlebar">
+    <div class="titlebar-controls">
+      <button class="tb-btn tb-close" onclick="texacore.close()" title="إغلاق">
+        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+      <button class="tb-btn tb-minimize" onclick="texacore.minimize()" title="تصغير">
+        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 5h8" stroke="currentColor" stroke-width="1.5"/></svg>
+      </button>
+    </div>
+    <span class="titlebar-title">TexaCore ERP</span>
+    <span class="titlebar-version" id="version">v1.0.0</span>
+  </div>
+
+  <!-- ═══ Main Content ═══ -->
+  <div class="container">
+    <!-- Logo & Header -->
+    <div class="header">
+      <div class="logo">
+        <div class="logo-icon">
+          <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
+            <rect width="48" height="48" rx="12" fill="url(#grad)"/>
+            <path d="M14 18h20v2H14v-2zm0 5h20v2H14v-2zm0 5h14v2H14v-2z" fill="white" opacity="0.9"/>
+            <defs><linearGradient id="grad" x1="0" y1="0" x2="48" y2="48"><stop stop-color="#10b981"/><stop offset="1" stop-color="#059669"/></linearGradient></defs>
+          </svg>
+        </div>
+        <div>
+          <h1 class="logo-text">TexaCore ERP</h1>
+          <p class="logo-sub">نظام إدارة الأعمال المتكامل</p>
+        </div>
+      </div>
+    </div>
+
+    <!-- Status Cards -->
+    <div class="status-grid">
+      <div class="status-card" id="card-docker">
+        <div class="status-icon" id="icon-docker">🐳</div>
+        <div class="status-info">
+          <span class="status-label">Docker Engine</span>
+          <span class="status-value" id="status-docker">جاري الفحص...</span>
+        </div>
+        <div class="status-indicator" id="indicator-docker"></div>
+      </div>
+      <div class="status-card" id="card-license">
+        <div class="status-icon">🔑</div>
+        <div class="status-info">
+          <span class="status-label">الترخيص</span>
+          <span class="status-value" id="status-license">غير مفعّل</span>
+        </div>
+        <div class="status-indicator" id="indicator-license"></div>
+      </div>
+      <div class="status-card" id="card-erp">
+        <div class="status-icon">🏭</div>
+        <div class="status-info">
+          <span class="status-label">النظام</span>
+          <span class="status-value" id="status-erp">متوقف</span>
+        </div>
+        <div class="status-indicator" id="indicator-erp"></div>
+      </div>
+    </div>
+
+    <!-- ═══ Step 1: Docker Not Installed ═══ -->
+    <div class="panel" id="panel-no-docker" style="display:none;">
+      <div class="panel-icon">⚠️</div>
+      <h2>Docker غير مثبّت</h2>
+      <p>يجب تثبيت Docker Desktop لتشغيل TexaCore ERP.<br>سيتم تحميله تلقائياً (~600 MB)</p>
+      
+      <!-- Download Progress -->
+      <div id="docker-progress" style="display:none;">
+        <div class="progress-bar-container">
+          <div class="progress-bar-fill" id="docker-progress-bar" style="width:0%"></div>
+        </div>
+        <p class="progress-text" id="docker-progress-text">جاري التحميل...</p>
+      </div>
+
+      <button class="btn btn-primary" id="btn-download-docker" onclick="downloadDocker()">
+        🐳 تحميل وتثبيت Docker تلقائياً
+      </button>
+      <div class="btn-row" style="margin-top:8px;">
+        <button class="btn btn-ghost" onclick="texacore.installDocker()">📥 تحميل يدوي من الموقع</button>
+        <button class="btn btn-ghost" onclick="refreshState()">🔄 إعادة الفحص</button>
+      </div>
+    </div>
+
+    <!-- ═══ Step 2: License Activation ═══ -->
+    <div class="panel" id="panel-license" style="display:none;">
+      <h2>🔐 تفعيل الترخيص</h2>
+      <p>أدخل مفتاح الترخيص الذي حصلت عليه:</p>
+      <div class="input-group">
+        <input type="text" id="input-license" placeholder="LIC-2026-XXXXX-XXXXX" 
+               class="input" dir="ltr" spellcheck="false" autocomplete="off">
+      </div>
+      <button class="btn btn-primary" id="btn-activate" onclick="activateLicense()">
+        ⚡ تفعيل الترخيص
+      </button>
+
+      <div class="separator">
+        <span>أو</span>
+      </div>
+
+      <button class="btn btn-trial" id="btn-trial" onclick="startTrial()">
+        🎁 ابدأ تجربة مجانية — 30 يوم
+      </button>
+      <p class="trial-note">نسخة تجريبية بكامل الميزات الأساسية بدون مفتاح</p>
+
+      <div class="feedback" id="feedback-license"></div>
+    </div>
+
+    <!-- ═══ Step 3: Control Panel ═══ -->
+    <div class="panel" id="panel-control" style="display:none;">
+      <div class="license-badge" id="license-badge">
+        <span class="badge-tier" id="badge-tier">PRO</span>
+        <span class="badge-expires" id="badge-expires">ينتهي: --</span>
+      </div>
+
+      <div class="control-actions">
+        <button class="btn btn-start" id="btn-start" onclick="startERP()">
+          <span class="btn-icon">▶</span>
+          <span>تشغيل النظام</span>
+        </button>
+        <button class="btn btn-stop" id="btn-stop" onclick="stopERP()" style="display:none;">
+          <span class="btn-icon">⏹</span>
+          <span>إيقاف النظام</span>
+        </button>
+        <button class="btn btn-open" id="btn-open" onclick="openERP()" style="display:none;">
+          <span class="btn-icon">🌐</span>
+          <span>فتح في المتصفح</span>
+        </button>
+      </div>
+
+      <div class="feedback" id="feedback-control"></div>
+
+      <!-- Port config -->
+      <div class="config-row">
+        <label>المنفذ (Port):</label>
+        <input type="number" id="input-port" value="80" class="input input-small" dir="ltr" min="1" max="65535">
+      </div>
+    </div>
+  </div>
+
+  <!-- ═══ Footer ═══ -->
+  <div class="footer">
+    <span>© 2026 TexaCore — جميع الحقوق محفوظة</span>
+  </div>
+
+  <script src="renderer.js"></script>
+</body>
+</html>
