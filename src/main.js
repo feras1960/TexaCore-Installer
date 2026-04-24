@@ -404,11 +404,39 @@ ipcMain.handle('download-docker', async () => {
 
     mainWindow?.webContents.send('docker-download-progress', { stage: 'installing', percent: 100 });
 
-    // Open the installer
+    // Auto-run the installer
     if (process.platform === 'darwin') {
-      await runCommand(`open "${downloadPath}"`);
+      // macOS: mount DMG and open the app
+      try {
+        await runCommand(`hdiutil attach "${downloadPath}" -nobrowse`);
+        await runCommand('cp -R "/Volumes/Docker/Docker.app" /Applications/');
+        await runCommand(`hdiutil detach "/Volumes/Docker"`);
+        await runCommand('open /Applications/Docker.app');
+        mainWindow?.webContents.send('docker-download-progress', { stage: 'installed', percent: 100 });
+      } catch (mountErr) {
+        // Fallback: just open the DMG
+        shell.openPath(downloadPath);
+      }
     } else {
-      await runCommand(`start "" "${downloadPath}"`);
+      // Windows: run installer with admin privileges (silent install)
+      try {
+        // Try silent install first
+        const { execFile } = require('child_process');
+        await new Promise((resolve, reject) => {
+          execFile(downloadPath, ['install', '--quiet', '--accept-license'], {
+            timeout: 300000, // 5 min timeout
+            env: { ...process.env, PATH: DOCKER_PATHS },
+          }, (error) => {
+            if (error) reject(error);
+            else resolve();
+          });
+        });
+        mainWindow?.webContents.send('docker-download-progress', { stage: 'installed', percent: 100 });
+      } catch (silentErr) {
+        // Fallback: open installer normally (user will see Docker installer UI)
+        shell.openPath(downloadPath);
+        mainWindow?.webContents.send('docker-download-progress', { stage: 'manual-install', percent: 100 });
+      }
     }
 
     return { success: true, path: downloadPath };
