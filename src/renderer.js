@@ -7,6 +7,12 @@ let statusInterval = null;
 
 // ─── Initialize ──────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
+  // Display version from package.json
+  try {
+    const ver = await texacore.getVersion();
+    document.getElementById('version').textContent = `v${ver}`;
+  } catch { /* fallback: stays as "v..." */ }
+
   await refreshState();
   // Auto-refresh status every 5 seconds
   statusInterval = setInterval(refreshStatus, 5000);

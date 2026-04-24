@@ -4,6 +4,9 @@
 const { contextBridge, ipcRenderer } = require('electron');
 
 contextBridge.exposeInMainWorld('texacore', {
+  // Version
+  getVersion: () => ipcRenderer.invoke('get-version'),
+
   // State
   getState: () => ipcRenderer.invoke('get-state'),
 

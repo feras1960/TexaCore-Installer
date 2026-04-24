@@ -180,6 +180,9 @@ function httpPost(url, data) {
 
 // ─── IPC Handlers ────────────────────────────────────────────
 
+// Get app version
+ipcMain.handle('get-version', () => app.getVersion());
+
 // Get initial state
 ipcMain.handle('get-state', async () => {
   const config = loadConfig();
