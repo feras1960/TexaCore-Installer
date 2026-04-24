@@ -334,6 +334,7 @@ if (texacore.onDockerProgress) {
   texacore.onDockerProgress((data) => {
     const progressBar = document.getElementById('docker-progress-bar');
     const progressText = document.getElementById('docker-progress-text');
+    const btn = document.getElementById('btn-download-docker');
     if (!progressBar || !progressText) return;
 
     if (data.stage === 'downloading') {
@@ -342,6 +343,23 @@ if (texacore.onDockerProgress) {
     } else if (data.stage === 'installing') {
       progressBar.style.width = '100%';
       progressText.textContent = '✅ اكتمل التحميل — جاري فتح ملف التثبيت...';
+    } else if (data.stage === 'manual-install') {
+      progressBar.style.width = '100%';
+      progressText.textContent = '✅ تم فتح مثبّت Docker — يرجى إكمال التثبيت ثم اضغط إعادة الفحص';
+      if (btn) { btn.textContent = '✅ تم فتح المثبّت'; }
+    } else if (data.stage === 'show-path') {
+      progressBar.style.width = '100%';
+      const filePath = data.filePath || '';
+      progressText.innerHTML = `📂 تم فتح المجلد — شغّل الملف يدوياً:<br><code style="color:#10b981;font-size:11px;word-break:break-all;">${filePath}</code>`;
+      if (btn) {
+        btn.textContent = '📂 فتح مجلد التحميل';
+        btn.disabled = false;
+        btn.onclick = () => texacore.showInFolder(filePath);
+      }
+    } else if (data.stage === 'installed') {
+      progressBar.style.width = '100%';
+      progressText.textContent = '✅ تم تثبيت Docker بنجاح! اضغط إعادة الفحص';
+      if (btn) { btn.textContent = '✅ تم التثبيت'; }
     } else if (data.stage === 'error') {
       progressText.textContent = `❌ خطأ: ${data.error}`;
     }

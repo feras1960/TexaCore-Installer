@@ -452,7 +452,15 @@ ipcMain.handle('download-docker', async () => {
         }
       }
 
-      if (launched) {
+      // Method 4: Open containing folder and highlight file
+      if (!launched) {
+        shell.showItemInFolder(downloadPath);
+        mainWindow?.webContents.send('docker-download-progress', {
+          stage: 'show-path',
+          percent: 100,
+          filePath: downloadPath,
+        });
+      } else {
         mainWindow?.webContents.send('docker-download-progress', { stage: 'manual-install', percent: 100 });
       }
     }
@@ -465,6 +473,12 @@ ipcMain.handle('download-docker', async () => {
 });
 
 // Open Docker download page (fallback)
+
+// Show file in folder (for Docker manual install)
+ipcMain.handle('show-in-folder', async (_, filePath) => {
+  shell.showItemInFolder(filePath);
+});
+
 ipcMain.handle('install-docker', () => {
   shell.openExternal('https://www.docker.com/products/docker-desktop/');
 });

@@ -19,6 +19,7 @@ contextBridge.exposeInMainWorld('texacore', {
   stopERP: () => ipcRenderer.invoke('stop-erp'),
   installDocker: () => ipcRenderer.invoke('install-docker'),
   downloadDocker: () => ipcRenderer.invoke('download-docker'),
+  showInFolder: (path) => ipcRenderer.invoke('show-in-folder', path),
   onDockerProgress: (callback) => {
     ipcRenderer.on('docker-download-progress', (_, data) => callback(data));
   },
