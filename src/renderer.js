@@ -314,9 +314,22 @@ async function downloadDocker() {
   try {
     const result = await texacore.downloadDocker();
     if (result.success) {
-      progressText.textContent = '✅ تم التحميل! يرجى تثبيت Docker من الملف المفتوح ثم اضغط إعادة الفحص';
       progressBar.style.width = '100%';
-      btn.textContent = '✅ تم التحميل';
+      const filePath = result.path || '';
+
+      // Show path + open folder button
+      progressText.innerHTML = [
+        '✅ تم تحميل Docker بنجاح!',
+        '<br><span style="color:#10b981;font-size:11px;">📁 ' + filePath + '</span>',
+        '<br>شغّل الملف من المجلد ثم اضغط إعادة الفحص',
+      ].join('');
+
+      // Change button to "Open Folder"
+      btn.textContent = '📂 فتح مجلد التحميل';
+      btn.disabled = false;
+      btn.onclick = () => {
+        if (filePath) texacore.showInFolder(filePath);
+      };
     } else {
       progressText.textContent = `❌ فشل التحميل: ${result.error}`;
       btn.disabled = false;

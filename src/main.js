@@ -421,47 +421,21 @@ ipcMain.handle('download-docker', async () => {
         shell.openPath(downloadPath);
       }
     } else {
-      // Windows: launch Docker installer with multiple fallback methods
+      // Windows: open Docker installer
       let launched = false;
 
-      // Method 1: PowerShell Start-Process with RunAs (admin elevation prompt)
+      // Method 1: shell.openPath (Electron native — most reliable)
       try {
-        await runCommand(`powershell -Command "Start-Process -FilePath '${downloadPath.replace(/'/g, "''")}' -Verb RunAs"`);
-        launched = true;
-      } catch (e1) {
-        console.log('PowerShell launch failed:', e1.message);
+        const err = await shell.openPath(downloadPath);
+        if (!err) launched = true;
+        else console.log('openPath error:', err);
+      } catch (e) {
+        console.log('openPath failed:', e.message);
       }
 
-      // Method 2: Direct exec
-      if (!launched) {
-        try {
-          await runCommand(`"${downloadPath}"`);
-          launched = true;
-        } catch (e2) {
-          console.log('Direct exec failed:', e2.message);
-        }
-      }
-
-      // Method 3: shell.openExternal (Electron native)
-      if (!launched) {
-        try {
-          await shell.openExternal(`file://${downloadPath.replace(/\\/g, '/')}`);
-          launched = true;
-        } catch (e3) {
-          console.log('openExternal failed:', e3.message);
-        }
-      }
-
-      // Method 4: Open containing folder and highlight file
+      // Method 2: Open folder and highlight file (guaranteed to work)
       if (!launched) {
         shell.showItemInFolder(downloadPath);
-        mainWindow?.webContents.send('docker-download-progress', {
-          stage: 'show-path',
-          percent: 100,
-          filePath: downloadPath,
-        });
-      } else {
-        mainWindow?.webContents.send('docker-download-progress', { stage: 'manual-install', percent: 100 });
       }
     }
 
