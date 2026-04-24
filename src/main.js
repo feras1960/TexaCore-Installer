@@ -12,7 +12,7 @@ const { autoUpdater } = require('electron-updater');
 
 // ─── Constants ───────────────────────────────────────────────
 const LICENSING_URL = 'https://wzkklenfsaepegymfxfz.supabase.co/functions/v1';
-const DOCKER_IMAGE = 'texacore-web:1.0.0';
+const DOCKER_IMAGE = 'texacore-web:1.0.1';
 const CONTAINER_NAME = 'texacore-erp';
 const APP_PORT = 80;
 
@@ -262,7 +262,7 @@ ipcMain.handle('start-erp', async (_, { licenseKey, dbPassword, port }) => {
       `--restart unless-stopped`,
       `-e LICENSE_KEY="${licenseKey}"`,
       `-e LICENSING_SERVER_URL="${LICENSING_URL}"`,
-      `-e APP_VERSION="1.0.0"`,
+      `-e APP_VERSION="1.0.1"`,
       `-e SUPABASE_URL="${supabaseUrl}"`,
       `-e SUPABASE_ANON_KEY="${supabaseKey}"`,
       DOCKER_IMAGE,

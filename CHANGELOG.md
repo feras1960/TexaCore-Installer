@@ -1,5 +1,13 @@
 # 📋 TexaCore ERP — سجل التغييرات (Changelog)
 
+
+## [v1.0.1] — 2026-04-24
+
+### التغييرات:
+- Desktop Setup Wizard + Multi-Company + Backup Engine + Google Drive
+
+---
+
 ## [v1.0.0] — 2026-04-23
 
 ### الإصدار الأول 🎉
