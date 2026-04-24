@@ -421,23 +421,38 @@ ipcMain.handle('download-docker', async () => {
         shell.openPath(downloadPath);
       }
     } else {
-      // Windows: run installer with admin privileges (silent install)
+      // Windows: launch Docker installer with multiple fallback methods
+      let launched = false;
+
+      // Method 1: PowerShell Start-Process with RunAs (admin elevation prompt)
       try {
-        // Try silent install first
-        const { execFile } = require('child_process');
-        await new Promise((resolve, reject) => {
-          execFile(downloadPath, ['install', '--quiet', '--accept-license'], {
-            timeout: 300000, // 5 min timeout
-            env: { ...process.env, PATH: DOCKER_PATHS },
-          }, (error) => {
-            if (error) reject(error);
-            else resolve();
-          });
-        });
-        mainWindow?.webContents.send('docker-download-progress', { stage: 'installed', percent: 100 });
-      } catch (silentErr) {
-        // Fallback: open installer normally (user will see Docker installer UI)
-        shell.openPath(downloadPath);
+        await runCommand(`powershell -Command "Start-Process -FilePath '${downloadPath.replace(/'/g, "''")}' -Verb RunAs"`);
+        launched = true;
+      } catch (e1) {
+        console.log('PowerShell launch failed:', e1.message);
+      }
+
+      // Method 2: Direct exec
+      if (!launched) {
+        try {
+          await runCommand(`"${downloadPath}"`);
+          launched = true;
+        } catch (e2) {
+          console.log('Direct exec failed:', e2.message);
+        }
+      }
+
+      // Method 3: shell.openExternal (Electron native)
+      if (!launched) {
+        try {
+          await shell.openExternal(`file://${downloadPath.replace(/\\/g, '/')}`);
+          launched = true;
+        } catch (e3) {
+          console.log('openExternal failed:', e3.message);
+        }
+      }
+
+      if (launched) {
         mainWindow?.webContents.send('docker-download-progress', { stage: 'manual-install', percent: 100 });
       }
     }
