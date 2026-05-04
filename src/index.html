@@ -11,16 +11,12 @@
 <body>
   <!-- ═══ Title Bar ═══ -->
   <div class="titlebar" id="titlebar">
-    <div class="titlebar-controls">
-      <button class="tb-btn tb-close" onclick="texacore.close()" title="إغلاق">
-        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 1l8 8M9 1l-8 8" stroke="currentColor" stroke-width="1.5"/></svg>
-      </button>
-      <button class="tb-btn tb-minimize" onclick="texacore.minimize()" title="تصغير">
-        <svg width="10" height="10" viewBox="0 0 10 10"><path d="M1 5h8" stroke="currentColor" stroke-width="1.5"/></svg>
-      </button>
+    <div style="flex:1"></div>
+    <span class="titlebar-title">TexaCore ERP Installer</span>
+    <div style="flex:1; display:flex; justify-content:flex-end; gap:8px;" class="window-controls">
+      <button onclick="texacore.minimize()" class="win-btn win-min">_</button>
+      <button onclick="texacore.close()" class="win-btn win-close">✕</button>
     </div>
-    <span class="titlebar-title">TexaCore ERP</span>
-    <span class="titlebar-version" id="version">v...</span>
   </div>
 
   <!-- ═══ Main Content ═══ -->
@@ -44,13 +40,13 @@
 
     <!-- Status Cards -->
     <div class="status-grid">
-      <div class="status-card" id="card-docker">
-        <div class="status-icon" id="icon-docker">🐳</div>
+      <div class="status-card" id="card-database">
+        <div class="status-icon" id="icon-database">🗄️</div>
         <div class="status-info">
-          <span class="status-label">Docker Engine</span>
-          <span class="status-value" id="status-docker">جاري الفحص...</span>
+          <span class="status-label">قاعدة البيانات</span>
+          <span class="status-value" id="status-database">جاري الفحص...</span>
         </div>
-        <div class="status-indicator" id="indicator-docker"></div>
+        <div class="status-indicator" id="indicator-database"></div>
       </div>
       <div class="status-card" id="card-license">
         <div class="status-icon">🔑</div>
@@ -70,28 +66,8 @@
       </div>
     </div>
 
-    <!-- ═══ Step 1: Docker Not Installed ═══ -->
-    <div class="panel" id="panel-no-docker" style="display:none;">
-      <div class="panel-icon">⚠️</div>
-      <h2>Docker غير مثبّت</h2>
-      <p>يجب تثبيت Docker Desktop لتشغيل TexaCore ERP.<br>سيتم تحميله تلقائياً (~600 MB)</p>
-      
-      <!-- Download Progress -->
-      <div id="docker-progress" style="display:none;">
-        <div class="progress-bar-container">
-          <div class="progress-bar-fill" id="docker-progress-bar" style="width:0%"></div>
-        </div>
-        <p class="progress-text" id="docker-progress-text">جاري التحميل...</p>
-      </div>
-
-      <button class="btn btn-primary" id="btn-download-docker" onclick="downloadDocker()">
-        🐳 تحميل وتثبيت Docker تلقائياً
-      </button>
-      <div class="btn-row" style="margin-top:8px;">
-        <button class="btn btn-ghost" onclick="texacore.installDocker()">📥 تحميل يدوي من الموقع</button>
-        <button class="btn btn-ghost" onclick="refreshState()">🔄 إعادة الفحص</button>
-      </div>
-    </div>
+    <!-- panel-no-docker removed — no longer needed -->
+    <div id="panel-no-docker" style="display:none;"></div>
 
     <!-- ═══ Step 2: License Activation ═══ -->
     <div class="panel" id="panel-license" style="display:none;">
@@ -115,13 +91,22 @@
       <p class="trial-note">نسخة تجريبية بكامل الميزات الأساسية بدون مفتاح</p>
 
       <div class="feedback" id="feedback-license"></div>
+      <button class="btn btn-ghost" id="btn-cancel-license" onclick="refreshState()" style="display:none; margin-top:12px; width:100%;">
+        العودة 🔙
+      </button>
     </div>
 
     <!-- ═══ Step 3: Control Panel ═══ -->
     <div class="panel" id="panel-control" style="display:none;">
-      <div class="license-badge" id="license-badge">
-        <span class="badge-tier" id="badge-tier">PRO</span>
-        <span class="badge-expires" id="badge-expires">ينتهي: --</span>
+      <div class="license-badge" id="license-badge" style="display:flex; justify-content:space-between; align-items:center; flex-wrap:wrap; gap:8px;">
+        <div style="display:flex; align-items:center; gap:8px;">
+          <span class="badge-tier" id="badge-tier">PRO</span>
+          <span class="badge-expires" id="badge-expires">ينتهي: --</span>
+        </div>
+        <div style="display:flex; gap:8px;">
+          <button class="btn btn-ghost" style="padding:4px 8px; font-size:12px; height:auto; min-height:auto; color:var(--accent); border-color:var(--accent);" onclick="texacore.openBrowser('https://texacore.ai/pricing')">شراء/ترقية الترخيص 🛒</button>
+          <button class="btn btn-ghost" style="padding:4px 8px; font-size:12px; height:auto; min-height:auto;" onclick="showLicensePanel()">تغيير المفتاح 🔑</button>
+        </div>
       </div>
 
       <div class="control-actions">
@@ -141,17 +126,82 @@
 
       <div class="feedback" id="feedback-control"></div>
 
+      <!-- Migration Progress (shown during first-run schema setup) -->
+      <div id="migration-progress-box" style="display:none; margin-top:12px;">
+        <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
+          <span style="font-size:12px; color:var(--text-muted); font-weight:600;">⚙️ إعداد قاعدة البيانات...</span>
+          <span style="font-size:11px; color:var(--accent); font-weight:700;" id="migration-counter">0/0</span>
+        </div>
+        <div class="progress-bar-container">
+          <div class="progress-bar-fill" id="migration-progress-bar" style="width:0%; transition: width 0.3s ease;"></div>
+        </div>
+        <p class="progress-text" id="migration-progress-text" style="font-size:11px; margin-top:4px; color:var(--text-muted); direction:ltr; text-align:left;">جاري تطبيق المايقريشنز...</p>
+      </div>
+
       <!-- Port config -->
       <div class="config-row">
         <label>المنفذ (Port):</label>
         <input type="number" id="input-port" value="80" class="input input-small" dir="ltr" min="1" max="65535">
+      </div>
+
+      <!-- Cloud config -->
+      <div class="cloud-box" id="cloud-box">
+        <div class="cloud-header">
+          <div>
+            <h3>🌐 الوصول السحابي (Cloud Access)</h3>
+            <p>اربط الخادم بالإنترنت للوصول من أي مكان</p>
+          </div>
+          <label class="toggle-switch">
+            <input type="checkbox" id="input-cloud" onchange="toggleCloudView()">
+            <span class="slider"></span>
+          </label>
+        </div>
+
+        <div id="cloud-content" style="display:none; margin-top: 16px;">
+          <!-- Setup View (Not registered) -->
+          <div id="cloud-setup">
+            <div style="display:flex; flex:1;" dir="ltr">
+              <input type="text" id="input-subdomain" placeholder="my-server" class="input input-small" style="flex:1; border-top-right-radius:0; border-bottom-right-radius:0; height:38px;" oninput="this.value = this.value.replace(/[^a-z0-9-]/g, '').toLowerCase(); checkSubdomain(this.value);">
+              <div style="background:#1e293b; color:#94a3b8; padding:0 12px; border-radius:0 8px 8px 0; font-size:13px; display:flex; align-items:center; border:2px solid var(--border); border-left:none;">.texacore.ai</div>
+            </div>
+            
+            <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px;">
+              <span id="domain-status" style="font-size:12px; font-weight:600; color:var(--text-muted);">يرجى كتابة نطاق للتحقق...</span>
+              <button class="btn btn-primary" id="btn-register-domain" style="padding:8px 16px; font-size:13px;" onclick="registerSubdomain()" disabled>
+                حجز النطاق
+              </button>
+            </div>
+          </div>
+
+          <!-- Active View (Registered) -->
+          <div id="cloud-active" style="display:none; text-align:center;">
+            <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
+              <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;">الرابط السحابي (من أي مكان):</div>
+              <a href="#" id="cloud-url" style="color:var(--accent); font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openCloudUrl()">https://sub.texacore.ai</a>
+            </div>
+            <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
+              <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;">الرابط المحلي (داخل شبكتك):</div>
+              <a href="#" id="local-url" style="color:#3b82f6; font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openLocalUrl()">http://127.0.0.1:80</a>
+            </div>
+            <div style="display:flex; justify-content:center; gap:16px;">
+              <span style="font-size:12px; color:var(--text-muted);">حالة الاتصال: <strong id="tunnel-status" style="color:var(--danger);">غير متصل 🔴</strong></span>
+              <span style="font-size:12px; color:var(--text-muted);"><strong style="color:var(--accent);">✓</strong> تم الحجز للترخيص</span>
+            </div>
+          </div>
+        </div>
       </div>
     </div>
   </div>
 
   <!-- ═══ Footer ═══ -->
   <div class="footer">
-    <span>© 2026 TexaCore — جميع الحقوق محفوظة</span>
+    <div class="footer-left">
+      <span class="version-badge" id="version">v...</span>
+      <span class="build-date" id="build-date" style="font-size:10px; color:#64748b; margin-right:8px;"></span>
+    </div>
+    <div class="footer-right">
+      <span>© 2026 TexaCore — جميع الحقوق محفوظة</span>
+    </div>
   </div>
 
   <script src="renderer.js"></script>

@@ -1,5 +1,6 @@
 // ════════════════════════════════════════════════════════════════
 // 🖥️ TexaCore Installer — Renderer (UI Logic)
+// v2: Native embedded services — no Docker dependency
 // ════════════════════════════════════════════════════════════════
 
 let currentState = {};
@@ -7,11 +8,43 @@ let statusInterval = null;
 
 // ─── Initialize ──────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  // Display version from package.json
+  // Display version + build date from package.json
   try {
-    const ver = await texacore.getVersion();
-    document.getElementById('version').textContent = `v${ver}`;
+    const verInfo = await texacore.getVersion();
+    // Support both old format (string) and new format (object)
+    if (typeof verInfo === 'object' && verInfo.version) {
+      document.getElementById('version').textContent = `v${verInfo.version}`;
+      if (verInfo.buildDate && verInfo.buildDate !== 'unknown') {
+        const bd = new Date(verInfo.buildDate);
+        const dateStr = bd.toISOString().replace('T', ' ').substring(0, 16) + ' UTC';
+        document.getElementById('build-date').textContent = `Build: ${dateStr}`;
+      }
+    } else {
+      document.getElementById('version').textContent = `v${verInfo}`;
+    }
   } catch { /* fallback: stays as "v..." */ }
+
+  // Listen for migration progress events from main process
+  if (texacore.onMigrationProgress) {
+    texacore.onMigrationProgress((data) => {
+      const box = document.getElementById('migration-progress-box');
+      const bar = document.getElementById('migration-progress-bar');
+      const counter = document.getElementById('migration-counter');
+      const text = document.getElementById('migration-progress-text');
+      if (!box || !bar) return;
+
+      box.style.display = 'block';
+      const pct = Math.round((data.step / data.total) * 100);
+      bar.style.width = `${pct}%`;
+      counter.textContent = `${data.step}/${data.total}`;
+      text.textContent = data.name;
+
+      // Hide when complete
+      if (data.step >= data.total) {
+        setTimeout(() => { box.style.display = 'none'; }, 2000);
+      }
+    });
+  }
 
   await refreshState();
   // Auto-refresh status every 5 seconds
@@ -47,12 +80,11 @@ function updateUI(state) {
   document.getElementById('panel-license').style.display = 'none';
   document.getElementById('panel-control').style.display = 'none';
 
-  if (!state.dockerInstalled) {
-    // Show Docker install panel
-    document.getElementById('panel-no-docker').style.display = 'block';
-  } else if (!state.hasLicense) {
+  // No Docker check — go straight to license or control panel
+  if (!state.hasLicense) {
     // Show license activation
     document.getElementById('panel-license').style.display = 'block';
+    document.getElementById('btn-cancel-license').style.display = 'none';
     if (state.config?.licenseKey) {
       document.getElementById('input-license').value = state.config.licenseKey;
     }
@@ -62,53 +94,98 @@ function updateUI(state) {
     updateControlPanel(state);
   }
 
-  // Set port
+  // Set port and cloud settings
   if (state.config?.port) {
     document.getElementById('input-port').value = state.config.port;
+  }
+  
+  if (state.config?.enableCloud) {
+    document.getElementById('input-cloud').checked = true;
+    document.getElementById('cloud-content').style.display = 'block';
+  } else {
+    document.getElementById('input-cloud').checked = false;
+    document.getElementById('cloud-content').style.display = 'none';
+  }
+  
+  // If registered, show active view. Otherwise setup view.
+  if (state.config?.subdomain) {
+    document.getElementById('input-subdomain').value = state.config.subdomain;
+    document.getElementById('cloud-setup').style.display = 'none';
+    document.getElementById('cloud-active').style.display = 'block';
+    document.getElementById('cloud-url').textContent = `https://${state.config.subdomain}.texacore.ai`;
+    
+    // Set Local URL
+    const localIp = state.localIp || '127.0.0.1';
+    const port = state.config.port || 80;
+    const portStr = port === 80 ? '' : `:${port}`;
+    document.getElementById('local-url').textContent = `http://${localIp}${portStr}`;
+  } else {
+    document.getElementById('cloud-setup').style.display = 'block';
+    document.getElementById('cloud-active').style.display = 'none';
   }
 }
 
 // ─── Update Status Cards ─────────────────────────────────────
 function updateStatusCards(state) {
-  // Docker
-  const dockerStatus = document.getElementById('status-docker');
-  const dockerIndicator = document.getElementById('indicator-docker');
-  if (!state.dockerInstalled) {
-    dockerStatus.textContent = 'غير مثبّت';
-    dockerIndicator.className = 'status-indicator red';
-  } else if (!state.dockerRunning) {
-    dockerStatus.textContent = 'متوقف';
-    dockerIndicator.className = 'status-indicator yellow';
-  } else {
-    dockerStatus.textContent = 'يعمل ✓';
-    dockerIndicator.className = 'status-indicator green';
+  // Database (replaced Docker)
+  const dbStatus = document.getElementById('status-database');
+  const dbIndicator = document.getElementById('indicator-database');
+  if (dbStatus && dbIndicator) {
+    if (state.containerRunning) {
+      if (state.containerHealth === 'healthy') {
+        dbStatus.textContent = 'يعمل ✓';
+        dbIndicator.className = 'status-indicator green';
+      } else {
+        dbStatus.textContent = 'جاري التشغيل...';
+        dbIndicator.className = 'status-indicator blue';
+      }
+    } else {
+      dbStatus.textContent = 'متوقف';
+      dbIndicator.className = 'status-indicator yellow';
+    }
   }
 
   // License
   const licenseStatus = document.getElementById('status-license');
   const licenseIndicator = document.getElementById('indicator-license');
-  if (state.hasLicense) {
-    licenseStatus.textContent = 'مفعّل ✓';
-    licenseIndicator.className = 'status-indicator green';
-  } else {
-    licenseStatus.textContent = 'غير مفعّل';
-    licenseIndicator.className = 'status-indicator red';
+  if (licenseStatus && licenseIndicator) {
+    if (state.hasLicense) {
+      licenseStatus.textContent = 'مفعّل ✓';
+      licenseIndicator.className = 'status-indicator green';
+    } else {
+      licenseStatus.textContent = 'غير مفعّل';
+      licenseIndicator.className = 'status-indicator red';
+    }
   }
 
   // ERP
   const erpStatus = document.getElementById('status-erp');
   const erpIndicator = document.getElementById('indicator-erp');
-  if (state.containerRunning) {
-    if (state.containerHealth === 'healthy') {
-      erpStatus.textContent = 'يعمل ✓';
-      erpIndicator.className = 'status-indicator green';
+  if (erpStatus && erpIndicator) {
+    if (state.containerRunning) {
+      if (state.containerHealth === 'healthy') {
+        erpStatus.textContent = 'يعمل ✓';
+        erpIndicator.className = 'status-indicator green';
+      } else {
+        erpStatus.textContent = 'جاري التشغيل...';
+        erpIndicator.className = 'status-indicator blue';
+      }
     } else {
-      erpStatus.textContent = 'جاري التشغيل...';
-      erpIndicator.className = 'status-indicator blue';
+      erpStatus.textContent = 'متوقف';
+      erpIndicator.className = 'status-indicator red';
     }
-  } else {
-    erpStatus.textContent = 'متوقف';
-    erpIndicator.className = 'status-indicator red';
+  }
+
+  // Tunnel
+  const tunnelStatusEl = document.getElementById('tunnel-status');
+  if (tunnelStatusEl) {
+    if (state.containerRunning) {
+      tunnelStatusEl.textContent = 'متصل 🟢';
+      tunnelStatusEl.style.color = 'var(--accent)';
+    } else {
+      tunnelStatusEl.textContent = 'غير متصل 🔴';
+      tunnelStatusEl.style.color = 'var(--danger)';
+    }
   }
 }
 
@@ -116,14 +193,27 @@ function updateStatusCards(state) {
 function updateControlPanel(state) {
   updateControlButtons(state);
 
-  // Update license badge from state.licenseInfo
+    // Update license badge from state.licenseInfo
   if (state.licenseInfo) {
     const li = state.licenseInfo;
     const tierEl = document.getElementById('badge-tier');
     const expiresEl = document.getElementById('badge-expires');
     tierEl.textContent = (li.tier || 'PRO').toUpperCase();
     if (li.tier === 'free') tierEl.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
-    const exDate = li.expires_at ? new Date(li.expires_at).toLocaleDateString('ar-SA') : '--';
+    
+    // Format date specifically as Gregorian with Western/Arabic numerals (1, 2, 3...)
+    let exDate = '--';
+    if (li.expires_at) {
+      const d = new Date(li.expires_at);
+      exDate = new Intl.DateTimeFormat('ar-EG', {
+        calendar: 'gregory',
+        numberingSystem: 'latn',
+        day: 'numeric',
+        month: 'long',
+        year: 'numeric'
+      }).format(d);
+    }
+    
     const daysLeft = li.expires_at ? Math.ceil((new Date(li.expires_at) - Date.now()) / 86400000) : 0;
     expiresEl.textContent = `ينتهي: ${exDate} (${daysLeft} يوم)`;
   }
@@ -186,6 +276,12 @@ async function activateLicense() {
   btn.textContent = '⚡ تفعيل الترخيص';
 }
 
+function showLicensePanel() {
+  document.getElementById('panel-control').style.display = 'none';
+  document.getElementById('panel-license').style.display = 'block';
+  document.getElementById('btn-cancel-license').style.display = 'block';
+}
+
 // ─── Start Trial ─────────────────────────────────────────────
 async function startTrial() {
   const btn = document.getElementById('btn-trial');
@@ -224,24 +320,45 @@ async function startERP() {
   const btn = document.getElementById('btn-start');
   const feedback = document.getElementById('feedback-control');
   const port = document.getElementById('input-port').value || 80;
+  const enableCloud = document.getElementById('input-cloud').checked;
+  const subdomain = currentState.config?.subdomain || document.getElementById('input-subdomain').value;
+
+  if (enableCloud && !subdomain) {
+    feedback.className = 'feedback error';
+    feedback.textContent = '❌ يرجى حجز النطاق المخصص أولاً';
+    return;
+  }
 
   btn.disabled = true;
   btn.innerHTML = '<span class="btn-icon">⏳</span><span>جاري التشغيل...</span>';
   feedback.className = 'feedback loading';
-  feedback.textContent = 'جاري بدء تشغيل TexaCore...';
+  feedback.textContent = 'جاري بدء تشغيل الخدمات...';
 
   try {
     const result = await texacore.startERP({
       licenseKey: currentState.config?.licenseKey,
       dbPassword: currentState.config?.dbPassword || 'texacore2026',
       port: parseInt(port),
+      enableCloud,
+      subdomain
     });
 
     if (result.success) {
       feedback.className = 'feedback success';
+
+      // Show migration summary if available
+      let migInfo = '';
+      if (result.migrations && result.migrations.applied > 0) {
+        migInfo = ` (${result.migrations.applied} مايقريشن مطبّق)`;
+      }
+
       feedback.textContent = result.ready
-        ? `✅ النظام يعمل! → http://localhost:${result.port}`
+        ? `✅ النظام يعمل!${migInfo} → http://localhost:${result.port}`
         : '⏳ النظام يُحمّل... انتظر قليلاً ثم افتح المتصفح';
+
+      // Hide migration progress box
+      const migBox = document.getElementById('migration-progress-box');
+      if (migBox) migBox.style.display = 'none';
       
       await refreshState();
     } else {
@@ -290,6 +407,90 @@ function openERP() {
   texacore.openBrowser(parseInt(port));
 }
 
+function openCloudUrl() {
+  const subdomain = currentState.config?.subdomain;
+  if (subdomain) {
+    texacore.openBrowser(`https://${subdomain}.texacore.ai`);
+  }
+}
+
+function openLocalUrl() {
+  openERP(); // Always open localhost to prevent Vite strict MIME issues locally
+}
+
+// ─── Cloud Logic ─────────────────────────────────────────────
+function toggleCloudView() {
+  const isChecked = document.getElementById('input-cloud').checked;
+  document.getElementById('cloud-content').style.display = isChecked ? 'block' : 'none';
+}
+
+let checkTimeout;
+function checkSubdomain(value) {
+  const statusEl = document.getElementById('domain-status');
+  const btn = document.getElementById('btn-register-domain');
+  
+  if (!value) {
+    statusEl.textContent = 'يرجى كتابة نطاق للتحقق...';
+    statusEl.style.color = 'var(--text-muted)';
+    btn.disabled = true;
+    return;
+  }
+
+  statusEl.textContent = 'جاري التحقق ⏳...';
+  statusEl.style.color = 'var(--warning)';
+  btn.disabled = true;
+
+  clearTimeout(checkTimeout);
+  checkTimeout = setTimeout(() => {
+    if (value === 'admin' || value === 'test' || value === 'texacore') {
+      statusEl.textContent = '❌ النطاق غير متاح';
+      statusEl.style.color = 'var(--danger)';
+      btn.disabled = true;
+    } else {
+      statusEl.textContent = '✅ النطاق متاح!';
+      statusEl.style.color = 'var(--accent)';
+      btn.disabled = false;
+    }
+  }, 800);
+}
+
+async function registerSubdomain() {
+  const input = document.getElementById('input-subdomain');
+  const btn = document.getElementById('btn-register-domain');
+  const statusEl = document.getElementById('domain-status');
+  
+  if (!input.value) return;
+
+  btn.disabled = true;
+  btn.textContent = '⏳ جاري الحجز...';
+  
+  try {
+    const result = await window.texacore.registerSubdomain(input.value);
+    
+    if (result.success) {
+      if (!currentState.config) currentState.config = {};
+      currentState.config.subdomain = input.value;
+      currentState.config.enableCloud = true;
+      
+      document.getElementById('cloud-setup').style.display = 'none';
+      document.getElementById('cloud-active').style.display = 'block';
+      document.getElementById('cloud-url').textContent = result.url || `https://${input.value}.texacore.ai`;
+      
+      alert('🎉 تم حجز النطاق بنجاح! سيتم تفعيله عند تشغيل النظام.');
+    } else {
+      statusEl.textContent = `❌ فشل الحجز: ${result.error}`;
+      statusEl.style.color = 'var(--danger)';
+      btn.textContent = 'التسجيل الآن';
+      btn.disabled = false;
+    }
+  } catch (err) {
+    statusEl.textContent = `❌ خطأ غير متوقع: ${err.message}`;
+    statusEl.style.color = 'var(--danger)';
+    btn.textContent = 'التسجيل الآن';
+    btn.disabled = false;
+  }
+}
+
 // ─── Enter key support ──────────────────────────────────────
 document.addEventListener('keydown', (e) => {
   if (e.key === 'Enter') {
@@ -299,82 +500,3 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
-
-// ─── Docker Auto-Download ────────────────────────────────────
-async function downloadDocker() {
-  const btn = document.getElementById('btn-download-docker');
-  const progressDiv = document.getElementById('docker-progress');
-  const progressBar = document.getElementById('docker-progress-bar');
-  const progressText = document.getElementById('docker-progress-text');
-
-  btn.disabled = true;
-  btn.textContent = '⏳ جاري التحميل...';
-  progressDiv.style.display = 'block';
-
-  try {
-    const result = await texacore.downloadDocker();
-    if (result.success) {
-      progressBar.style.width = '100%';
-      const filePath = result.path || '';
-
-      // Show path + open folder button
-      progressText.innerHTML = [
-        '✅ تم تحميل Docker بنجاح!',
-        '<br><span style="color:#10b981;font-size:11px;">📁 ' + filePath + '</span>',
-        '<br>شغّل الملف من المجلد ثم اضغط إعادة الفحص',
-      ].join('');
-
-      // Change button to "Open Folder"
-      btn.textContent = '📂 فتح مجلد التحميل';
-      btn.disabled = false;
-      btn.onclick = () => {
-        if (filePath) texacore.showInFolder(filePath);
-      };
-    } else {
-      progressText.textContent = `❌ فشل التحميل: ${result.error}`;
-      btn.disabled = false;
-      btn.textContent = '🔄 إعادة المحاولة';
-    }
-  } catch (err) {
-    progressText.textContent = `❌ خطأ: ${err.message}`;
-    btn.disabled = false;
-    btn.textContent = '🔄 إعادة المحاولة';
-  }
-}
-
-// Listen for Docker download progress
-if (texacore.onDockerProgress) {
-  texacore.onDockerProgress((data) => {
-    const progressBar = document.getElementById('docker-progress-bar');
-    const progressText = document.getElementById('docker-progress-text');
-    const btn = document.getElementById('btn-download-docker');
-    if (!progressBar || !progressText) return;
-
-    if (data.stage === 'downloading') {
-      progressBar.style.width = `${data.percent}%`;
-      progressText.textContent = `جاري التحميل... ${data.downloaded} MB / ${data.total} MB (${data.percent}%)`;
-    } else if (data.stage === 'installing') {
-      progressBar.style.width = '100%';
-      progressText.textContent = '✅ اكتمل التحميل — جاري فتح ملف التثبيت...';
-    } else if (data.stage === 'manual-install') {
-      progressBar.style.width = '100%';
-      progressText.textContent = '✅ تم فتح مثبّت Docker — يرجى إكمال التثبيت ثم اضغط إعادة الفحص';
-      if (btn) { btn.textContent = '✅ تم فتح المثبّت'; }
-    } else if (data.stage === 'show-path') {
-      progressBar.style.width = '100%';
-      const filePath = data.filePath || '';
-      progressText.innerHTML = `📂 تم فتح المجلد — شغّل الملف يدوياً:<br><code style="color:#10b981;font-size:11px;word-break:break-all;">${filePath}</code>`;
-      if (btn) {
-        btn.textContent = '📂 فتح مجلد التحميل';
-        btn.disabled = false;
-        btn.onclick = () => texacore.showInFolder(filePath);
-      }
-    } else if (data.stage === 'installed') {
-      progressBar.style.width = '100%';
-      progressText.textContent = '✅ تم تثبيت Docker بنجاح! اضغط إعادة الفحص';
-      if (btn) { btn.textContent = '✅ تم التثبيت'; }
-    } else if (data.stage === 'error') {
-      progressText.textContent = `❌ خطأ: ${data.error}`;
-    }
-  });
-}

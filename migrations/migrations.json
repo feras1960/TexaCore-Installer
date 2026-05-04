@@ -1,0 +1,18 @@
+{
+  "version": "2.0.0",
+  "description": "TexaCore ERP — Full production schema + seed data",
+  "migrations": [
+    {
+      "order": 1,
+      "name": "00001_full_schema",
+      "file": "00001_full_schema.sql",
+      "description": "Complete production schema: 329 tables, 458 functions, 335 triggers, 977 indexes"
+    },
+    {
+      "order": 2,
+      "name": "00002_seed_data",
+      "file": "00002_seed_data.sql",
+      "description": "Essential seed data: account_types, system_modules, roles, currencies, countries, etc."
+    }
+  ]
+}

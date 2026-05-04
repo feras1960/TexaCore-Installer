@@ -1,6 +1,7 @@
 {
   "name": "texacore-installer",
-  "version": "1.0.6",
+  "version": "1.3.1",
+  "buildDate": "2026-05-04T11:45:00Z",
   "description": "TexaCore ERP — Self-Hosted Installer",
   "main": "src/main.js",
   "author": "TexaCore <info@texacore.com>",
@@ -21,8 +22,17 @@
     "publish": "electron-builder --mac --win --publish always"
   },
   "dependencies": {
+    "call-bind-apply-helpers": "^1.0.2",
+    "dunder-proto": "^1.0.1",
     "electron-store": "^8.1.0",
-    "electron-updater": "^6.8.3"
+    "electron-updater": "^6.8.3",
+    "express": "^4.21.2",
+    "get-intrinsic": "^1.3.0",
+    "get-proto": "^1.0.1",
+    "mdb-reader": "^3.2.0",
+    "pg": "^8.20.0",
+    "side-channel": "^1.1.0",
+    "side-channel-map": "^1.0.1"
   },
   "devDependencies": {
     "electron": "^33.0.0",
@@ -44,16 +54,28 @@
       "output": "dist",
       "buildResources": "build"
     },
+    "asar": false,
+    "compression": "maximum",
     "files": [
       "src/**/*",
       "assets/**/*",
-      "docker-compose.yml",
+      "node_modules/**/*",
       "!node_modules/.cache"
     ],
     "extraResources": [
       {
-        "from": "docker-compose.yml",
-        "to": "docker-compose.yml"
+        "from": "migrations",
+        "to": "migrations",
+        "filter": [
+          "**/*"
+        ]
+      },
+      {
+        "from": "frontend",
+        "to": "frontend",
+        "filter": [
+          "**/*"
+        ]
       },
       {
         "from": "build/trayTemplate.png",
@@ -71,11 +93,20 @@
     "mac": {
       "category": "public.app-category.business",
       "icon": "build/icon.icns",
+      "extraResources": [
+        {
+          "from": "bin/macos-arm64",
+          "to": "bin",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ],
       "target": [
         {
           "target": "dmg",
           "arch": [
-            "universal"
+            "arm64"
           ]
         }
       ],
@@ -84,6 +115,15 @@
     },
     "win": {
       "icon": "build/icon.ico",
+      "extraResources": [
+        {
+          "from": "bin/windows-x64",
+          "to": "bin",
+          "filter": [
+            "**/*"
+          ]
+        }
+      ],
       "target": [
         {
           "target": "nsis",
@@ -102,7 +142,8 @@
       "installerHeaderIcon": "build/icon.ico",
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
-      "shortcutName": "TexaCore ERP"
+      "shortcutName": "TexaCore ERP",
+      "deleteAppDataOnUninstall": false
     },
     "dmg": {
       "contents": [
