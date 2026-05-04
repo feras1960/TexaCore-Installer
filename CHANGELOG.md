@@ -1,6 +1,29 @@
 # 📋 TexaCore ERP — سجل التغييرات (Changelog)
 
 
+## [v1.3.1] — 2026-05-04
+
+### إصلاح استيراد الفواتير + تتبع الإصدارات:
+- إصلاح `rsf-reader`: دعم البنية البديلة (MoveBayBill+MOVE) لفواتير المشتريات والمبيعات
+- إصلاح `rsf-mapper`: إضافة خرائط ربط عكسية (`supplierByAccountMap`, `customerByAccountMap`)
+- إضافة نظام تتبع الإصدارات: عرض رقم الإصدار + تاريخ البناء في Footer
+- إضافة `SOURCE_OF_TRUTH.sh` كمرجع رسمي للمشروع
+
+---
+
+## [v1.3.0] — 2026-05-03
+
+### النسخة الهجينة — تحول جذري من Docker إلى خدمات مدمجة:
+- ✅ Embedded PostgreSQL + GoTrue + PostgREST (بدون Docker)
+- ✅ نظام استيراد/تصدير الرشيد (RSF Reader/Mapper/Exporter)
+- ✅ نظام النسخ الاحتياطي المشفر (.tcdb)
+- ✅ نظام التراخيص المشفر (Hardware-bound)
+- ✅ Cloud Access عبر Cloudflare Tunnel
+- ✅ Service Manager لإدارة جميع الخدمات محلياً
+- ✅ Migration Runner تلقائي
+
+---
+
 ## [v1.0.6] — 2026-04-24
 
 ### التغييرات:
