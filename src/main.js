@@ -210,6 +210,8 @@ class HeartbeatSender {
         license_key: config.licenseKey,
         hardware_id: hardwareId,
         app_version: app.getVersion(),
+        subdomain: config.subdomain || null,
+        hostname: os.hostname(),
         users_active: usersActive,
         companies_count: companiesCount,
         invoices_count: invoicesCount,
