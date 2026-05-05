@@ -153,6 +153,111 @@ function httpPost(url, data) {
   });
 }
 
+// ─── HeartbeatSender ─────────────────────────────────────────
+class HeartbeatSender {
+  constructor() {
+    this.interval = null;
+    this.INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+  }
+
+  start() {
+    if (this.interval) return;
+    // Send first heartbeat after 30 seconds (let services boot)
+    setTimeout(() => this.send(), 30000);
+    this.interval = setInterval(() => this.send(), this.INTERVAL_MS);
+    console.log('[Heartbeat] Started — interval 5 min');
+  }
+
+  stop() {
+    if (this.interval) { clearInterval(this.interval); this.interval = null; }
+  }
+
+  async send() {
+    try {
+      const config = loadConfig();
+      if (!config.licenseKey) return;
+
+      const os = require('os');
+      if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+      const hardwareId = licenseGuard.getHardwareId();
+
+      // Gather system metrics
+      const cpuPercent = await this._getCpuPercent();
+      const totalMem = os.totalmem() / (1024 * 1024 * 1024);
+      const freeMem = os.freemem() / (1024 * 1024 * 1024);
+      const ramUsed = +(totalMem - freeMem).toFixed(2);
+
+      // Gather service statuses
+      const servicesStatus = {};
+      if (svcManager) {
+        try {
+          const statuses = await svcManager.getStatuses();
+          if (statuses) Object.assign(servicesStatus, statuses);
+        } catch {}
+      }
+
+      // DB size (attempt via local PostgREST or pg)
+      let dbSizeMb = 0;
+      let companiesCount = 0;
+      let invoicesCount = 0;
+      let usersActive = 0;
+      try {
+        const statsUrl = `http://localhost:${APP_PORT}/rest/v1/rpc/get_system_stats`;
+        // Only if endpoint exists
+      } catch {}
+
+      const payload = {
+        license_key: config.licenseKey,
+        hardware_id: hardwareId,
+        app_version: app.getVersion(),
+        users_active: usersActive,
+        companies_count: companiesCount,
+        invoices_count: invoicesCount,
+        db_size_mb: dbSizeMb,
+        storage_used_mb: 0,
+        cpu_percent: cpuPercent,
+        ram_used_gb: ramUsed,
+        ram_total_gb: +totalMem.toFixed(2),
+        disk_used_percent: null,
+        services_status: servicesStatus,
+        errors: [],
+      };
+
+      const result = await httpPost(`${LICENSING_URL}/license-heartbeat`, payload);
+      if (result && result.command === 'STOP') {
+        console.warn('[Heartbeat] Server says STOP — license issue');
+        if (mainWindow) mainWindow.webContents.send('license-warning', result.warning || 'License expired');
+      } else if (result && result.warning) {
+        if (mainWindow) mainWindow.webContents.send('license-warning', result.warning);
+      }
+      console.log('[Heartbeat] Sent OK —', result?.command || 'OK');
+    } catch (err) {
+      console.warn('[Heartbeat] Send failed:', err.message);
+    }
+  }
+
+  _getCpuPercent() {
+    const os = require('os');
+    return new Promise((resolve) => {
+      const cpus1 = os.cpus();
+      setTimeout(() => {
+        const cpus2 = os.cpus();
+        let totalIdle = 0, totalTick = 0;
+        for (let i = 0; i < cpus2.length; i++) {
+          const c1 = cpus1[i].times, c2 = cpus2[i].times;
+          const idle = c2.idle - c1.idle;
+          const total = (c2.user - c1.user) + (c2.nice - c1.nice) + (c2.sys - c1.sys) + (c2.irq - c1.irq) + idle;
+          totalIdle += idle;
+          totalTick += total;
+        }
+        resolve(totalTick > 0 ? +((1 - totalIdle / totalTick) * 100).toFixed(1) : 0);
+      }, 1000);
+    });
+  }
+}
+
+const heartbeatSender = new HeartbeatSender();
+
 // ─── IPC Handlers ────────────────────────────────────────────
 
 // Get app version + build date
@@ -225,6 +330,8 @@ ipcMain.handle('activate-license', async (_, licenseKey) => {
       const config = loadConfig();
       config.licenseKey = licenseKey;
       saveConfig(config);
+      // Start heartbeat monitoring
+      heartbeatSender.start();
       return { success: true, license: result.license };
     }
 
@@ -649,6 +756,17 @@ async function handleCreateLocalCompany(companyData) {
         // Start real-time sync
         backupManager.startSync();
         console.log('[TexaCore] Real-time backup started → ' + tcdbFilePath);
+
+        // Configure cloud backup sync
+        const cfg = loadConfig();
+        if (cfg.licenseKey) {
+          backupManager.configureCloudSync({
+            licensingUrl: LICENSING_URL,
+            licenseKey: cfg.licenseKey,
+            cloudIntervalMs: 6 * 60 * 60 * 1000, // every 6 hours
+          });
+          backupManager.startCloudSync();
+        }
       } catch (backupErr) {
         console.warn('[TexaCore] Backup init failed:', backupErr.message);
       }
@@ -1678,6 +1796,12 @@ app.whenReady().then(() => {
   createWindow();
   setupAutoUpdater();
 
+  // Start heartbeat if license already exists
+  const config = loadConfig();
+  if (config.licenseKey) {
+    heartbeatSender.start();
+  }
+
   // Set dock icon (macOS)
   if (process.platform === 'darwin') {
     app.dock.setIcon(path.join(__dirname, '..', 'build', 'icon.png'));
@@ -1697,9 +1821,11 @@ app.on('activate', () => {
 
 app.on('before-quit', async () => {
   app.isQuitting = true;
+  heartbeatSender.stop();
   // Final backup before quitting
   if (backupManager) {
     backupManager.stopSync();
+    backupManager.stopCloudSync();
     try {
       console.log('[TexaCore] Running final backup before quit...');
       await backupManager.backup();

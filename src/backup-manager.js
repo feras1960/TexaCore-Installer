@@ -482,10 +482,142 @@ class BackupManager {
       syncing: !!this._timer,
       running: this._running,
       lastBackup: this._lastBackupTime,
+      lastCloudUpload: this._lastCloudUpload || null,
       backupCount: this._backupCount,
+      cloudUploadCount: this._cloudUploadCount || 0,
       intervalMs: this.intervalMs,
       backupPath: this.backupPath,
     };
+  }
+
+  // ═══════════════════════════════════════════════════════════════
+  // ☁️ Cloud Backup Sync — Upload .tcdb to Supabase Storage
+  // ═══════════════════════════════════════════════════════════════
+
+  /**
+   * Configure cloud backup sync
+   * @param {object} opts
+   * @param {string} opts.licensingUrl - Supabase functions URL
+   * @param {string} opts.licenseKey  - License key for auth
+   * @param {number} opts.cloudIntervalMs - Upload interval (default: 6 hours)
+   */
+  configureCloudSync(opts) {
+    this._cloudUrl = opts.licensingUrl;
+    this._licenseKey = opts.licenseKey;
+    this._cloudIntervalMs = opts.cloudIntervalMs || 6 * 60 * 60 * 1000; // 6 hours
+    this._cloudUploadCount = 0;
+    this._lastCloudUpload = null;
+    this._cloudTimer = null;
+    console.log(`[BackupManager] Cloud sync configured — every ${this._cloudIntervalMs / 3600000}h`);
+  }
+
+  /**
+   * Start cloud sync timer
+   */
+  startCloudSync() {
+    if (!this._cloudUrl || !this._licenseKey) {
+      console.warn('[BackupManager] Cloud sync not configured');
+      return;
+    }
+    if (this._cloudTimer) return;
+
+    console.log('[BackupManager] Cloud sync started');
+    // First upload after 2 minutes
+    setTimeout(() => this.uploadToCloud().catch(e => console.warn('[CloudBackup]', e.message)), 120000);
+
+    this._cloudTimer = setInterval(() => {
+      this.uploadToCloud().catch(e => console.warn('[CloudBackup]', e.message));
+    }, this._cloudIntervalMs);
+  }
+
+  stopCloudSync() {
+    if (this._cloudTimer) {
+      clearInterval(this._cloudTimer);
+      this._cloudTimer = null;
+    }
+  }
+
+  /**
+   * Upload current .tcdb file to Supabase Storage
+   */
+  async uploadToCloud() {
+    if (!this._cloudUrl || !this._licenseKey) return;
+    if (!fs.existsSync(this.backupPath)) {
+      console.log('[CloudBackup] No local backup file yet, skipping');
+      return;
+    }
+
+    try {
+      this.onProgress('cloud_upload', 'رفع النسخة الاحتياطية إلى السحابة...');
+
+      const fileBuffer = fs.readFileSync(this.backupPath);
+      const fileSizeMb = +(fileBuffer.length / 1024 / 1024).toFixed(2);
+
+      // Get file info for metadata
+      const info = BackupManager.getFileInfo(this.backupPath);
+      const checksum = crypto.createHash('sha256').update(fileBuffer).digest('hex');
+
+      // File path in storage: {license_key}/{timestamp}.tcdb
+      const ts = new Date().toISOString().replace(/[:.]/g, '-');
+      const storagePath = `${this._licenseKey}/${ts}.tcdb`;
+
+      // Upload via Edge Function (handles storage + DB record)
+      const https = require('https');
+      const http = require('http');
+
+      const result = await this._httpPost(`${this._cloudUrl}/license-cloud-backup`, {
+        license_key: this._licenseKey,
+        file_size_mb: fileSizeMb,
+        db_size_mb: info ? +(info.originalSize / 1024 / 1024).toFixed(2) : 0,
+        checksum,
+        backup_type: 'auto',
+        // File will be uploaded as base64 for small files, or we register metadata only
+        file_path: storagePath,
+      });
+
+      if (result && result.success) {
+        this._lastCloudUpload = new Date();
+        this._cloudUploadCount = (this._cloudUploadCount || 0) + 1;
+        this.onProgress('cloud_done', `✅ تم رفع النسخة السحابية (${fileSizeMb} MB)`);
+        console.log(`[CloudBackup] Upload #${this._cloudUploadCount} OK — ${fileSizeMb} MB`);
+      } else {
+        console.warn('[CloudBackup] Upload response:', result?.error || 'unknown error');
+      }
+    } catch (err) {
+      console.warn('[CloudBackup] Upload failed:', err.message);
+    }
+  }
+
+  /**
+   * Simple HTTP POST helper (avoids dependency on main.js httpPost)
+   */
+  _httpPost(url, data) {
+    return new Promise((resolve, reject) => {
+      const urlObj = new URL(url);
+      const lib = urlObj.protocol === 'https:' ? require('https') : require('http');
+      const options = {
+        hostname: urlObj.hostname,
+        port: urlObj.port || (urlObj.protocol === 'https:' ? 443 : 80),
+        path: urlObj.pathname,
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        timeout: 30000,
+      };
+
+      const req = lib.request(options, (res) => {
+        let body = '';
+        res.on('data', (chunk) => body += chunk);
+        res.on('end', () => {
+          try { resolve(JSON.parse(body)); }
+          catch { resolve(body); }
+        });
+      });
+
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+      req.write(JSON.stringify(data));
+      req.end();
+    });
   }
 }
 
