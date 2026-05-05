@@ -1186,10 +1186,10 @@ const httpServer = http.createServer(async (req, res) => {
 
           await pgClient.query('ALTER TABLE public.companies DISABLE TRIGGER ALL');
           await pgClient.query(`
-            INSERT INTO public.companies (id, tenant_id, name, name_en, default_currency)
-            VALUES ($1, $2, $3, $4, $5)
+            INSERT INTO public.companies (id, tenant_id, code, name, name_en, default_currency)
+            VALUES ($1, $2, $3, $4, $5, $6)
             ON CONFLICT DO NOTHING
-          `, [companyId, tenantId, rsfCompanyName, rsfCompanyName, baseCurrCode]);
+          `, [companyId, tenantId, `rsf_${tsCode}`, rsfCompanyName, rsfCompanyName, baseCurrCode]);
           await pgClient.query('ALTER TABLE public.companies ENABLE TRIGGER ALL');
 
           // Create accounting settings — company_accounting_settings is a VIEW on companies.accounting_settings (jsonb)
@@ -1209,8 +1209,16 @@ const httpServer = http.createServer(async (req, res) => {
           `, [JSON.stringify(accountingSettings), companyId]);
         }
         
+        // تنظيف كاش الملفات لضمان استخدام أحدث نسخة عند كل استيراد
+        delete require.cache[require.resolve('./rsf-reader')];
+        delete require.cache[require.resolve('./rsf-mapper')];
+        const { RsfReader: FreshRSF } = require('./rsf-reader');
         const { RsfMapper } = require('./rsf-mapper');
-        const mapper = new RsfMapper(reader, tenantId, companyId, null);
+        
+        // إعادة فتح الملف بالنسخة المحدّثة من القارئ
+        const freshReader = new FreshRSF(rsfPath);
+        await freshReader.open();
+        const mapper = new RsfMapper(freshReader, tenantId, companyId, null);
 
         // Build gotrueRequest wrapper for user creation
         const serviceRoleKey = ServiceManager.SERVICE_ROLE_KEY;
@@ -1356,6 +1364,7 @@ const httpServer = http.createServer(async (req, res) => {
         }
 
         reader.close();
+        try { freshReader.close(); } catch {}
         await pgClient.end();
 
         // Cleanup temp file

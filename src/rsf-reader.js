@@ -212,6 +212,37 @@ class RsfReader {
     return settings;
   }
 
+  /**
+   * استخراج أسماء المستودعات من إعدادات الرشيد
+   * الرشيد يخزنها كـ StockName_0, StockName_1 ... أو Stock_1, Stock_2 ...
+   * @returns {Object} رقم المستودع (1-based) → اسم المستودع
+   */
+  getWarehouseNames() {
+    const settings = this.getSettings();
+    const names = {};
+
+    // Pattern 1: StockName_X (0-based index)
+    for (const [key, val] of Object.entries(settings)) {
+      const m = key.match(/^StockName_?(\d+)$/i);
+      if (m && val && String(val).trim()) {
+        const num = parseInt(m[1]) + 1; // convert 0-based to 1-based
+        names[num] = String(val).trim();
+      }
+    }
+
+    // Pattern 2: Stock_X or Store_X (1-based)
+    if (Object.keys(names).length === 0) {
+      for (const [key, val] of Object.entries(settings)) {
+        const m = key.match(/^(?:Stock|Store|Makhzan)_?(\d+)$/i);
+        if (m && val && String(val).trim()) {
+          names[parseInt(m[1])] = String(val).trim();
+        }
+      }
+    }
+
+    return names;
+  }
+
   // ═══════════════════════════════════════════════════════
   // 3. شجرة الحسابات
   // ═══════════════════════════════════════════════════════
@@ -430,20 +461,41 @@ class RsfReader {
 
   getMaterials() {
     const rows = this._readTable('MAT');
-    return rows.map(row => ({
-      code: String(row.Num || row.Code || '').trim(),
-      name: String(row.Name || row.NAME || '').trim(),
-      nameAr: String(row.Name2 || row.Name || '').trim(),
-      unit: String(row.Unit || '').trim(),
-      buyPrice: parseFloat(row.BayPrice || row.BuyPrice) || 0,
-      sellPrice: parseFloat(row.LastPrice || row.SellPrice) || 0,
-      minPrice: parseFloat(row.MinPrice) || 0,
-      balance: parseFloat(row.Balance || row.Bal) || 0,
-      isSub: row.IsSub === 1 || row.IsSub === true, // مجموعة
-      ref: String(row.Ref || '').trim(),
-      barcode: String(row.Barcode || '').trim(),
-      notes: String(row.Notes || '').trim(),
-    }));
+    return rows.map(row => {
+      // استخراج أرصدة المستودعات: Bal_0, Bal_1, ... أو Balance1, Balance2, ...
+      const warehouseBalances = {};
+      for (const [key, val] of Object.entries(row)) {
+        // Pattern: Bal_X (0-based) → warehouse X+1
+        let m = key.match(/^Bal_(\d+)$/i);
+        if (m) {
+          const qty = parseFloat(val) || 0;
+          if (qty !== 0) warehouseBalances[parseInt(m[1]) + 1] = qty;
+          continue;
+        }
+        // Pattern: Balance_X or BalanceX (1-based)
+        m = key.match(/^Balance_?(\d+)$/i);
+        if (m) {
+          const qty = parseFloat(val) || 0;
+          if (qty !== 0) warehouseBalances[parseInt(m[1])] = qty;
+        }
+      }
+
+      return {
+        code: String(row.Num || row.Code || '').trim(),
+        name: String(row.Name || row.NAME || '').trim(),
+        nameAr: String(row.Name2 || row.Name || '').trim(),
+        unit: String(row.Unit || '').trim(),
+        buyPrice: parseFloat(row.BayPrice || row.BuyPrice) || 0,
+        sellPrice: parseFloat(row.LastPrice || row.SellPrice) || 0,
+        minPrice: parseFloat(row.MinPrice) || 0,
+        balance: parseFloat(row.Balance || row.Bal) || 0,
+        isSub: row.IsSub === 1 || row.IsSub === true,
+        ref: String(row.Ref || '').trim(),
+        barcode: String(row.Barcode || '').trim(),
+        notes: String(row.Notes || '').trim(),
+        warehouseBalances, // { warehouseNum: quantity }
+      };
+    });
   }
 
   // ═══════════════════════════════════════════════════════

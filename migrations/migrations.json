@@ -1,18 +1,867 @@
 {
-  "version": "2.0.0",
-  "description": "TexaCore ERP — Full production schema + seed data",
+  "version": "2026.05.04",
+  "generated": "2026-05-04T18:21:12.260Z",
+  "totalFiles": 172,
   "migrations": [
     {
       "order": 1,
-      "name": "00001_full_schema",
-      "file": "00001_full_schema.sql",
-      "description": "Complete production schema: 329 tables, 458 functions, 335 triggers, 977 indexes"
+      "file": "00001_initial_schema.sql",
+      "name": "00001_initial_schema"
     },
     {
       "order": 2,
-      "name": "00002_seed_data",
-      "file": "00002_seed_data.sql",
-      "description": "Essential seed data: account_types, system_modules, roles, currencies, countries, etc."
+      "file": "00002_add_tenant_system.sql",
+      "name": "00002_add_tenant_system"
+    },
+    {
+      "order": 3,
+      "file": "00003_update_existing_tables.sql",
+      "name": "00003_update_existing_tables"
+    },
+    {
+      "order": 4,
+      "file": "00004_add_accounting_tables.sql",
+      "name": "00004_add_accounting_tables"
+    },
+    {
+      "order": 5,
+      "file": "00005_migrate_accounts_to_chart_of_accounts.sql",
+      "name": "00005_migrate_accounts_to_chart_of_accounts"
+    },
+    {
+      "order": 6,
+      "file": "00006_add_core_modules.sql",
+      "name": "00006_add_core_modules"
+    },
+    {
+      "order": 7,
+      "file": "00007_add_inventory_and_products.sql",
+      "name": "00007_add_inventory_and_products"
+    },
+    {
+      "order": 8,
+      "file": "00008_add_sales_and_purchases.sql",
+      "name": "00008_add_sales_and_purchases"
+    },
+    {
+      "order": 9,
+      "file": "00009_add_fabric_module.sql",
+      "name": "00009_add_fabric_module"
+    },
+    {
+      "order": 10,
+      "file": "00010_add_exchange_module.sql",
+      "name": "00010_add_exchange_module"
+    },
+    {
+      "order": 11,
+      "file": "00011_add_functions_and_triggers.sql",
+      "name": "00011_add_functions_and_triggers"
+    },
+    {
+      "order": 12,
+      "file": "00011_add_marker_color.sql",
+      "name": "00011_add_marker_color"
+    },
+    {
+      "order": 13,
+      "file": "00012_accounting_infrastructure.sql",
+      "name": "00012_accounting_infrastructure"
+    },
+    {
+      "order": 14,
+      "file": "00013_invoice_accounting_triggers.sql",
+      "name": "00013_invoice_accounting_triggers"
+    },
+    {
+      "order": 15,
+      "file": "00014_financial_reports.sql",
+      "name": "00014_financial_reports"
+    },
+    {
+      "order": 16,
+      "file": "00015_recurring_entries.sql",
+      "name": "00015_recurring_entries"
+    },
+    {
+      "order": 17,
+      "file": "00016_employee_incentives.sql",
+      "name": "00016_employee_incentives"
+    },
+    {
+      "order": 18,
+      "file": "00017_custom_statuses.sql",
+      "name": "00017_custom_statuses"
+    },
+    {
+      "order": 19,
+      "file": "00018_documents_and_subscriptions.sql",
+      "name": "00018_documents_and_subscriptions"
+    },
+    {
+      "order": 20,
+      "file": "00019_database_verification.sql",
+      "name": "00019_database_verification"
+    },
+    {
+      "order": 21,
+      "file": "00020_backend_core_functions.sql",
+      "name": "00020_backend_core_functions"
+    },
+    {
+      "order": 22,
+      "file": "00021_tenant_isolation_test.sql",
+      "name": "00021_tenant_isolation_test"
+    },
+    {
+      "order": 23,
+      "file": "00022_data_import_system.sql",
+      "name": "00022_data_import_system"
+    },
+    {
+      "order": 24,
+      "file": "00023_add_currency_index.sql",
+      "name": "00023_add_currency_index"
+    },
+    {
+      "order": 25,
+      "file": "20260131_seed_journal_entries.sql",
+      "name": "20260131_seed_journal_entries"
+    },
+    {
+      "order": 26,
+      "file": "20260202_add_materials_columns.sql",
+      "name": "20260202_add_materials_columns"
+    },
+    {
+      "order": 27,
+      "file": "20260202_warehouse_enhancements.sql",
+      "name": "20260202_warehouse_enhancements"
+    },
+    {
+      "order": 28,
+      "file": "20260203_stock_counts_and_samples.sql",
+      "name": "20260203_stock_counts_and_samples"
+    },
+    {
+      "order": 29,
+      "file": "20260204_edit_fiscal_year_management.sql",
+      "name": "20260204_edit_fiscal_year_management"
+    },
+    {
+      "order": 30,
+      "file": "20260205_complete_rbac_system.sql",
+      "name": "20260205_complete_rbac_system"
+    },
+    {
+      "order": 31,
+      "file": "20260206_add_visible_modules_to_roles.sql",
+      "name": "20260206_add_visible_modules_to_roles"
+    },
+    {
+      "order": 32,
+      "file": "20260206_assign_super_admin.sql",
+      "name": "20260206_assign_super_admin"
+    },
+    {
+      "order": 33,
+      "file": "20260206_company_isolation.sql",
+      "name": "20260206_company_isolation"
+    },
+    {
+      "order": 34,
+      "file": "20260206_complete_rbac_setup.sql",
+      "name": "20260206_complete_rbac_setup"
+    },
+    {
+      "order": 35,
+      "file": "20260206_emergency_rls_fix.sql",
+      "name": "20260206_emergency_rls_fix"
+    },
+    {
+      "order": 36,
+      "file": "20260206_fix_accounting_rls.sql",
+      "name": "20260206_fix_accounting_rls"
+    },
+    {
+      "order": 37,
+      "file": "20260206_fix_all_tables_rls.sql",
+      "name": "20260206_fix_all_tables_rls"
+    },
+    {
+      "order": 38,
+      "file": "20260206_fix_mfa_rbac_functions.sql",
+      "name": "20260206_fix_mfa_rbac_functions"
+    },
+    {
+      "order": 39,
+      "file": "20260206_fix_policy_roles.sql",
+      "name": "20260206_fix_policy_roles"
+    },
+    {
+      "order": 40,
+      "file": "20260206_fix_rbac_relationships.sql",
+      "name": "20260206_fix_rbac_relationships"
+    },
+    {
+      "order": 41,
+      "file": "20260206_fix_recursion_policies.sql",
+      "name": "20260206_fix_recursion_policies"
+    },
+    {
+      "order": 42,
+      "file": "20260206_fix_recursion_v2.sql",
+      "name": "20260206_fix_recursion_v2"
+    },
+    {
+      "order": 43,
+      "file": "20260206_fix_rls_policies_critical.sql",
+      "name": "20260206_fix_rls_policies_critical"
+    },
+    {
+      "order": 44,
+      "file": "20260206_fix_user_profiles_is_active.sql",
+      "name": "20260206_fix_user_profiles_is_active"
+    },
+    {
+      "order": 45,
+      "file": "20260206_master_rls_fix.sql",
+      "name": "20260206_master_rls_fix"
+    },
+    {
+      "order": 46,
+      "file": "20260206_rbac_permissions_system_data.sql",
+      "name": "20260206_rbac_permissions_system_data"
+    },
+    {
+      "order": 47,
+      "file": "20260206_rbac_schema_fixes.sql",
+      "name": "20260206_rbac_schema_fixes"
+    },
+    {
+      "order": 48,
+      "file": "20260206_targeted_rls_fix.sql",
+      "name": "20260206_targeted_rls_fix"
+    },
+    {
+      "order": 49,
+      "file": "20260206_user_table_preferences.sql",
+      "name": "20260206_user_table_preferences"
+    },
+    {
+      "order": 50,
+      "file": "20260211_add_expenses_attachments_columns.sql",
+      "name": "20260211_add_expenses_attachments_columns"
+    },
+    {
+      "order": 51,
+      "file": "20260211_add_salesperson_trade_fields.sql",
+      "name": "20260211_add_salesperson_trade_fields"
+    },
+    {
+      "order": 52,
+      "file": "20260211_company_integrations.sql",
+      "name": "20260211_company_integrations"
+    },
+    {
+      "order": 53,
+      "file": "20260211_confirmation_workflow.sql",
+      "name": "20260211_confirmation_workflow"
+    },
+    {
+      "order": 54,
+      "file": "20260211_customer_shipping.sql",
+      "name": "20260211_customer_shipping"
+    },
+    {
+      "order": 55,
+      "file": "20260211_document_attachments_storage.sql",
+      "name": "20260211_document_attachments_storage"
+    },
+    {
+      "order": 56,
+      "file": "20260211_payment_schedule_installments.sql",
+      "name": "20260211_payment_schedule_installments"
+    },
+    {
+      "order": 57,
+      "file": "20260211_protect_base_currency.sql",
+      "name": "20260211_protect_base_currency"
+    },
+    {
+      "order": 58,
+      "file": "20260211_test_inventory_data.sql",
+      "name": "20260211_test_inventory_data"
+    },
+    {
+      "order": 59,
+      "file": "20260211_transit_reservations.sql",
+      "name": "20260211_transit_reservations"
+    },
+    {
+      "order": 60,
+      "file": "20260212_container_columns.sql",
+      "name": "20260212_container_columns"
+    },
+    {
+      "order": 61,
+      "file": "20260212_fix_branches_tenant_id.sql",
+      "name": "20260212_fix_branches_tenant_id"
+    },
+    {
+      "order": 62,
+      "file": "20260212_posting_workflow.sql",
+      "name": "20260212_posting_workflow"
+    },
+    {
+      "order": 63,
+      "file": "20260213_fix_inventory_relationships.sql",
+      "name": "20260213_fix_inventory_relationships"
+    },
+    {
+      "order": 64,
+      "file": "20260213_fix_material_stats_rpc.sql",
+      "name": "20260213_fix_material_stats_rpc"
+    },
+    {
+      "order": 65,
+      "file": "20260214_add_draft_data_column.sql",
+      "name": "20260214_add_draft_data_column"
+    },
+    {
+      "order": 66,
+      "file": "20260214_add_posting_default_accounts.sql",
+      "name": "20260214_add_posting_default_accounts"
+    },
+    {
+      "order": 67,
+      "file": "20260214_complete_default_accounts.sql",
+      "name": "20260214_complete_default_accounts"
+    },
+    {
+      "order": 68,
+      "file": "20260214_create_inventory_stock_fixed.sql",
+      "name": "20260214_create_inventory_stock_fixed"
+    },
+    {
+      "order": 69,
+      "file": "20260214_disable_purchase_trigger.sql",
+      "name": "20260214_disable_purchase_trigger"
+    },
+    {
+      "order": 70,
+      "file": "20260214_dynamic_status_system.sql",
+      "name": "20260214_dynamic_status_system"
+    },
+    {
+      "order": 71,
+      "file": "20260214_fix_inventory_stock_fk.sql",
+      "name": "20260214_fix_inventory_stock_fk"
+    },
+    {
+      "order": 72,
+      "file": "20260214_fix_purchase_rls.sql",
+      "name": "20260214_fix_purchase_rls"
+    },
+    {
+      "order": 73,
+      "file": "20260214_infrastructure_improvements_8steps.sql",
+      "name": "20260214_infrastructure_improvements_8steps"
+    },
+    {
+      "order": 74,
+      "file": "20260214_master_fix_schema_rls.sql",
+      "name": "20260214_master_fix_schema_rls"
+    },
+    {
+      "order": 75,
+      "file": "20260214_master_fix_schema_rls_corrected.sql",
+      "name": "20260214_master_fix_schema_rls_corrected"
+    },
+    {
+      "order": 76,
+      "file": "20260214_master_fix_schema_rls_final.sql",
+      "name": "20260214_master_fix_schema_rls_final"
+    },
+    {
+      "order": 77,
+      "file": "20260214_unified_document_lifecycle.sql",
+      "name": "20260214_unified_document_lifecycle"
+    },
+    {
+      "order": 78,
+      "file": "20260215_archive_legacy_tables.sql",
+      "name": "20260215_archive_legacy_tables"
+    },
+    {
+      "order": 79,
+      "file": "20260215_phase1_unified_transactions.sql",
+      "name": "20260215_phase1_unified_transactions"
+    },
+    {
+      "order": 80,
+      "file": "20260215_phase1b_smart_additions.sql",
+      "name": "20260215_phase1b_smart_additions"
+    },
+    {
+      "order": 81,
+      "file": "20260215_phase1c_receipt_settings.sql",
+      "name": "20260215_phase1c_receipt_settings"
+    },
+    {
+      "order": 82,
+      "file": "20260216_add_container_to_purchase_transactions.sql",
+      "name": "20260216_add_container_to_purchase_transactions"
+    },
+    {
+      "order": 83,
+      "file": "20260216_add_material_tax_rate.sql",
+      "name": "20260216_add_material_tax_rate"
+    },
+    {
+      "order": 84,
+      "file": "20260216_containers_unification.sql",
+      "name": "20260216_containers_unification"
+    },
+    {
+      "order": 85,
+      "file": "20260217_02_add_actual_expense_columns.sql",
+      "name": "20260217_02_add_actual_expense_columns"
+    },
+    {
+      "order": 86,
+      "file": "20260217_03_fix_expense_account_fk.sql",
+      "name": "20260217_03_fix_expense_account_fk"
+    },
+    {
+      "order": 87,
+      "file": "20260217_fix_container_link_on_transactions.sql",
+      "name": "20260217_fix_container_link_on_transactions"
+    },
+    {
+      "order": 88,
+      "file": "20260217_v4_container_account_cleanup.sql",
+      "name": "20260217_v4_container_account_cleanup"
+    },
+    {
+      "order": 89,
+      "file": "20260217_v4_container_auto_account.sql",
+      "name": "20260217_v4_container_auto_account"
+    },
+    {
+      "order": 90,
+      "file": "20260218_direct_stock_update.sql",
+      "name": "20260218_direct_stock_update"
+    },
+    {
+      "order": 91,
+      "file": "20260218_edit_history_activity_log.sql",
+      "name": "20260218_edit_history_activity_log"
+    },
+    {
+      "order": 92,
+      "file": "20260218_invoice_notification_triggers.sql",
+      "name": "20260218_invoice_notification_triggers"
+    },
+    {
+      "order": 93,
+      "file": "20260218_notifications_system.sql",
+      "name": "20260218_notifications_system"
+    },
+    {
+      "order": 94,
+      "file": "20260218_rbac_role_levels_fix.sql",
+      "name": "20260218_rbac_role_levels_fix"
+    },
+    {
+      "order": 95,
+      "file": "20260218_unified_attachments.sql",
+      "name": "20260218_unified_attachments"
+    },
+    {
+      "order": 96,
+      "file": "20260219_enable_realtime.sql",
+      "name": "20260219_enable_realtime"
+    },
+    {
+      "order": 97,
+      "file": "20260219_receipt_tracking_columns.sql",
+      "name": "20260219_receipt_tracking_columns"
+    },
+    {
+      "order": 98,
+      "file": "20260219_special_permissions.sql",
+      "name": "20260219_special_permissions"
+    },
+    {
+      "order": 99,
+      "file": "20260220_add_variance_fields_to_purchase_receipts.sql",
+      "name": "20260220_add_variance_fields_to_purchase_receipts"
+    },
+    {
+      "order": 100,
+      "file": "20260220_container_close_lifecycle.sql",
+      "name": "20260220_container_close_lifecycle"
+    },
+    {
+      "order": 101,
+      "file": "20260222_add_tax_to_container_items.sql",
+      "name": "20260222_add_tax_to_container_items"
+    },
+    {
+      "order": 102,
+      "file": "20260222_fix_account_balances.sql",
+      "name": "20260222_fix_account_balances"
+    },
+    {
+      "order": 103,
+      "file": "20260222_universal_variant_engine.sql",
+      "name": "20260222_universal_variant_engine"
+    },
+    {
+      "order": 104,
+      "file": "20260223_print_engine.sql",
+      "name": "20260223_print_engine"
+    },
+    {
+      "order": 105,
+      "file": "20260224_add_delivery_tracking.sql",
+      "name": "20260224_add_delivery_tracking"
+    },
+    {
+      "order": 106,
+      "file": "20260225_delivery_workflow_phase1.sql",
+      "name": "20260225_delivery_workflow_phase1"
+    },
+    {
+      "order": 107,
+      "file": "20260225_drivers_table.sql",
+      "name": "20260225_drivers_table"
+    },
+    {
+      "order": 108,
+      "file": "20260226_fix_nexrev_and_v5_defaults.sql",
+      "name": "20260226_fix_nexrev_and_v5_defaults"
+    },
+    {
+      "order": 109,
+      "file": "20260226_v5_triggers_update.sql",
+      "name": "20260226_v5_triggers_update"
+    },
+    {
+      "order": 110,
+      "file": "20260228_employee_sub_accounts.sql",
+      "name": "20260228_employee_sub_accounts"
+    },
+    {
+      "order": 111,
+      "file": "20260301_fix_post_journal_entry.sql",
+      "name": "20260301_fix_post_journal_entry"
+    },
+    {
+      "order": 112,
+      "file": "20260301_partners_module.sql",
+      "name": "20260301_partners_module"
+    },
+    {
+      "order": 113,
+      "file": "20260301_website_manager.sql",
+      "name": "20260301_website_manager"
+    },
+    {
+      "order": 114,
+      "file": "20260302_consolidate_pages.sql",
+      "name": "20260302_consolidate_pages"
+    },
+    {
+      "order": 115,
+      "file": "20260302_fix_store_currency.sql",
+      "name": "20260302_fix_store_currency"
+    },
+    {
+      "order": 116,
+      "file": "20260304_add_current_stock.sql",
+      "name": "20260304_add_current_stock"
+    },
+    {
+      "order": 117,
+      "file": "20260305_transfer_delivery_columns.sql",
+      "name": "20260305_transfer_delivery_columns"
+    },
+    {
+      "order": 118,
+      "file": "20260305_transfer_nullable_warehouses.sql",
+      "name": "20260305_transfer_nullable_warehouses"
+    },
+    {
+      "order": 119,
+      "file": "20260306_transfer_notifications.sql",
+      "name": "20260306_transfer_notifications"
+    },
+    {
+      "order": 120,
+      "file": "20260306_transfer_shipping_columns.sql",
+      "name": "20260306_transfer_shipping_columns"
+    },
+    {
+      "order": 121,
+      "file": "20260306_warehouse_keepers.sql",
+      "name": "20260306_warehouse_keepers"
+    },
+    {
+      "order": 122,
+      "file": "20260307000001_ai_readonly_query.sql",
+      "name": "20260307000001_ai_readonly_query"
+    },
+    {
+      "order": 123,
+      "file": "20260307_notification_preferences.sql",
+      "name": "20260307_notification_preferences"
+    },
+    {
+      "order": 124,
+      "file": "20260307_telegram_integration_tables.sql",
+      "name": "20260307_telegram_integration_tables"
+    },
+    {
+      "order": 125,
+      "file": "20260308_add_missing_roles.sql",
+      "name": "20260308_add_missing_roles"
+    },
+    {
+      "order": 126,
+      "file": "20260308_user_profile_settings.sql",
+      "name": "20260308_user_profile_settings"
+    },
+    {
+      "order": 127,
+      "file": "20260311_chart_balances_rpc.sql",
+      "name": "20260311_chart_balances_rpc"
+    },
+    {
+      "order": 128,
+      "file": "20260311_chart_currency_v6.sql",
+      "name": "20260311_chart_currency_v6"
+    },
+    {
+      "order": 129,
+      "file": "20260311_cleanup_old_chart_functions.sql",
+      "name": "20260311_cleanup_old_chart_functions"
+    },
+    {
+      "order": 130,
+      "file": "20260311_unified_accounting_engine.sql",
+      "name": "20260311_unified_accounting_engine"
+    },
+    {
+      "order": 131,
+      "file": "20260318_chart_v7_restructure.sql",
+      "name": "20260318_chart_v7_restructure"
+    },
+    {
+      "order": 132,
+      "file": "20260318_exchange_module_phase1.sql",
+      "name": "20260318_exchange_module_phase1"
+    },
+    {
+      "order": 133,
+      "file": "20260318_smart_roll_numbering.sql",
+      "name": "20260318_smart_roll_numbering"
+    },
+    {
+      "order": 134,
+      "file": "20260319130000_remittance_enhanced_fields.sql",
+      "name": "20260319130000_remittance_enhanced_fields"
+    },
+    {
+      "order": 135,
+      "file": "20260319134000_remittance_sync_schema.sql",
+      "name": "20260319134000_remittance_sync_schema"
+    },
+    {
+      "order": 136,
+      "file": "20260319_entity_documents.sql",
+      "name": "20260319_entity_documents"
+    },
+    {
+      "order": 137,
+      "file": "20260319_fix_exchange_customer_trigger.sql",
+      "name": "20260319_fix_exchange_customer_trigger"
+    },
+    {
+      "order": 138,
+      "file": "20260319_remittance_v2_columns.sql",
+      "name": "20260319_remittance_v2_columns"
+    },
+    {
+      "order": 139,
+      "file": "20260320_remittance_draft_status.sql",
+      "name": "20260320_remittance_draft_status"
+    },
+    {
+      "order": 140,
+      "file": "20260321_customer_phones_compliance.sql",
+      "name": "20260321_customer_phones_compliance"
+    },
+    {
+      "order": 141,
+      "file": "20260321_exchange_settings_notifications.sql",
+      "name": "20260321_exchange_settings_notifications"
+    },
+    {
+      "order": 142,
+      "file": "20260321_remittance_execution_fields.sql",
+      "name": "20260321_remittance_execution_fields"
+    },
+    {
+      "order": 143,
+      "file": "20260322_company_announcements_kpis.sql",
+      "name": "20260322_company_announcements_kpis"
+    },
+    {
+      "order": 144,
+      "file": "20260322_platform_announcements.sql",
+      "name": "20260322_platform_announcements"
+    },
+    {
+      "order": 145,
+      "file": "20260327_nexa_intelligence.sql",
+      "name": "20260327_nexa_intelligence"
+    },
+    {
+      "order": 146,
+      "file": "20260329_get_account_balances_bulk.sql",
+      "name": "20260329_get_account_balances_bulk"
+    },
+    {
+      "order": 147,
+      "file": "20260331_fix_rpc_currency_detection.sql",
+      "name": "20260331_fix_rpc_currency_detection"
+    },
+    {
+      "order": 148,
+      "file": "20260331_fix_single_account_rpc.sql",
+      "name": "20260331_fix_single_account_rpc"
+    },
+    {
+      "order": 149,
+      "file": "20260401_rls_phase1_critical_fixes.sql",
+      "name": "20260401_rls_phase1_critical_fixes"
+    },
+    {
+      "order": 150,
+      "file": "20260401_rls_phase2_company_isolation.sql",
+      "name": "20260401_rls_phase2_company_isolation"
+    },
+    {
+      "order": 151,
+      "file": "20260401_rls_phase3_granular_policies.sql",
+      "name": "20260401_rls_phase3_granular_policies"
+    },
+    {
+      "order": 152,
+      "file": "20260401_rls_phase4_store_cleanup.sql",
+      "name": "20260401_rls_phase4_store_cleanup"
+    },
+    {
+      "order": 153,
+      "file": "20260418100000_update_chart_functions.sql",
+      "name": "20260418100000_update_chart_functions"
+    },
+    {
+      "order": 154,
+      "file": "20260419000000_dashboard_kpis_rpc.sql",
+      "name": "20260419000000_dashboard_kpis_rpc"
+    },
+    {
+      "order": 155,
+      "file": "20260419000001_dashboard_full_rpcs.sql",
+      "name": "20260419000001_dashboard_full_rpcs"
+    },
+    {
+      "order": 156,
+      "file": "20260419000002_dashboard_fixes.sql",
+      "name": "20260419000002_dashboard_fixes"
+    },
+    {
+      "order": 157,
+      "file": "20260419000002_dashboard_top_customers_fix.sql",
+      "name": "20260419000002_dashboard_top_customers_fix"
+    },
+    {
+      "order": 158,
+      "file": "20260419000003_accounting_dashboard_rpc.sql",
+      "name": "20260419000003_accounting_dashboard_rpc"
+    },
+    {
+      "order": 159,
+      "file": "20260428100000_accounting_schema_stabilization.sql",
+      "name": "20260428100000_accounting_schema_stabilization"
+    },
+    {
+      "order": 160,
+      "file": "20260430085600_accounting_settings_update_trigger.sql",
+      "name": "20260430085600_accounting_settings_update_trigger"
+    },
+    {
+      "order": 161,
+      "file": "20260504_legacy_sync_triggers.sql",
+      "name": "20260504_legacy_sync_triggers"
+    },
+    {
+      "order": 162,
+      "file": "99999999_recalculate_balances_from_journal.sql",
+      "name": "99999999_recalculate_balances_from_journal"
+    },
+    {
+      "order": 163,
+      "file": "99999999_rollup_group_balances.sql",
+      "name": "99999999_rollup_group_balances"
+    },
+    {
+      "order": 164,
+      "file": "add_warehouse_multilang_names.sql",
+      "name": "add_warehouse_multilang_names"
+    },
+    {
+      "order": 165,
+      "file": "crm_ucm_module.sql",
+      "name": "crm_ucm_module"
+    },
+    {
+      "order": 166,
+      "file": "ecommerce_features.sql",
+      "name": "ecommerce_features"
+    },
+    {
+      "order": 167,
+      "file": "ecommerce_foundation.sql",
+      "name": "ecommerce_foundation"
+    },
+    {
+      "order": 168,
+      "file": "ecommerce_orders.sql",
+      "name": "ecommerce_orders"
+    },
+    {
+      "order": 169,
+      "file": "fix_document_activity_rls.sql",
+      "name": "fix_document_activity_rls"
+    },
+    {
+      "order": 170,
+      "file": "fix_recurring_entries_rls.sql",
+      "name": "fix_recurring_entries_rls"
+    },
+    {
+      "order": 171,
+      "file": "hr_module.sql",
+      "name": "hr_module"
+    },
+    {
+      "order": 172,
+      "file": "translate_coa_ru_uk.sql",
+      "name": "translate_coa_ru_uk"
     }
   ]
 }

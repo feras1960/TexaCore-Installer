@@ -137,3 +137,19 @@ dist
 # Vite logs files
 vite.config.js.timestamp-*
 vite.config.ts.timestamp-*
+
+# ═══ PostgreSQL local data ═══
+volumes/
+
+# ═══ Test/debug files ═══
+test-*.js
+verify_*.js
+debug-*.js
+*.rsf
+!Sample.rsf
+
+# ═══ Migrations (synced from main repo) ═══
+migrations/
+
+# ═══ Fix scripts (already applied) ═══
+fix-*.sql

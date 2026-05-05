@@ -1,0 +1,72 @@
+<!DOCTYPE html>
+<html lang="ar" dir="rtl">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+    
+    <!-- Favicon -->
+    <link rel="icon" type="image/svg+xml" href="/favicon.svg" />
+    <link rel="apple-touch-icon" href="/icon.svg" />
+    
+    <!-- PWA Meta Tags -->
+    <meta name="theme-color" content="#047857" />
+    <meta name="mobile-web-app-capable" content="yes" />
+    <meta name="apple-mobile-web-app-status-bar-style" content="black-translucent" />
+    <meta name="apple-mobile-web-app-title" content="TexaCore" />
+    
+    <!-- SEO Meta Tags -->
+    <meta name="description" content="TexaCore - نظام إدارة تجارة الأقمشة المتكامل | Complete Fabric Trading Management System" />
+    <meta name="keywords" content="ERP, نظام محاسبة, إدارة أقمشة, fabric trading, inventory management" />
+    <meta name="author" content="TexaCore" />
+    
+    <!-- Open Graph -->
+    <meta property="og:title" content="TexaCore ERP" />
+    <meta property="og:description" content="نظام إدارة تجارة الأقمشة المتكامل" />
+    <meta property="og:type" content="website" />
+    <meta property="og:image" content="/icon.svg" />
+    
+    <!-- Google Fonts - Arabic + European Fonts -->
+    <link rel="preconnect" href="https://fonts.googleapis.com">
+    <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+    <link href="https://fonts.googleapis.com/css2?family=Cairo:wght@400;500;600;700;800;900&family=Tajawal:wght@300;400;500;700;800&family=Inter:wght@300;400;500;600;700;800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet">
+    
+    <title>TexaCore ERP - نظام إدارة تجارة الأقمشة</title>
+    <script type="module" crossorigin src="/assets/index-V9x08Imb.js"></script>
+    <link rel="modulepreload" crossorigin href="/assets/vendor-react-jwcFVDcr.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-data-CLVn9T7b.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-ui-Du_wnCz5.js">
+    <link rel="modulepreload" crossorigin href="/assets/vendor-charts-BmzKQtJe.js">
+    <link rel="stylesheet" crossorigin href="/assets/index-xbBfKSWC.css">
+  <link rel="manifest" href="/manifest.webmanifest"><script id="vite-plugin-pwa:register-sw" src="/registerSW.js"></script></head>
+  <body>
+    <div id="root"></div>
+    <script>
+      // 🔧 Force cleanup stale Service Workers (one-time fix)
+      if ('serviceWorker' in navigator) {
+        navigator.serviceWorker.getRegistrations().then(function(registrations) {
+          registrations.forEach(function(registration) {
+            registration.unregister().then(function() {
+              console.log('[SW] Unregistered stale service worker');
+            });
+          });
+        });
+        // Clear all caches
+        if (window.caches) {
+          caches.keys().then(function(names) {
+            names.forEach(function(name) { caches.delete(name); });
+          });
+        }
+      }
+    </script>
+    <script>
+      // Runtime config (injected by deployment/Electron — optional in dev)
+      // If config.js doesn't exist, we fall back to environment variables.
+      (function() {
+        var s = document.createElement('script');
+        s.src = '/config.js';
+        s.onerror = function() { /* config.js not found — dev mode, using env vars */ };
+        document.head.appendChild(s);
+      })();
+    </script>
+  </body>
+</html>
