@@ -23,6 +23,7 @@ class RsfMapper {
     this.customerByAccountMap = {};  // رمز حساب محاسبي (161xxx) → UUID عميل
     this.supplierByAccountMap = {};  // رمز حساب محاسبي (261xxx) → UUID مورد
     this.materialMap = {};     // رمز مادة → UUID (fabric_materials)
+    this.materialNameMap = {}; // رمز مادة → اسم المادة بالعربي (للاستخدام في الفواتير)
     this.productMap = {};      // رمز مادة → UUID (products) — لربط فواتير المبيعات
     this.warehouseMap = {};    // رقم مستودع → UUID
     
@@ -58,11 +59,12 @@ class RsfMapper {
       // تعطيل الـ triggers أثناء الاستيراد بالكامل
       const importTables = [
         'sales_invoice_items', 'sales_invoices',
+        'purchase_transaction_items', 'purchase_transactions',
         'purchase_invoice_items', 'purchase_invoices',
         'inventory_movements', 'inventory_stock',
         'journal_entry_lines', 'journal_entries',
         'cash_transactions', 'cash_accounts',
-        'fabric_materials', 'products',
+        'fabric_materials', 'fabric_groups', 'products',
         'cost_centers', 'chart_of_accounts',
         'customers', 'suppliers', 'fiscal_years',
         'warehouses'
@@ -78,6 +80,10 @@ class RsfMapper {
       // 2. جلب أنواع الحسابات
       this._emit('تحضير أنواع الحسابات', 0, 1);
       await this._loadAccountTypes(pgClient);
+
+      // 2.5 مزامنة أسعار صرف العملات من الرشيد → currencies table
+      this._emit('مزامنة أسعار العملات', 0, 1);
+      await this._syncCurrenciesToDB(pgClient);
 
       // 3. شجرة الحسابات
       this._emit('استيراد شجرة الحسابات', 0, summary.counts.accounts);
@@ -164,11 +170,12 @@ class RsfMapper {
       // إعادة تفعيل الـ triggers حتى في حالة الخطأ
       const importTables = [
         'sales_invoice_items', 'sales_invoices',
+        'purchase_transaction_items', 'purchase_transactions',
         'purchase_invoice_items', 'purchase_invoices',
         'inventory_movements', 'inventory_stock',
         'journal_entry_lines', 'journal_entries',
         'cash_transactions', 'cash_accounts',
-        'fabric_materials', 'products',
+        'fabric_materials', 'fabric_groups', 'products',
         'cost_centers', 'chart_of_accounts',
         'customers', 'suppliers', 'fiscal_years',
         'warehouses'
@@ -315,12 +322,14 @@ class RsfMapper {
   async _clearDefaults(pgClient) {
     // حذف بالترتيب الصحيح (الأبناء أولاً — FK dependencies)
 
-    // 1. سطور فواتير المبيعات والمشتريات
+    // 1. سطور فواتير المبيعات والمشتريات (الجداول الموحدة + القديمة)
     try { await pgClient.query(`DELETE FROM sales_invoice_items WHERE tenant_id = $1`, [this.tenantId]); } catch {}
+    try { await pgClient.query(`DELETE FROM purchase_transaction_items WHERE transaction_id IN (SELECT id FROM purchase_transactions WHERE company_id = $1)`, [this.companyId]); } catch {}
     try { await pgClient.query(`DELETE FROM purchase_invoice_items WHERE tenant_id = $1`, [this.tenantId]); } catch {}
 
-    // 2. رؤوس الفواتير
+    // 2. رؤوس الفواتير (الجداول الموحدة + القديمة)
     try { await pgClient.query(`DELETE FROM sales_invoices WHERE company_id = $1`, [this.companyId]); } catch {}
+    try { await pgClient.query(`DELETE FROM purchase_transactions WHERE company_id = $1`, [this.companyId]); } catch {}
     try { await pgClient.query(`DELETE FROM purchase_invoices WHERE company_id = $1`, [this.companyId]); } catch {}
 
     // 3. حركات المستودع
@@ -338,14 +347,19 @@ class RsfMapper {
     // 7. الحسابات النقدية
     await pgClient.query(`DELETE FROM cash_accounts WHERE company_id = $1`, [this.companyId]);
 
-    // 8. المواد (fabric_materials أولاً لأنها تعتمد على products)
+    // 8. المواد (fabric_materials أولاً لأنها تعتمد على products و fabric_groups)
     try { await pgClient.query(`DELETE FROM fabric_materials WHERE company_id = $1`, [this.companyId]); } catch {}
     try { await pgClient.query(`DELETE FROM products WHERE company_id = $1`, [this.companyId]); } catch {}
+    try { await pgClient.query(`DELETE FROM fabric_groups WHERE company_id = $1`, [this.companyId]); } catch {}
 
     // 9. مراكز التكلفة
     await pgClient.query(`DELETE FROM cost_centers WHERE company_id = $1`, [this.companyId]);
 
-    // 10. شجرة الحسابات (آخر شيء لأن كل شيء يعتمد عليها)
+    // 10. الموردين والعملاء (يجب حذفهم قبل شجرة الحسابات لأن payable_account_id/receivable_account_id تعتمد عليها)
+    try { await pgClient.query(`DELETE FROM suppliers WHERE company_id = $1`, [this.companyId]); } catch {}
+    try { await pgClient.query(`DELETE FROM customers WHERE company_id = $1`, [this.companyId]); } catch {}
+
+    // 11. شجرة الحسابات (آخر شيء لأن كل شيء يعتمد عليها)
     await pgClient.query(`DELETE FROM chart_of_accounts WHERE company_id = $1`, [this.companyId]);
 
     // ملاحظة: لا نحذف warehouses — قد تكون مشتركة
@@ -409,7 +423,7 @@ class RsfMapper {
       const id = uuidv4();
       const balance = acc.debit - acc.credit;
 
-      await pgClient.query(`
+      const result = await pgClient.query(`
         INSERT INTO chart_of_accounts 
         (id, tenant_id, company_id, account_code, name_ar, name_en, 
          account_type_id, parent_id, is_group, is_detail,
@@ -417,6 +431,7 @@ class RsfMapper {
          opening_balance, current_balance, is_active, is_system)
         VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,true,false)
         ON CONFLICT (tenant_id, company_id, account_code) DO NOTHING
+        RETURNING id
       `, [
         id, this.tenantId, this.companyId,
         acc.code, acc.nameAr || acc.name, acc.name,
@@ -424,10 +439,24 @@ class RsfMapper {
         flags.is_group, flags.is_detail,
         flags.is_cash_account, flags.is_bank_account,
         flags.is_receivable, flags.is_payable,
-        balance, balance
+        0, balance
       ]);
 
-      this.accountMap[acc.code] = id;
+      // إذا تم الإدخال — نستخدم الـ ID الجديد
+      // إذا تم التخطي (conflict) — نجلب الـ ID الموجود من قاعدة البيانات
+      if (result.rows.length > 0) {
+        this.accountMap[acc.code] = result.rows[0].id;
+      } else {
+        const existing = await pgClient.query(
+          `SELECT id FROM chart_of_accounts WHERE tenant_id=$1 AND company_id=$2 AND account_code=$3`,
+          [this.tenantId, this.companyId, acc.code]
+        );
+        if (existing.rows.length > 0) {
+          this.accountMap[acc.code] = existing.rows[0].id;
+        } else {
+          this.accountMap[acc.code] = id; // fallback (لا ينبغي أن يحدث)
+        }
+      }
       inserted++;
       this._emit('استيراد شجرة الحسابات', inserted, allAccounts.length);
     }
@@ -476,31 +505,37 @@ class RsfMapper {
       const code = cust.code || `CUST-${inserted + 1}`;
       
       // البحث عن حساب العميل في الشجرة
-      const accountCode = cust.accountCode || `161${code.padStart(3, '0')}`;
-      const receivableAccountId = this.accountMap[accountCode] || 
+      // code قد يكون نفسه رمز الحساب (مثل 161002) أو رقم بسيط
+      const receivableAccountId = this.accountMap[code] ||
+                                   this.accountMap[cust.accountCode] ||
+                                   this.accountMap[`161${code.padStart(3, '0')}`] ||
                                    this.accountMap['161'] || null;
 
-      await pgClient.query(`
+      const custResult = await pgClient.query(`
         INSERT INTO customers 
         (id, tenant_id, company_id, code, name_ar, name_en, 
          phone, mobile, email, address, country, city,
          tax_number, credit_limit, receivable_account_id,
-         notes, status, balance)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'active',$17)
-        ON CONFLICT (tenant_id, code) DO NOTHING
+         notes, status, balance, currency)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,'active',$17,$18)
+        ON CONFLICT (tenant_id, code) DO UPDATE SET
+          receivable_account_id = COALESCE(EXCLUDED.receivable_account_id, customers.receivable_account_id),
+          currency = EXCLUDED.currency
+        RETURNING id
       `, [
         id, this.tenantId, this.companyId,
         code, cust.nameAr || cust.name, cust.name,
         cust.phone, cust.mobile, cust.email, cust.address,
         cust.country, cust.city, cust.taxNumber,
         cust.creditLimit, receivableAccountId,
-        cust.notes, cust.balance
+        cust.notes, cust.balance, this.baseCurrencyCode || 'UAH'
       ]);
 
-      this.customerMap[code] = id;
+      const actualCustId = custResult.rows[0]?.id || id;
+      this.customerMap[code] = actualCustId;
       // ربط رمز الحساب المحاسبي أيضاً (للفواتير من البنية البديلة)
       const custAccCode = cust.accountCode || (code.startsWith('161') ? code : `161${code.padStart(3, '0')}`);
-      this.customerByAccountMap[custAccCode] = id;
+      this.customerByAccountMap[custAccCode] = actualCustId;
       inserted++;
       this._emit('استيراد العملاء', inserted, customers.length);
     }
@@ -519,30 +554,40 @@ class RsfMapper {
       const id = uuidv4();
       const code = sup.code || `SUP-${inserted + 1}`;
       
-      const accountCode = sup.accountCode || `261${code.padStart(3, '0')}`;
-      const payableAccountId = this.accountMap[accountCode] || 
+      // code قد يكون نفسه رمز الحساب (مثل 261024) أو رقم بسيط
+      const payableAccountId = this.accountMap[code] ||
+                                this.accountMap[sup.accountCode] ||
+                                this.accountMap[`261${code.padStart(3, '0')}`] ||
                                 this.accountMap['261'] || null;
+      // Debug: trace first supplier or specific supplier
+      if (code === '261020' || inserted === 0) {
+        console.log(`[Supplier ${code}] accountMap[${code}]=${this.accountMap[code] ? 'FOUND' : 'MISSING'} → payableAccountId=${payableAccountId ? 'SET' : 'NULL'}`);
+      }
 
-      await pgClient.query(`
+      const supResult = await pgClient.query(`
         INSERT INTO suppliers 
         (id, tenant_id, company_id, code, name_ar, name_en,
          phone, mobile, email, address, country, city,
-         tax_number, payable_account_id, notes, status, balance)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'active',$16)
-        ON CONFLICT (tenant_id, code) DO NOTHING
+         tax_number, payable_account_id, notes, status, balance, currency)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,'active',$16,$17)
+        ON CONFLICT (tenant_id, code) DO UPDATE SET
+          payable_account_id = EXCLUDED.payable_account_id,
+          currency = EXCLUDED.currency
+        RETURNING id
       `, [
         id, this.tenantId, this.companyId,
         code, sup.nameAr || sup.name, sup.name,
         sup.phone, sup.mobile, sup.email, sup.address,
         sup.country, sup.city, sup.taxNumber,
-        payableAccountId, sup.notes, sup.balance
+        payableAccountId, sup.notes, sup.balance, this.baseCurrencyCode || 'UAH'
       ]);
 
-      this.supplierMap[code] = id;
+      const actualSupId = supResult.rows[0]?.id || id;
+      this.supplierMap[code] = actualSupId;
       // ربط رمز الحساب المحاسبي أيضاً (للفواتير من البنية البديلة)
       // إذا كان الرمز نفسه يبدأ بـ 261 فهو رمز محاسبي بالفعل
       const supAccCode = sup.accountCode || (code.startsWith('261') ? code : `261${code.padStart(3, '0')}`);
-      this.supplierByAccountMap[supAccCode] = id;
+      this.supplierByAccountMap[supAccCode] = actualSupId;
       inserted++;
       this._emit('استيراد الموردين', inserted, suppliers.length);
     }
@@ -594,76 +639,266 @@ class RsfMapper {
     const materials = this.reader.getMaterials();
     if (!materials || materials.length === 0) return 0;
 
-    // إنشاء وحدة قياس افتراضية إذا لم تكن موجودة
+    // ═══ تصنيف المواد: مجموعات vs مواد فعلية ═══
+    // ملاحظة: الرشيد يضع IsSub=0 لكل المواد! لذلك نكتشف المجموعات بطرق متعددة:
+    //   1. إذا كان isSub=true (في حال كان مضبوطاً صراحة)
+    //   2. إذا كان كود المادة يمثل بادئة (prefix) لكود مادة أخرى → مجموعة أب
+    //   3. إذا كان طول الكود يطابق طول مجموعة مكتشفة أخرى → مجموعة فارغة (نفس المستوى)
+    const allCodes = materials.map(m => m.code).filter(c => c.length > 0);
+    
+    // خطوة 1: اكتشاف المجموعات التي لديها أبناء فعلاً
+    const parentPrefixes = new Set();
+    for (const code of allCodes) {
+      for (const other of allCodes) {
+        if (other.length > code.length && other.startsWith(code)) {
+          parentPrefixes.add(code);
+          break;
+        }
+      }
+    }
+    
+    // خطوة 2: تحديد أطوال الأكواد التي تمثل مستويات المجموعات
+    const groupCodeLengths = new Set();
+    for (const prefix of parentPrefixes) {
+      groupCodeLengths.add(prefix.length);
+    }
+    
+    const isGroupByStructure = (code) => {
+      // المادة تُعتبر مجموعة إذا:
+      // 1. هي أب فعلي لمواد أخرى (prefix match)
+      if (parentPrefixes.has(code)) return true;
+      // 2. أو طول كودها يطابق أطوال المجموعات المكتشفة (= مجموعة فارغة بنفس المستوى)
+      if (groupCodeLengths.has(code.length) && allCodes.some(c => c.length > code.length)) return true;
+      return false;
+    };
+    
+    const groups = materials.filter(m => m.isSub === true || isGroupByStructure(m.code));
+    const items = materials.filter(m => !m.isSub && !isGroupByStructure(m.code));
+
+    console.log(`[RSF] Materials breakdown: ${groups.length} groups, ${items.length} items (auto-detected by code structure)`);
+
+    // ═══ 1. إنشاء المجموعات في fabric_groups ═══
+    // ترتيب حسب طول الرمز (الآباء أولاً)
+    groups.sort((a, b) => a.code.length - b.code.length || a.code.localeCompare(b.code));
+
+    const groupMap = {}; // رمز مجموعة → UUID
+    let groupOrder = 0;
+    for (const grp of groups) {
+      const groupId = uuidv4();
+      const code = grp.code || `GRP-${groupOrder + 1}`;
+      const nameAr = grp.nameAr || grp.name || code;
+      const nameEn = grp.name || code;
+
+      // تحديد parent_id من ref أو من أول أرقام الرمز
+      let parentId = null;
+      if (grp.ref && grp.ref !== '0' && grp.ref !== '') {
+        parentId = groupMap[grp.ref] || null;
+      }
+      if (!parentId && code.length > 2) {
+        for (let len = code.length - 1; len >= 1; len--) {
+          const parentCode = code.substring(0, len);
+          if (groupMap[parentCode]) {
+            parentId = groupMap[parentCode];
+            break;
+          }
+        }
+      }
+
+      groupOrder++;
+      await pgClient.query(`
+        INSERT INTO fabric_groups
+        (id, tenant_id, company_id, code, name_ar, name_en, parent_id, display_order, is_active)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true)
+        ON CONFLICT DO NOTHING
+      `, [groupId, this.tenantId, this.companyId, code, nameAr, nameEn, parentId, groupOrder]);
+
+      groupMap[code] = groupId;
+      // أيضاً نسجل في materialMap للتوافق مع الفواتير (بعض الفواتير قد تشير لرمز مجموعة)
+      this.materialMap[code] = groupId;
+      this._emit('استيراد المجموعات', groupOrder, groups.length);
+    }
+    console.log(`[RSF] ✅ تم إنشاء ${Object.keys(groupMap).length} مجموعة مواد`);
+
+    // ═══ 2. استيراد الوحدات من RSF ═══
+    const UNIT_NAME_MAP = {
+      'متر': { code: 'MTR', nameAr: 'متر', nameEn: 'Meter', type: 'length' },
+      'م': { code: 'MTR', nameAr: 'متر', nameEn: 'Meter', type: 'length' },
+      'كغ': { code: 'KG', nameAr: 'كيلوغرام', nameEn: 'Kilogram', type: 'weight' },
+      'كيلو': { code: 'KG', nameAr: 'كيلوغرام', nameEn: 'Kilogram', type: 'weight' },
+      'طن': { code: 'TON', nameAr: 'طن', nameEn: 'Ton', type: 'weight' },
+      'قطعة': { code: 'PCS', nameAr: 'قطعة', nameEn: 'Piece', type: 'count' },
+      'حبة': { code: 'PCS', nameAr: 'قطعة', nameEn: 'Piece', type: 'count' },
+      'ثوب': { code: 'ROLL', nameAr: 'ثوب', nameEn: 'Roll', type: 'length' },
+      'رول': { code: 'ROLL', nameAr: 'رول', nameEn: 'Roll', type: 'length' },
+      'طاقة': { code: 'BOLT', nameAr: 'طاقة', nameEn: 'Bolt', type: 'length' },
+      'بالة': { code: 'BALE', nameAr: 'بالة', nameEn: 'Bale', type: 'count' },
+      'كرتون': { code: 'CTN', nameAr: 'كرتون', nameEn: 'Carton', type: 'count' },
+      'صندوق': { code: 'BOX', nameAr: 'صندوق', nameEn: 'Box', type: 'count' },
+      'لتر': { code: 'LTR', nameAr: 'لتر', nameEn: 'Liter', type: 'volume' },
+      'ياردة': { code: 'YRD', nameAr: 'ياردة', nameEn: 'Yard', type: 'length' },
+      'يارد': { code: 'YRD', nameAr: 'ياردة', nameEn: 'Yard', type: 'length' },
+      'yard': { code: 'YRD', nameAr: 'ياردة', nameEn: 'Yard', type: 'length' },
+      'meter': { code: 'MTR', nameAr: 'متر', nameEn: 'Meter', type: 'length' },
+      'kg': { code: 'KG', nameAr: 'كيلوغرام', nameEn: 'Kilogram', type: 'weight' },
+      'piece': { code: 'PCS', nameAr: 'قطعة', nameEn: 'Piece', type: 'count' },
+      'pcs': { code: 'PCS', nameAr: 'قطعة', nameEn: 'Piece', type: 'count' },
+      'roll': { code: 'ROLL', nameAr: 'رول', nameEn: 'Roll', type: 'length' },
+      'bolt': { code: 'BOLT', nameAr: 'طاقة', nameEn: 'Bolt', type: 'length' },
+      'шт': { code: 'PCS', nameAr: 'قطعة', nameEn: 'Piece', type: 'count' },
+      'м': { code: 'MTR', nameAr: 'متر', nameEn: 'Meter', type: 'length' },
+      'кг': { code: 'KG', nameAr: 'كيلوغرام', nameEn: 'Kilogram', type: 'weight' },
+      'рул': { code: 'ROLL', nameAr: 'رول', nameEn: 'Roll', type: 'length' },
+    };
+
+    this._unitMap = {};
+    const uniqueUnits = new Set();
+    for (const mat of items) {
+      const unit = (mat.unit || '').trim().toLowerCase();
+      if (unit) uniqueUnits.add(unit);
+    }
+
+    // إنشاء وحدة افتراضية (قطعة)
     let defaultUnitId;
-    const { rows: existingUnits } = await pgClient.query(
+    const { rows: existingPCS } = await pgClient.query(
       "SELECT id FROM units_of_measure WHERE tenant_id = $1 AND code = 'PCS' LIMIT 1",
       [this.tenantId]
     );
-    if (existingUnits.length > 0) {
-      defaultUnitId = existingUnits[0].id;
+    if (existingPCS.length > 0) {
+      defaultUnitId = existingPCS[0].id;
     } else {
       defaultUnitId = uuidv4();
       await pgClient.query(`
-        INSERT INTO units_of_measure (id, tenant_id, code, name_ar, name_en, symbol, is_base_unit)
-        VALUES ($1, $2, 'PCS', 'قطعة', 'Piece', 'PC', true)
-        ON CONFLICT DO NOTHING
+        INSERT INTO units_of_measure (id, tenant_id, code, name_ar, name_en, type)
+        VALUES ($1, $2, 'PCS', 'قطعة', 'Piece', 'count')
+        ON CONFLICT (tenant_id, code) DO NOTHING
       `, [defaultUnitId, this.tenantId]);
     }
+    this._unitMap['PCS'] = defaultUnitId;
 
-    // أول مستودع افتراضي
+    for (const unitRaw of uniqueUnits) {
+      const mapped = UNIT_NAME_MAP[unitRaw];
+      const code = mapped ? mapped.code : unitRaw.toUpperCase().substring(0, 10);
+      if (this._unitMap[code]) continue;
+      const { rows: existing } = await pgClient.query(
+        'SELECT id FROM units_of_measure WHERE tenant_id = $1 AND code = $2 LIMIT 1',
+        [this.tenantId, code]
+      );
+      if (existing.length > 0) {
+        this._unitMap[code] = existing[0].id;
+      } else {
+        const uid = uuidv4();
+        await pgClient.query(`
+          INSERT INTO units_of_measure (id, tenant_id, code, name_ar, name_en, type)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT (tenant_id, code) DO NOTHING
+        `, [uid, this.tenantId, code,
+          mapped ? mapped.nameAr : unitRaw,
+          mapped ? mapped.nameEn : unitRaw,
+          mapped ? mapped.type : 'count'
+        ]);
+        this._unitMap[code] = uid;
+      }
+    }
+    console.log(`[RSF] ✅ تم إنشاء ${Object.keys(this._unitMap).length} وحدة قياس`);
+
+    // ═══ 3. إدخال المواد الفعلية (items فقط) ═══
     const defaultWarehouseId = Object.values(this.warehouseMap)[0] || null;
 
     let inserted = 0;
-    for (const mat of materials) {
-      const productId = uuidv4();
+    for (const mat of items) {
       const fabricId = uuidv4();
       const sku = mat.code || `MAT-${inserted + 1}`;
-      const nameAr = mat.nameAr || mat.name || '';
-      const nameEn = mat.name || '';
+      const nameAr = mat.nameAr || mat.name || sku;
+      const nameEn = mat.name || sku;
 
-      // 1. إدخال في products
+      // تحديد المجموعة الأم: من ref أو من أول أرقام الرمز
+      let groupId = null;
+      if (mat.ref && mat.ref !== '0' && mat.ref !== '') {
+        groupId = groupMap[mat.ref] || null;
+      }
+      if (!groupId && sku.length > 2) {
+        for (let len = sku.length - 1; len >= 1; len--) {
+          const parentCode = sku.substring(0, len);
+          if (groupMap[parentCode]) {
+            groupId = groupMap[parentCode];
+            break;
+          }
+        }
+      }
+
+      // تحديد وحدة المادة
+      const unitRaw = (mat.unit || '').trim().toLowerCase();
+      const mapped = UNIT_NAME_MAP[unitRaw];
+      const unitCode = mapped ? mapped.code : (unitRaw ? unitRaw.toUpperCase().substring(0, 10) : 'PCS');
+      const unitId = this._unitMap[unitCode] || defaultUnitId;
+
+      // تحديد المستودع الافتراضي: أول مستودع فيه رصيد
+      let matDefaultWarehouse = defaultWarehouseId;
+      if (mat.warehouseBalances && Object.keys(mat.warehouseBalances).length > 0) {
+        const firstWhNum = Object.keys(mat.warehouseBalances)[0];
+        matDefaultWarehouse = this.warehouseMap[firstWhNum] || defaultWarehouseId;
+      }
+
+      // إدخال في products
+      const productId = uuidv4();
       await pgClient.query(`
         INSERT INTO products 
-        (id, tenant_id, company_id, sku, name_ar, name_en, 
-         base_unit_id, default_cost, default_price, product_type, status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11)
+        (id, tenant_id, company_id, sku, name, name_ar, name_en, 
+         base_uom, cost_price, selling_price, product_type, status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'standard','active')
         ON CONFLICT DO NOTHING
       `, [
         productId, this.tenantId, this.companyId,
-        sku, nameAr, nameEn,
-        defaultUnitId,
-        mat.buyPrice || 0,
-        mat.sellPrice || 0,
-        mat.isSub ? 'composite' : 'standard',
-        'active'
+        sku, nameEn || nameAr, nameAr, nameEn,
+        unitCode, mat.buyPrice || 0, mat.sellPrice || 0
       ]);
 
-      // 2. إدخال في fabric_materials (الجدول الذي تقرأ منه الواجهة)
+      // إدخال في fabric_materials مع group_id
       await pgClient.query(`
         INSERT INTO fabric_materials
-        (id, tenant_id, company_id, product_id, code, name_ar, name_en,
-         composition, category, unit, purchase_price, selling_price,
-         currency, notes, status, current_stock, default_warehouse_id)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17)
+        (id, tenant_id, company_id, code, name_ar, name_en,
+         composition, category, unit, primary_uom, purchase_price, selling_price,
+         currency, notes, status, current_stock, default_warehouse_id, group_id)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18)
         ON CONFLICT DO NOTHING
       `, [
         fabricId, this.tenantId, this.companyId,
-        productId, sku, nameAr, nameEn,
-        mat.unit || 'مستورد', 'mixed', mat.unit || 'piece',
+        sku, nameAr, nameEn,
+        mat.unit || '', 'mixed', mat.unit || 'piece', unitCode,
         mat.buyPrice || 0, mat.sellPrice || 0,
         this.baseCurrencyCode,
         mat.notes || '', 'active',
         mat.balance || 0,
-        defaultWarehouseId
+        matDefaultWarehouse, groupId
       ]);
 
+      // تخزين أرصدة المستودعات لاستخدامها لاحقاً في inventory_stock
+      if (mat.warehouseBalances && Object.keys(mat.warehouseBalances).length > 0) {
+        if (!this._materialStockMap) this._materialStockMap = [];
+        for (const [whNum, qty] of Object.entries(mat.warehouseBalances)) {
+          const whId = this.warehouseMap[String(whNum)];
+          if (whId && qty !== 0) {
+            this._materialStockMap.push({
+              materialId: fabricId,
+              warehouseId: whId,
+              quantity: qty
+            });
+          }
+        }
+      }
+
       this.materialMap[sku] = fabricId;
-      this.productMap[sku] = productId;  // لربط فواتير المبيعات
+      this.materialNameMap[sku] = nameAr; // حفظ اسم المادة لاستخدامه في بنود الفواتير
+      this.productMap[sku] = productId;
       inserted++;
-      this._emit('استيراد المواد', inserted, materials.length);
+      this._emit('استيراد المواد', inserted, items.length);
     }
-    return inserted;
+
+    console.log(`[RSF] ✅ تم استيراد ${Object.keys(groupMap).length} مجموعات + ${inserted} مواد`);
+    if (this._materialStockMap) {
+      console.log(`[RSF] 📦 ${this._materialStockMap.length} سجل رصيد مستودع محفوظ للإدراج`);
+    }
+    return inserted + Object.keys(groupMap).length;
   }
 
   // ═══════════════════════════════════════════════════════
@@ -728,24 +963,28 @@ class RsfMapper {
         (entry.lines[0] && entry.lines[0].description) || 
         `قيد رقم ${entry.nrs}`;
 
+      // ═══ إدخال القيد كـ draft أولاً لتجنب chk_balanced_entry ═══
       await pgClient.query(`
         INSERT INTO journal_entries 
         (id, tenant_id, company_id, entry_number, entry_date,
          fiscal_year_id, entry_type, description, currency, exchange_rate,
-         total_debit, total_credit, status, is_posted, posted_at,
+         total_debit, total_credit, status, is_posted,
          created_by, notes)
-        VALUES ($1,$2,$3,$4,$5,$6,'imported',$7,$8,$9,$10,$11,'posted',true,NOW(),$12,$13)
+        VALUES ($1,$2,$3,$4,$5,$6,'imported',$7,$8,$9,$10,$11,'draft',false,$12,$13)
         ON CONFLICT (tenant_id, entry_number) DO NOTHING
       `, [
         entryId, this.tenantId, this.companyId,
         `RSF-${entry.nrs}`, entryDate,
         this.fiscalYearId, description,
         this.baseCurrencyCode, 1,
-        totalDebit, totalCredit,
+        0, 0,
         this.userId, entry.notes
       ]);
 
-      // إدراج السطور
+      // إدراج السطور وتتبع المجاميع الفعلية
+      let actualDebit = 0, actualCredit = 0;
+      let lineNum = 0;
+
       for (let i = 0; i < entry.lines.length; i++) {
         const line = entry.lines[i];
         const accountId = this.accountMap[line.accountCode];
@@ -761,24 +1000,26 @@ class RsfMapper {
         let localDebit = 0, localCredit = 0;
         let fcDebit = 0, fcCredit = 0;
         let exchangeRate = 1;
+        // العملة التي سيتم تخزينها — قد تختلف عن currInfo.code
+        let lineCurrency = currInfo.code;
 
         if (isBaseCurrency) {
-          // العملية بالعملة المحلية — debit/credit = المبلغ المحلي مباشرة
           localDebit = line.debit > 0 ? (line.localAmount || line.debit) : 0;
           localCredit = line.credit > 0 ? (line.localAmount || line.credit) : 0;
-          // foreignAmount (MianTot) = مكافئ بالدولار إن وُجد
           if (line.foreignAmount && line.foreignAmount > 0) {
             const origAmt = line.debit || line.credit;
             if (origAmt > 0) {
               fcDebit = line.debit > 0 ? line.foreignAmount : 0;
               fcCredit = line.credit > 0 ? line.foreignAmount : 0;
-              exchangeRate = origAmt / line.foreignAmount; // UAH/USD
+              exchangeRate = origAmt / line.foreignAmount;
+              // ═══ إصلاح: إذا كان هناك مبلغ أجنبي → العملة هي العملة الأجنبية ═══
+              // currencyNum=1 (العملة المحلية) لكن foreignAmount > 0 يعني العملية بالدولار مثلاً
+              if (this.foreignCurrencyCode && this.foreignCurrencyCode !== this.baseCurrencyCode) {
+                lineCurrency = this.foreignCurrencyCode;
+              }
             }
           }
         } else {
-          // العملية بعملة أجنبية (دولار مثلاً)
-          // debit/credit = المبلغ بالعملة الأجنبية
-          // localAmount = المكافئ بالعملة المحلية
           fcDebit = line.debit || 0;
           fcCredit = line.credit || 0;
           localDebit = line.debit > 0 ? (line.localAmount || line.debit * currInfo.rate) : 0;
@@ -791,7 +1032,6 @@ class RsfMapper {
         const costCenterId = line.costCenterCode ? 
           (this.costCenterMap[line.costCenterCode] || null) : null;
 
-        // تحديد party_type و party_id من رمز الحساب
         let partyType = null, partyId = null;
         if (line.accountCode.startsWith('161')) {
           partyType = 'customer';
@@ -809,6 +1049,7 @@ class RsfMapper {
           }
         }
 
+        lineNum++;
         await pgClient.query(`
           INSERT INTO journal_entry_lines 
           (id, tenant_id, entry_id, line_number, account_id,
@@ -816,12 +1057,28 @@ class RsfMapper {
            description, cost_center_id, party_type, party_id)
           VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15)
         `, [
-          uuidv4(), this.tenantId, entryId, i + 1, accountId,
+          uuidv4(), this.tenantId, entryId, lineNum, accountId,
           localDebit, localCredit,
-          currInfo.code, exchangeRate, fcDebit, fcCredit,
+          lineCurrency, exchangeRate, fcDebit, fcCredit,
           line.description, costCenterId, partyType, partyId
         ]);
+
+        actualDebit += localDebit;
+        actualCredit += localCredit;
       }
+
+      // ═══ موازنة القيد وترقية الحالة ═══
+      // فروق التقريب من تحويل العملات — نجعل الطرفين متساويين دائماً
+      const balancedAmount = Math.max(actualDebit, actualCredit);
+      actualDebit = balancedAmount;
+      actualCredit = balancedAmount;
+
+      await pgClient.query(`
+        UPDATE journal_entries 
+        SET total_debit = $2::numeric, total_credit = $2::numeric,
+            status = 'posted', is_posted = true, posted_at = NOW()
+        WHERE id = $1
+      `, [entryId, balancedAmount]);
 
       inserted++;
       if (inserted % 100 === 0) {
@@ -836,62 +1093,85 @@ class RsfMapper {
   // ═══════════════════════════════════════════════════════
 
   async _insertWarehouses(pgClient) {
-    // استخراج أرقام المستودعات الفريدة من حركات المخزون
+    // 1. قراءة أسماء المستودعات من إعدادات الرشيد
+    const warehouseNames = this.reader.getWarehouseNames();
+    console.log(`[RSF] Warehouse names from settings:`, JSON.stringify(warehouseNames));
+
+    // 2. جمع أرقام المستودعات المستخدمة فعلياً (من حركات + فواتير + أرصدة مواد)
+    const usedNumbers = new Set();
+
+    // من حركات المخزون
     const moves = this.reader.getInventoryMoves();
-    const storeNumbers = new Set();
-    
     for (const move of moves) {
       const raw = move._raw || {};
-      // حقول المستودع في الرشيد: Store, FromStore, ToStore
-      const storeFields = [raw.Store, raw.FromStore, raw.ToStore, raw.StoreNum, raw.Makhzan];
-      for (const sn of storeFields) {
+      for (const sn of [raw.Store, raw.FromStore, raw.ToStore, raw.StoreNum, raw.Makhzan]) {
         const num = parseInt(sn);
-        if (!isNaN(num) && num > 0) storeNumbers.add(num);
+        if (!isNaN(num) && num > 0) usedNumbers.add(num);
       }
     }
 
-    // أيضاً نبحث في فواتير المبيعات والمشتريات
+    // من الفواتير
     const salesInvs = this.reader.getSalesInvoices();
     const purchInvs = this.reader.getPurchaseInvoices();
     for (const inv of [...salesInvs, ...purchInvs]) {
       const raw = inv._raw || {};
       const sn = parseInt(raw.Store || raw.StoreNum || raw.Makhzan);
-      if (!isNaN(sn) && sn > 0) storeNumbers.add(sn);
+      if (!isNaN(sn) && sn > 0) usedNumbers.add(sn);
     }
 
-    // إنشاء المستودع الرئيسي دائماً
-    const mainId = uuidv4();
-    await pgClient.query(`
-      INSERT INTO warehouses
-      (id, company_id, tenant_id, name_ar, name_en, code, is_active, is_main, warehouse_type)
-      VALUES ($1,$2,$3,$4,$5,$6,true,true,'general')
-      ON CONFLICT DO NOTHING
-    `, [mainId, this.companyId, this.tenantId, 'المستودع الرئيسي', 'Main Warehouse', 'WH-MAIN']);
-    this.warehouseMap['1'] = mainId;
-    this.warehouseMap['main'] = mainId;
+    // من أرصدة المواد لكل مستودع
+    const materials = this.reader.getMaterials();
+    for (const mat of materials) {
+      if (mat.warehouseBalances) {
+        for (const whNum of Object.keys(mat.warehouseBalances)) {
+          usedNumbers.add(parseInt(whNum));
+        }
+      }
+    }
 
-    let inserted = 1;
+    // دائماً نضيف المستودع 1 (الرئيسي)
+    usedNumbers.add(1);
 
-    // إنشاء مستودعات إضافية لكل رقم فريد (باستثناء 1)
-    for (const num of storeNumbers) {
-      if (num === 1) continue; // المستودع الرئيسي تم إنشاؤه
-      if (this.warehouseMap[String(num)]) continue;
-      
+    // 3. إنشاء الفرع الافتراضي
+    let defaultBranchId;
+    const { rows: branchRows } = await pgClient.query(
+      'SELECT id FROM branches WHERE company_id = $1 LIMIT 1', [this.companyId]
+    );
+    if (branchRows.length > 0) {
+      defaultBranchId = branchRows[0].id;
+    } else {
+      defaultBranchId = uuidv4();
+      await pgClient.query(`
+        INSERT INTO branches (id, tenant_id, company_id, code, name, name_ar, name_en, is_active)
+        VALUES ($1, $2, $3, 'MAIN', 'الفرع الرئيسي', 'الفرع الرئيسي', 'Main Branch', true)
+        ON CONFLICT DO NOTHING
+      `, [defaultBranchId, this.tenantId, this.companyId]);
+    }
+    this._defaultBranchId = defaultBranchId;
+
+    // 4. إنشاء المستودعات المستخدمة فقط بأسمائها الحقيقية
+    let inserted = 0;
+    const sortedNums = Array.from(usedNumbers).sort((a, b) => a - b);
+
+    for (const num of sortedNums) {
       const whId = uuidv4();
+      const realName = warehouseNames[num] || `مستودع ${num}`;
+      const nameEn = `Warehouse ${num}`;
+      const code = num === 1 ? 'WH-MAIN' : `WH-${num}`;
+
       await pgClient.query(`
         INSERT INTO warehouses
-        (id, company_id, tenant_id, name_ar, name_en, code, is_active, is_main, warehouse_type)
-        VALUES ($1,$2,$3,$4,$5,$6,true,false,'general')
+        (id, company_id, tenant_id, branch_id, name, name_ar, name_en, code, is_active, warehouse_type)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,'regular')
         ON CONFLICT DO NOTHING
-      `, [
-        whId, this.companyId, this.tenantId,
-        `مستودع ${num}`, `Warehouse ${num}`, `WH-${num}`
-      ]);
+      `, [whId, this.companyId, this.tenantId, defaultBranchId, realName, realName, nameEn, code]);
+
       this.warehouseMap[String(num)] = whId;
+      if (num === 1) this.warehouseMap['main'] = whId;
       inserted++;
     }
 
-    console.log(`[RSF] ✅ تم إنشاء ${inserted} مستودع (${storeNumbers.size > 0 ? Array.from(storeNumbers).join(', ') : 'رئيسي فقط'})`);
+    console.log(`[RSF] ✅ تم إنشاء ${inserted} مستودع: ${sortedNums.map(n => `${n}=${warehouseNames[n] || 'مستودع ' + n}`).join(', ')}`);
     return inserted;
   }
 
@@ -952,11 +1232,102 @@ class RsfMapper {
           `, [
             uuidv4(), this.tenantId, invId, i + 1,
             productId, // ✅ ربط product_id من خريطة المواد
-            String(line.Name || line.Document || matCode || '').trim(),
+            String(line.Name || '').trim() || this.materialNameMap[matCode] || String(line.Document || '').trim() || matCode || '',
             qty, price, disc,
             qty * price, total,
             String(line.Notes || '').trim()
           ]);
+        }
+      }
+
+      // ═══ إنشاء القيد المحاسبي لفاتورة المبيعات ═══
+      // في الرشيد: Debt = حساب العميل (مدين), Credit = حساب المبيعات (دائن)
+      const raw = inv._raw || {};
+      const debitAccCode = String(raw.Debt || inv.customerCode || '').trim();   // مثل 161002 (عميل)
+      const creditAccCode = String(raw.Credit || '').trim(); // مثل 411 (مبيعات)
+      const invTotal = inv.netTotal || inv.total || 0;
+
+      if (debitAccCode && creditAccCode && invTotal > 0) {
+        const debitAccountId = this.accountMap[debitAccCode];
+        const creditAccountId = this.accountMap[creditAccCode];
+
+        if (debitAccountId && creditAccountId) {
+          const jeId = uuidv4();
+          const entryNumber = `RSF-SI-JE-${inv.number}`;
+          const description = raw.Document || inv.notes || `فاتورة مبيعات رقم ${inv.number}`;
+
+          // العملة وسعر الصرف
+          const currNum = parseInt(raw.Currency) || 1;
+          const currInfo = this.currencyMap[currNum] || { code: this.baseCurrencyCode, rate: 1 };
+          const isBaseCurrency = (currNum === 0 || currNum === 1 || currInfo.code === this.baseCurrencyCode);
+          const localTotal = parseFloat(raw.LocalTot) || invTotal;
+          const fcTotal = parseFloat(raw.MianTot) || 0;
+
+          // إدخال القيد كـ draft أولاً
+          await pgClient.query(`
+            INSERT INTO journal_entries 
+            (id, tenant_id, company_id, entry_number, entry_date,
+             fiscal_year_id, entry_type, description, currency, exchange_rate,
+             total_debit, total_credit, status, is_posted,
+             created_by, notes)
+            VALUES ($1,$2,$3,$4,$5,$6,'sales_invoice',$7,$8,$9,$10,$11,'draft',false,$12,$13)
+            ON CONFLICT (tenant_id, entry_number) DO NOTHING
+          `, [
+            jeId, this.tenantId, this.companyId,
+            entryNumber, invDate,
+            this.fiscalYearId, description,
+            this.baseCurrencyCode, 1,
+            0, 0,
+            this.userId, inv.notes || ''
+          ]);
+
+          // سطر 1: مدين — حساب العميل
+          let partyType = null, partyId = null;
+          if (debitAccCode.startsWith('161')) {
+            partyType = 'customer';
+            partyId = customerId;
+          }
+
+          await pgClient.query(`
+            INSERT INTO journal_entry_lines 
+            (id, tenant_id, entry_id, line_number, account_id,
+             debit, credit, currency, exchange_rate, debit_fc, credit_fc,
+             description, party_type, party_id)
+            VALUES ($1,$2,$3,1,$4,$5,0,$6,$7,$8,0,$9,$10,$11)
+          `, [
+            uuidv4(), this.tenantId, jeId, debitAccountId,
+            localTotal, currInfo.code,
+            fcTotal > 0 ? (localTotal / fcTotal) : (isBaseCurrency ? 1 : currInfo.rate),
+            fcTotal > 0 ? fcTotal : 0,
+            description, partyType, partyId
+          ]);
+
+          // سطر 2: دائن — حساب المبيعات/الإيراد
+          await pgClient.query(`
+            INSERT INTO journal_entry_lines 
+            (id, tenant_id, entry_id, line_number, account_id,
+             debit, credit, currency, exchange_rate, debit_fc, credit_fc,
+             description, party_type, party_id)
+            VALUES ($1,$2,$3,2,$4,0,$5,$6,$7,0,$8,$9,NULL,NULL)
+          `, [
+            uuidv4(), this.tenantId, jeId, creditAccountId,
+            localTotal, currInfo.code,
+            fcTotal > 0 ? (localTotal / fcTotal) : (isBaseCurrency ? 1 : currInfo.rate),
+            fcTotal > 0 ? fcTotal : 0,
+            description
+          ]);
+
+          // ترقية القيد إلى posted
+          await pgClient.query(`
+            UPDATE journal_entries 
+            SET total_debit = $2::numeric, total_credit = $2::numeric,
+                status = 'posted', is_posted = true, posted_at = NOW()
+            WHERE id = $1
+          `, [jeId, localTotal]);
+
+          console.log(`[RSF] ✅ قيد فاتورة مبيعات #${inv.number}: ${debitAccCode}→${creditAccCode} بمبلغ ${localTotal}`);
+        } else {
+          console.warn(`[RSF] ⚠️ تخطي قيد فاتورة مبيعات #${inv.number}: حساب مدين ${debitAccCode}=${debitAccountId ? '✓' : '✗'}, حساب دائن ${creditAccCode}=${creditAccountId ? '✓' : '✗'}`);
         }
       }
 
@@ -982,24 +1353,27 @@ class RsfMapper {
                       || this.supplierByAccountMap[inv.supplierCode] 
                       || null;
       const warehouseId = this.warehouseMap['main'] || null;
+      const invTotal = inv.netTotal || inv.total || 0;
 
+      // ═══ الكتابة في purchase_transactions (الجدول الموحد الذي تقرأه واجهة دورة الشراء) ═══
       await pgClient.query(`
-        INSERT INTO purchase_invoices
-        (id, company_id, tenant_id, invoice_number, invoice_date,
-         supplier_id, status, total_amount, currency, notes,
-         warehouse_id, document_stage)
-        VALUES ($1,$2,$3,$4,$5,$6,'posted',$7,$8,$9,$10,'invoice')
+        INSERT INTO purchase_transactions
+        (id, company_id, tenant_id, invoice_no, doc_date, invoice_date,
+         supplier_id, stage, total_amount, subtotal, currency, notes,
+         warehouse_id, is_posted, receipt_mode, balance)
+        VALUES ($1,$2,$3,$4,$5,$5,$6,'posted',$7,$7,$8,$9,$10,true,'direct',$7)
         ON CONFLICT DO NOTHING
       `, [
         invId, this.companyId, this.tenantId,
         `RSF-PI-${inv.number}`, invDate,
         supplierId,
-        inv.netTotal || inv.total || 0,
+        invTotal,
         this.baseCurrencyCode, inv.notes || '',
         warehouseId
       ]);
 
-      // إدراج سطور الفاتورة
+      // إدراج سطور الفاتورة في purchase_transaction_items
+      // ✅ إصلاح: استخدام الاسم العربي للمادة بدلاً من الكود، وتعيين received_qty للفواتير المرحّلة
       if (inv.lines && inv.lines.length > 0) {
         for (let i = 0; i < inv.lines.length; i++) {
           const line = inv.lines[i];
@@ -1010,20 +1384,123 @@ class RsfMapper {
           const disc = parseFloat(line.Discount) || 0;
           const total = parseFloat(line.Total) || (qty * price - disc);
 
+          // ═══ اسم المادة: أولوية لاسم السطر، ثم من خريطة المواد، وأخيراً الكود ═══
+          const materialName = String(line.Name || '').trim()
+            || this.materialNameMap[matCode]
+            || String(line.Document || '').trim()
+            || matCode
+            || '';
+
           await pgClient.query(`
-            INSERT INTO purchase_invoice_items
-            (id, tenant_id, invoice_id, line_number, material_id,
+            INSERT INTO purchase_transaction_items
+            (id, transaction_id, line_number, material_id,
              description, quantity, unit_price, discount_amount,
-             subtotal, total, notes)
+             subtotal, total, received_qty, notes)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
           `, [
-            uuidv4(), this.tenantId, invId, i + 1,
+            uuidv4(), invId, i + 1,
             materialId,
-            String(line.Name || line.Document || matCode || '').trim(),
+            materialName,
             qty, price, disc,
             qty * price, total,
+            qty, // ✅ فاتورة مرحّلة = مستلمة بالكامل
             String(line.Notes || '').trim()
           ]);
+        }
+      }
+
+      // ═══ إنشاء القيد المحاسبي للفاتورة ═══
+      // في الرشيد: Debt = حساب المشتريات (مدين), Credit = حساب المورد (دائن)
+      const raw = inv._raw || {};
+      const debitAccCode = String(raw.Debt || '').trim();   // مثل 341 (مشتريات)
+      const creditAccCode = String(raw.Credit || inv.supplierCode || '').trim(); // مثل 261020 (مورد)
+
+      if (debitAccCode && creditAccCode && invTotal > 0) {
+        const debitAccountId = this.accountMap[debitAccCode];
+        const creditAccountId = this.accountMap[creditAccCode];
+
+        if (debitAccountId && creditAccountId) {
+          const jeId = uuidv4();
+          const entryNumber = `RSF-PI-JE-${inv.number}`;
+          const description = raw.Document || inv.notes || `فاتورة مشتريات رقم ${inv.number}`;
+
+          // العملة وسعر الصرف
+          const currNum = parseInt(raw.Currency) || 1;
+          const currInfo = this.currencyMap[currNum] || { code: this.baseCurrencyCode, rate: 1 };
+          const isBaseCurrency = (currNum === 0 || currNum === 1 || currInfo.code === this.baseCurrencyCode);
+          const localTotal = parseFloat(raw.LocalTot) || invTotal;
+          const fcTotal = parseFloat(raw.MianTot) || 0;
+
+          // إدخال القيد كـ draft أولاً (مع ربطه بالفاتورة)
+          await pgClient.query(`
+            INSERT INTO journal_entries 
+            (id, tenant_id, company_id, entry_number, entry_date,
+             fiscal_year_id, entry_type, description, currency, exchange_rate,
+             total_debit, total_credit, status, is_posted,
+             reference_type, reference_id,
+             created_by, notes)
+            VALUES ($1,$2,$3,$4,$5,$6,'purchase_invoice',$7,$8,$9,$10,$11,'draft',false,
+                    'purchase_invoice',$14,
+                    $12,$13)
+            ON CONFLICT (tenant_id, entry_number) DO NOTHING
+          `, [
+            jeId, this.tenantId, this.companyId,
+            entryNumber, invDate,
+            this.fiscalYearId, description,
+            this.baseCurrencyCode, 1,
+            0, 0,
+            this.userId, inv.notes || '',
+            invId
+          ]);
+
+          // سطر 1: مدين — حساب المشتريات
+          await pgClient.query(`
+            INSERT INTO journal_entry_lines 
+            (id, tenant_id, entry_id, line_number, account_id,
+             debit, credit, currency, exchange_rate, debit_fc, credit_fc,
+             description, party_type, party_id)
+            VALUES ($1,$2,$3,1,$4,$5,0,$6,$7,$8,0,$9,NULL,NULL)
+          `, [
+            uuidv4(), this.tenantId, jeId, debitAccountId,
+            localTotal, currInfo.code,
+            fcTotal > 0 ? (localTotal / fcTotal) : (isBaseCurrency ? 1 : currInfo.rate),
+            fcTotal > 0 ? fcTotal : 0,
+            description
+          ]);
+
+          // سطر 2: دائن — حساب المورد
+          await pgClient.query(`
+            INSERT INTO journal_entry_lines 
+            (id, tenant_id, entry_id, line_number, account_id,
+             debit, credit, currency, exchange_rate, debit_fc, credit_fc,
+             description, party_type, party_id)
+            VALUES ($1,$2,$3,2,$4,0,$5,$6,$7,0,$8,$9,'supplier',$10)
+          `, [
+            uuidv4(), this.tenantId, jeId, creditAccountId,
+            localTotal, currInfo.code,
+            fcTotal > 0 ? (localTotal / fcTotal) : (isBaseCurrency ? 1 : currInfo.rate),
+            fcTotal > 0 ? fcTotal : 0,
+            description, supplierId
+          ]);
+
+          // ترقية القيد إلى posted
+          await pgClient.query(`
+            UPDATE journal_entries 
+            SET total_debit = $2::numeric, total_credit = $2::numeric,
+                status = 'posted', is_posted = true, posted_at = NOW()
+            WHERE id = $1
+          `, [jeId, localTotal]);
+
+          // ═══ ربط القيد بالفاتورة (الاتجاه العكسي) ═══
+          await pgClient.query(`
+            UPDATE purchase_transactions 
+            SET journal_entry_id = $1
+            WHERE id = $2
+          `, [jeId, invId]);
+
+          console.log(`[RSF] ✅ قيد فاتورة مشتريات #${inv.number}: ${debitAccCode}→${creditAccCode} بمبلغ ${localTotal} | JE=${jeId}`);
+        } else {
+          console.warn(`[RSF] ⚠️ تخطي قيد فاتورة مشتريات #${inv.number}: حساب مدين ${debitAccCode}=${debitAccountId ? '✓' : '✗'}, حساب دائن ${creditAccCode}=${creditAccountId ? '✓' : '✗'}`);
         }
       }
 
@@ -1043,18 +1520,15 @@ class RsfMapper {
 
     const defaultWarehouseId = this.warehouseMap['main'] || null;
     let inserted = 0;
+    let moveSeq = 0;
 
     for (const move of moves) {
-      // تحديد نوع الحركة
       const raw = move._raw || {};
       const moveType = move.type === 1 ? 'receipt' : (move.type === 2 ? 'sale' : (move.type === 3 ? 'transfer_in' : 'adjustment_in'));
-      const moveDate = move.date ? new Date(move.date).toISOString() : new Date().toISOString();
+      const moveDate = move.date ? new Date(move.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
       
-      // تحديد المستودع من بيانات الحركة
       const storeNum = String(raw.Store || raw.StoreNum || raw.FromStore || raw.Makhzan || '1').trim();
       const warehouseId = this.warehouseMap[storeNum] || defaultWarehouseId;
-      
-      // المستودع المستهدف (للمناقلات)
       const toStoreNum = String(raw.ToStore || '').trim();
       const toWarehouseId = toStoreNum ? (this.warehouseMap[toStoreNum] || null) : null;
 
@@ -1064,41 +1538,44 @@ class RsfMapper {
           const materialId = this.materialMap[matCode] || null;
           const qty = parseFloat(detail.Qty || detail.Quantity) || 0;
           const cost = parseFloat(detail.Price || detail.Cost) || 0;
-          
-          // المستودع من تفاصيل الحركة (إذا وُجد)
           const detailStore = String(detail.Store || detail.StoreNum || '').trim();
           const detailWarehouseId = detailStore ? (this.warehouseMap[detailStore] || warehouseId) : warehouseId;
+          moveSeq++;
 
           await pgClient.query(`
             INSERT INTO inventory_movements
-            (id, company_id, tenant_id, material_id, warehouse_id,
+            (id, company_id, tenant_id, material_id,
              from_warehouse_id, to_warehouse_id,
-             movement_type, quantity, unit_cost, description,
-             reference_type, movement_date, created_by)
+             movement_number, movement_type, movement_date,
+             quantity, unit_cost, notes,
+             reference_type, created_by)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
           `, [
             uuidv4(), this.companyId, this.tenantId,
-            materialId, detailWarehouseId,
-            moveType === 'transfer_in' ? warehouseId : null,
-            moveType === 'transfer_in' ? toWarehouseId : null,
-            moveType, qty, cost,
+            materialId,
+            moveType === 'transfer_in' ? warehouseId : detailWarehouseId,
+            moveType === 'transfer_in' ? toWarehouseId : detailWarehouseId,
+            `RSF-MV-${moveSeq}`, moveType, moveDate,
+            qty, cost,
             move.notes || `حركة مستودع رقم ${move.number}`,
-            'rsf_import', moveDate, this.userId
+            'rsf_import', this.userId
           ]);
         }
       } else {
-        // حركة بدون تفاصيل — ندخلها كسجل واحد
+        moveSeq++;
         await pgClient.query(`
           INSERT INTO inventory_movements
-          (id, company_id, tenant_id, warehouse_id,
-           movement_type, quantity, description,
-           reference_type, movement_date, created_by)
-          VALUES ($1,$2,$3,$4,$5,0,$6,$7,$8,$9)
+          (id, company_id, tenant_id,
+           from_warehouse_id, to_warehouse_id,
+           movement_number, movement_type, movement_date,
+           quantity, notes, reference_type, created_by)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$11)
         `, [
           uuidv4(), this.companyId, this.tenantId,
-          warehouseId, moveType,
+          warehouseId, warehouseId,
+          `RSF-MV-${moveSeq}`, moveType, moveDate,
           move.notes || `حركة مستودع رقم ${move.number}`,
-          'rsf_import', moveDate, this.userId
+          'rsf_import', this.userId
         ]);
       }
 
@@ -1134,8 +1611,10 @@ class RsfMapper {
         try {
           await pgClient.query(`
             INSERT INTO cash_accounts
-            (id, tenant_id, company_id, name, account_id, currency, is_active)
-            VALUES ($1,$2,$3,'الصندوق الرئيسي',$4,$5,true)
+            (id, tenant_id, company_id, code, name_ar, name_en,
+             account_type, gl_account_id, currency, is_active)
+            VALUES ($1,$2,$3,'CASH-MAIN','الصندوق الرئيسي','Main Cash',
+                    'cash',$4,$5,true)
             ON CONFLICT DO NOTHING
           `, [defaultCashAccountId, this.tenantId, this.companyId, cashAccId, this.baseCurrencyCode]);
         } catch { defaultCashAccountId = null; }
@@ -1199,7 +1678,7 @@ class RsfMapper {
 
       await pgClient.query(`
         UPDATE chart_of_accounts 
-        SET opening_balance = $1, current_balance = $1
+        SET opening_balance = 0, current_balance = $1
         WHERE id = $2
       `, [balance, accountId]);
 
@@ -1218,10 +1697,10 @@ class RsfMapper {
   // ═══════════════════════════════════════════════════════
 
   async _recalculateBalances(pgClient) {
-    // 1. تحديث current_balance للحسابات التفصيلية = opening_balance + مجموع (مدين - دائن) من القيود
+    // 1. تحديث current_balance للحسابات التفصيلية = مجموع (مدين - دائن) من القيود فقط (opening_balance=0 دائماً لأن كل الحركات مستوردة)
     const detailResult = await pgClient.query(`
       UPDATE chart_of_accounts coa
-      SET current_balance = coa.opening_balance + COALESCE(je_totals.net_amount, 0)
+      SET current_balance = COALESCE(je_totals.net_amount, 0)
       FROM (
         SELECT jel.account_id,
                SUM(jel.debit - jel.credit) as net_amount
@@ -1243,11 +1722,10 @@ class RsfMapper {
       const groupResult = await pgClient.query(`
         UPDATE chart_of_accounts parent
         SET current_balance = COALESCE(children_sum.total, 0),
-            opening_balance = COALESCE(children_sum.opening_total, 0)
+            opening_balance = 0
         FROM (
           SELECT parent_id,
-                 SUM(current_balance) as total,
-                 SUM(opening_balance) as opening_total
+                 SUM(current_balance) as total
           FROM chart_of_accounts
           WHERE company_id = $1
             AND parent_id IS NOT NULL
@@ -1335,6 +1813,61 @@ class RsfMapper {
     console.log(`[RSF] خريطة العملات:`, JSON.stringify(this.currencyMap));
   }
 
+  // ═══════════════════════════════════════════════════════
+  // مزامنة أسعار صرف العملات من الرشيد → قاعدة البيانات
+  // ═══════════════════════════════════════════════════════
+
+  async _syncCurrenciesToDB(pgClient) {
+    // ═══ 1. تحديد العملة الأساسية (is_base = true) في currencies ═══
+    await pgClient.query(`
+      UPDATE currencies SET is_base = (code = $1)
+      WHERE tenant_id IS NULL OR tenant_id = $2
+    `, [this.baseCurrencyCode, this.tenantId]);
+
+    // ═══ 2. تحديث أسعار الصرف في جدول currencies ═══
+    let updated = 0;
+    for (const [num, info] of Object.entries(this.currencyMap)) {
+      const rate = info.rate || 1;
+      const res = await pgClient.query(`
+        UPDATE currencies 
+        SET exchange_rate = $1, updated_at = now()
+        WHERE code = $2 AND (tenant_id IS NULL OR tenant_id = $3)
+      `, [rate, info.code, this.tenantId]);
+      if (res.rowCount > 0) updated++;
+    }
+
+    // ═══ 3. إدخال أسعار الصرف في جدول exchange_rates (المصدر الفعلي للـ Frontend) ═══
+    // حذف الأسعار القديمة المستوردة
+    await pgClient.query(`
+      DELETE FROM exchange_rates 
+      WHERE company_id = $1 AND source = 'rsf_import'
+    `, [this.companyId]);
+
+    let ratesInserted = 0;
+    for (const [num, info] of Object.entries(this.currencyMap)) {
+      const rate = info.rate || 1;
+      // لا نُدخل سعر صرف للعملة الأساسية لنفسها
+      if (info.code === this.baseCurrencyCode) continue;
+
+      // إدخال سعر الصرف: العملة الأجنبية → العملة المحلية
+      // مثال: USD → UAH, buy_rate = 41.5 (يعني 1 USD = 41.5 UAH)
+      // ⚠️ mid_rate عمود محسوب تلقائياً = (buy_rate + sell_rate) / 2
+      await pgClient.query(`
+        INSERT INTO exchange_rates 
+          (tenant_id, company_id, from_currency, to_currency, buy_rate, sell_rate,
+           margin_percent, effective_from, source, is_active)
+        VALUES ($1, $2, $3, $4, $5, $5, 0, now(), 'rsf_import', true)
+      `, [this.tenantId, this.companyId, info.code, this.baseCurrencyCode, rate]);
+      ratesInserted++;
+    }
+
+    console.log(`[RSF] مزامنة العملات: الأساسية=${this.baseCurrencyCode}, currencies=${updated}, exchange_rates=${ratesInserted}`);
+    for (const [num, info] of Object.entries(this.currencyMap)) {
+      console.log(`  [${num}] ${info.code} (${info.name}): سعر الصرف = ${info.rate}`);
+    }
+    return updated;
+  }
+
   async _fillAccountingSettings(pgClient) {
     const cashId = this.accountMap['181'] || null;
     const bankId = this.accountMap['182'] || null;
@@ -1363,7 +1896,7 @@ class RsfMapper {
           default_receivable_account_id = COALESCE(default_receivable_account_id, $6),
           default_payable_account_id = COALESCE(default_payable_account_id, $7)
         WHERE company_id = $1
-      `, [this.companyId, this.baseCurrencyCode, JSON.stringify(supportedCurrencies),
+      `, [this.companyId, this.baseCurrencyCode, '{' + supportedCurrencies.join(',') + '}',
           cashId, bankId, recvId, payId]);
     } else {
       await pgClient.query(`
@@ -1373,7 +1906,7 @@ class RsfMapper {
          default_receivable_account_id, default_payable_account_id)
         VALUES ($1,$2,$3,$4,$5,$6,$7)
         ON CONFLICT DO NOTHING
-      `, [this.companyId, this.baseCurrencyCode, JSON.stringify(supportedCurrencies),
+      `, [this.companyId, this.baseCurrencyCode, '{' + supportedCurrencies.join(',') + '}',
           cashId, bankId, recvId, payId]);
     }
 
@@ -1400,7 +1933,7 @@ class RsfMapper {
         im.tenant_id,
         im.company_id,
         im.material_id,
-        im.warehouse_id,
+        COALESCE(im.to_warehouse_id, im.from_warehouse_id) AS warehouse_id,
         SUM(CASE 
           WHEN im.movement_type IN ('receipt','purchase','return_in','adjustment_in','transfer_in','in') THEN im.quantity
           WHEN im.movement_type IN ('sale','issue','return_out','adjustment_out','transfer_out','out') THEN -im.quantity
@@ -1427,8 +1960,8 @@ class RsfMapper {
       FROM inventory_movements im
       WHERE im.company_id = $1
         AND im.material_id IS NOT NULL
-        AND im.warehouse_id IS NOT NULL
-      GROUP BY im.tenant_id, im.company_id, im.material_id, im.warehouse_id
+        AND COALESCE(im.to_warehouse_id, im.from_warehouse_id) IS NOT NULL
+      GROUP BY im.tenant_id, im.company_id, im.material_id, COALESCE(im.to_warehouse_id, im.from_warehouse_id)
       ON CONFLICT DO NOTHING
     `, [this.companyId]);
 
@@ -1465,8 +1998,31 @@ class RsfMapper {
     `, [this.companyId]);
 
     const totalStock = stockRows + (matResult.rowCount || 0);
-    console.log(`[RSF] ✅ تم ملء ${totalStock} سجل مخزون (من حركات: ${stockRows}, من أرصدة: ${matResult.rowCount || 0})`);
-    return totalStock;
+
+    // 3. إدخال أرصدة المستودعات المفصّلة من ملف الرشيد (لكل مادة في كل مستودع)
+    let rsfStockInserted = 0;
+    if (this._materialStockMap && this._materialStockMap.length > 0) {
+      for (const entry of this._materialStockMap) {
+        await pgClient.query(`
+          INSERT INTO inventory_stock (
+            tenant_id, company_id, material_id, warehouse_id,
+            quantity_on_hand, initial_quantity, current_quantity,
+            average_cost, last_cost, batch_number
+          ) VALUES ($1, $2, $3, $4, $5, $5, $5, 0, 0, 'RSF-BALANCE')
+          ON CONFLICT (material_id, warehouse_id) 
+          DO UPDATE SET 
+            quantity_on_hand = EXCLUDED.quantity_on_hand,
+            initial_quantity = EXCLUDED.initial_quantity,
+            current_quantity = EXCLUDED.current_quantity
+        `, [this.tenantId, this.companyId, entry.materialId, entry.warehouseId, entry.quantity]);
+        rsfStockInserted++;
+      }
+      console.log(`[RSF] 📦 تم إدراج ${rsfStockInserted} سجل رصيد مستودع مفصّل من الرشيد`);
+    }
+
+    const grandTotal = totalStock + rsfStockInserted;
+    console.log(`[RSF] ✅ تم ملء ${grandTotal} سجل مخزون (حركات: ${stockRows}, أرصدة عامة: ${matResult.rowCount || 0}, أرصدة مفصّلة: ${rsfStockInserted})`);
+    return grandTotal;
   }
 }
 
