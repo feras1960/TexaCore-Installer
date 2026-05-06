@@ -62,6 +62,7 @@ class RsfMapper {
         'purchase_transaction_items', 'purchase_transactions',
         'purchase_invoice_items', 'purchase_invoices',
         'inventory_movements', 'inventory_stock',
+        'stock_transfer_items', 'stock_transfers',
         'journal_entry_lines', 'journal_entries',
         'cash_transactions', 'cash_accounts',
         'fabric_materials', 'fabric_groups', 'products',
@@ -332,8 +333,13 @@ class RsfMapper {
     try { await pgClient.query(`DELETE FROM purchase_transactions WHERE company_id = $1`, [this.companyId]); } catch {}
     try { await pgClient.query(`DELETE FROM purchase_invoices WHERE company_id = $1`, [this.companyId]); } catch {}
 
-    // 3. حركات المستودع
+    // 3. المناقلات (بنود أولاً ثم الرؤوس)
+    try { await pgClient.query(`DELETE FROM stock_transfer_items WHERE transfer_id IN (SELECT id FROM stock_transfers WHERE company_id = $1)`, [this.companyId]); } catch {}
+    try { await pgClient.query(`DELETE FROM stock_transfers WHERE company_id = $1`, [this.companyId]); } catch {}
+
+    // 4. حركات المستودع + أرصدة المخزون
     try { await pgClient.query(`DELETE FROM inventory_movements WHERE company_id = $1`, [this.companyId]); } catch {}
+    try { await pgClient.query(`DELETE FROM inventory_stock WHERE company_id = $1`, [this.companyId]); } catch {}
 
     // 4. سطور القيود
     await pgClient.query(`DELETE FROM journal_entry_lines WHERE tenant_id = $1`, [this.tenantId]);
@@ -1210,7 +1216,7 @@ class RsfMapper {
         warehouseId, this.userId
       ]);
 
-      // إدراج سطور الفاتورة
+      // إدراج سطور الفاتورة + حركات المخزون المرتبطة
       if (inv.lines && inv.lines.length > 0) {
         for (let i = 0; i < inv.lines.length; i++) {
           const line = inv.lines[i];
@@ -1231,12 +1237,34 @@ class RsfMapper {
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
           `, [
             uuidv4(), this.tenantId, invId, i + 1,
-            productId, // ✅ ربط product_id من خريطة المواد
+            productId,
             String(line.Name || '').trim() || this.materialNameMap[matCode] || String(line.Document || '').trim() || matCode || '',
             qty, price, disc,
             qty * price, total,
             String(line.Notes || '').trim()
           ]);
+
+          // ═══ إنشاء حركة مخزون مربوطة بالفاتورة ═══
+          if (materialId && qty > 0) {
+            const lineStore = String(line.StockNum || line.Store || '').trim();
+            const lineWarehouseId = lineStore ? (this.warehouseMap[lineStore] || warehouseId) : warehouseId;
+            await pgClient.query(`
+              INSERT INTO inventory_movements
+              (id, company_id, tenant_id, material_id,
+               from_warehouse_id, to_warehouse_id,
+               movement_number, movement_type, movement_date,
+               quantity, unit_cost, notes,
+               reference_type, reference_id, created_by)
+              VALUES ($1,$2,$3,$4,$5,$5,$6,'sale',$7,$8,$9,$10,'sales_invoice',$11,$12)
+            `, [
+              uuidv4(), this.companyId, this.tenantId, materialId,
+              lineWarehouseId,
+              `RSF-SI-MV-${inv.number}-${i+1}`, invDate,
+              qty, price,
+              `بيع - فاتورة ${inv.number}`,
+              invId, this.userId
+            ]);
+          }
         }
       }
 
@@ -1372,8 +1400,7 @@ class RsfMapper {
         warehouseId
       ]);
 
-      // إدراج سطور الفاتورة في purchase_transaction_items
-      // ✅ إصلاح: استخدام الاسم العربي للمادة بدلاً من الكود، وتعيين received_qty للفواتير المرحّلة
+      // إدراج سطور الفاتورة في purchase_transaction_items + حركات المخزون
       if (inv.lines && inv.lines.length > 0) {
         for (let i = 0; i < inv.lines.length; i++) {
           const line = inv.lines[i];
@@ -1384,7 +1411,6 @@ class RsfMapper {
           const disc = parseFloat(line.Discount) || 0;
           const total = parseFloat(line.Total) || (qty * price - disc);
 
-          // ═══ اسم المادة: أولوية لاسم السطر، ثم من خريطة المواد، وأخيراً الكود ═══
           const materialName = String(line.Name || '').trim()
             || this.materialNameMap[matCode]
             || String(line.Document || '').trim()
@@ -1403,9 +1429,31 @@ class RsfMapper {
             materialName,
             qty, price, disc,
             qty * price, total,
-            qty, // ✅ فاتورة مرحّلة = مستلمة بالكامل
+            qty,
             String(line.Notes || '').trim()
           ]);
+
+          // ═══ إنشاء حركة مخزون مربوطة بالفاتورة ═══
+          if (materialId && qty > 0) {
+            const lineStore = String(line.StockNum || line.Store || '').trim();
+            const lineWarehouseId = lineStore ? (this.warehouseMap[lineStore] || warehouseId) : warehouseId;
+            await pgClient.query(`
+              INSERT INTO inventory_movements
+              (id, company_id, tenant_id, material_id,
+               from_warehouse_id, to_warehouse_id,
+               movement_number, movement_type, movement_date,
+               quantity, unit_cost, notes,
+               reference_type, reference_id, created_by)
+              VALUES ($1,$2,$3,$4,$5,$5,$6,'purchase',$7,$8,$9,$10,'purchase',$11,$12)
+            `, [
+              uuidv4(), this.companyId, this.tenantId, materialId,
+              lineWarehouseId,
+              `RSF-PI-MV-${inv.number}-${i+1}`, invDate,
+              qty, price,
+              `شراء - فاتورة ${inv.number}`,
+              invId, this.userId
+            ]);
+          }
         }
       }
 
@@ -1521,18 +1569,130 @@ class RsfMapper {
     const defaultWarehouseId = this.warehouseMap['main'] || null;
     let inserted = 0;
     let moveSeq = 0;
+    let transferSeq = 0;
 
-    for (const move of moves) {
+    // ═══ تصفية: حذف حركات البيع والشراء (تم إنشاؤها مع الفواتير) ═══
+    // في الرشيد: SWAY='O' = بيع, SWAY='I' = شراء — تم ربطها مع الفواتير
+    const standaloneMoves = moves.filter(m => {
+      const raw = m._raw || {};
+      const sway = String(raw.SWAY || raw.SWay || '').trim();
+      return sway !== 'O' && sway !== 'I';
+    });
+
+    console.log(`[RSF] حركات المخزون: ${moves.length} إجمالي → ${standaloneMoves.length} مستقلة (بعد تصفية البيع/الشراء)`);
+
+    for (const move of standaloneMoves) {
       const raw = move._raw || {};
-      const moveType = move.type === 1 ? 'receipt' : (move.type === 2 ? 'sale' : (move.type === 3 ? 'transfer_in' : 'adjustment_in'));
       const moveDate = move.date ? new Date(move.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
       
       const storeNum = String(raw.Store || raw.StoreNum || raw.FromStore || raw.Makhzan || '1').trim();
       const warehouseId = this.warehouseMap[storeNum] || defaultWarehouseId;
-      const toStoreNum = String(raw.ToStore || '').trim();
+      const toStoreNum = String(raw.ToStore || raw.ToMakhzan || '').trim();
       const toWarehouseId = toStoreNum ? (this.warehouseMap[toStoreNum] || null) : null;
 
-      if (move.details && move.details.length > 0) {
+      // ═══ تحديد نوع الحركة بدقة ═══
+      const sway = String(raw.SWAY || raw.SWay || '').trim();
+      let moveType;
+      if (toWarehouseId && toWarehouseId !== warehouseId) {
+        moveType = 'transfer';  // مناقلة بين مستودعات
+      } else if (move.type === 1 || sway === 'I') {
+        moveType = 'receipt';   // استلام
+      } else if (move.type === 2 || sway === 'O') {
+        moveType = 'sale';      // بيع (لم يُصفّى = ليس مرتبط بفاتورة)
+      } else {
+        moveType = 'adjustment_in'; // تسوية
+      }
+
+      // ═══ مناقلة → إنشاء وثيقة stock_transfer + حركتين (خروج + دخول) ═══
+      if (moveType === 'transfer' && move.details && move.details.length > 0) {
+        transferSeq++;
+        const transferId = uuidv4();
+        const transferNumber = `RSF-TR-${transferSeq}`;
+        let totalQty = 0;
+
+        // إنشاء وثيقة المناقلة
+        await pgClient.query(`
+          INSERT INTO stock_transfers
+          (id, tenant_id, company_id, transfer_number, transfer_date,
+           from_warehouse_id, to_warehouse_id, status, notes,
+           total_rolls, total_meters, created_by)
+          VALUES ($1,$2,$3,$4,$5,$6,$7,'completed',$8,$9,0,$10)
+          ON CONFLICT DO NOTHING
+        `, [
+          transferId, this.tenantId, this.companyId,
+          transferNumber, moveDate,
+          warehouseId, toWarehouseId,
+          move.notes || `مناقلة مستوردة من الرشيد رقم ${move.number}`,
+          move.details.length,
+          this.userId
+        ]);
+
+        // إنشاء بنود المناقلة + حركات المخزون
+        for (let i = 0; i < move.details.length; i++) {
+          const detail = move.details[i];
+          const matCode = String(detail.MatNum || detail.Num || '').trim();
+          const materialId = this.materialMap[matCode] || null;
+          const qty = parseFloat(detail.Qty || detail.Quantity) || 0;
+          const cost = parseFloat(detail.Price || detail.Cost) || 0;
+          totalQty += qty;
+
+          // بند المناقلة
+          if (materialId) {
+            await pgClient.query(`
+              INSERT INTO stock_transfer_items
+              (id, transfer_id, material_id, quantity, notes)
+              VALUES ($1,$2,$3,$4,$5)
+              ON CONFLICT DO NOTHING
+            `, [uuidv4(), transferId, materialId, qty, '']);
+          }
+
+          moveSeq++;
+          // حركة خروج (transfer_out)
+          await pgClient.query(`
+            INSERT INTO inventory_movements
+            (id, company_id, tenant_id, material_id,
+             from_warehouse_id, to_warehouse_id,
+             movement_number, movement_type, movement_date,
+             quantity, unit_cost, notes,
+             reference_type, reference_id, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'transfer_out',$8,$9,$10,$11,'stock_transfer',$12,$13)
+          `, [
+            uuidv4(), this.companyId, this.tenantId, materialId,
+            warehouseId, toWarehouseId,
+            `${transferNumber}-OUT-${i+1}`, moveDate,
+            qty, cost,
+            `مناقلة خروج | ${transferNumber}`,
+            transferId, this.userId
+          ]);
+
+          // حركة دخول (transfer_in)
+          await pgClient.query(`
+            INSERT INTO inventory_movements
+            (id, company_id, tenant_id, material_id,
+             from_warehouse_id, to_warehouse_id,
+             movement_number, movement_type, movement_date,
+             quantity, unit_cost, notes,
+             reference_type, reference_id, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'transfer_in',$8,$9,$10,$11,'stock_transfer',$12,$13)
+          `, [
+            uuidv4(), this.companyId, this.tenantId, materialId,
+            warehouseId, toWarehouseId,
+            `${transferNumber}-IN-${i+1}`, moveDate,
+            qty, cost,
+            `مناقلة دخول | ${transferNumber}`,
+            transferId, this.userId
+          ]);
+        }
+
+        // تحديث إجمالي المناقلة
+        await pgClient.query(`
+          UPDATE stock_transfers SET total_meters = $1 WHERE id = $2
+        `, [totalQty, transferId]);
+
+        console.log(`[RSF] ✅ مناقلة ${transferNumber}: ${warehouseId?.substring(0,8)} → ${toWarehouseId?.substring(0,8)} (${move.details.length} مادة)`);
+
+      } else if (move.details && move.details.length > 0) {
+        // ═══ حركة عادية (تسوية / استلام بدون فاتورة) ═══
         for (const detail of move.details) {
           const matCode = String(detail.MatNum || detail.Num || '').trim();
           const materialId = this.materialMap[matCode] || null;
@@ -1549,19 +1709,19 @@ class RsfMapper {
              movement_number, movement_type, movement_date,
              quantity, unit_cost, notes,
              reference_type, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14)
+            VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,$9,$10,$11,'adjustment',$12)
           `, [
             uuidv4(), this.companyId, this.tenantId,
             materialId,
-            moveType === 'transfer_in' ? warehouseId : detailWarehouseId,
-            moveType === 'transfer_in' ? toWarehouseId : detailWarehouseId,
-            `RSF-MV-${moveSeq}`, moveType, moveDate,
+            detailWarehouseId,
+            `RSF-ADJ-${moveSeq}`, moveType, moveDate,
             qty, cost,
-            move.notes || `حركة مستودع رقم ${move.number}`,
-            'rsf_import', this.userId
+            move.notes || `تسوية مخزنية رقم ${move.number}`,
+            this.userId
           ]);
         }
       } else {
+        // حركة بدون تفاصيل (هيدر فقط)
         moveSeq++;
         await pgClient.query(`
           INSERT INTO inventory_movements
@@ -1569,19 +1729,21 @@ class RsfMapper {
            from_warehouse_id, to_warehouse_id,
            movement_number, movement_type, movement_date,
            quantity, notes, reference_type, created_by)
-          VALUES ($1,$2,$3,$4,$5,$6,$7,$8,0,$9,$10,$11)
+          VALUES ($1,$2,$3,$4,$4,$5,$6,$7,0,$8,'adjustment',$9)
         `, [
           uuidv4(), this.companyId, this.tenantId,
-          warehouseId, warehouseId,
-          `RSF-MV-${moveSeq}`, moveType, moveDate,
-          move.notes || `حركة مستودع رقم ${move.number}`,
-          'rsf_import', this.userId
+          warehouseId,
+          `RSF-ADJ-${moveSeq}`, moveType, moveDate,
+          move.notes || `تسوية مخزنية رقم ${move.number}`,
+          this.userId
         ]);
       }
 
       inserted++;
-      this._emit('استيراد حركات المستودع', inserted, moves.length);
+      this._emit('استيراد حركات المستودع', inserted, standaloneMoves.length);
     }
+
+    console.log(`[RSF] ✅ حركات المخزون: ${inserted} مستقلة + ${transferSeq} مناقلة`);
     return inserted;
   }
 
