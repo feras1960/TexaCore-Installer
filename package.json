@@ -39,6 +39,7 @@
     "electron-builder": "^25.1.8"
   },
   "build": {
+    "afterPack": "./scripts/afterPack.cjs",
     "appId": "com.texacore.installer",
     "productName": "TexaCore ERP",
     "copyright": "Copyright © 2026 TexaCore",

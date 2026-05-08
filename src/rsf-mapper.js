@@ -20,6 +20,7 @@ class RsfMapper {
     this.costCenterMap = {};   // رمز مركز → UUID
     this.customerMap = {};     // رمز عميل → UUID
     this.supplierMap = {};     // رمز مورد → UUID
+    this.supplierNameMap = {};  // رمز مورد → اسم المورد
     this.customerByAccountMap = {};  // رمز حساب محاسبي (161xxx) → UUID عميل
     this.supplierByAccountMap = {};  // رمز حساب محاسبي (261xxx) → UUID مورد
     this.materialMap = {};     // رمز مادة → UUID (fabric_materials)
@@ -58,7 +59,7 @@ class RsfMapper {
 
       // تعطيل الـ triggers أثناء الاستيراد بالكامل
       const importTables = [
-        'sales_invoice_items', 'sales_invoices',
+        'sales_transaction_items', 'sales_invoice_items', 'sales_transactions', 'sales_invoices',
         'purchase_transaction_items', 'purchase_transactions',
         'purchase_invoice_items', 'purchase_invoices',
         'inventory_movements', 'inventory_stock',
@@ -110,6 +111,10 @@ class RsfMapper {
       this._emit('استيراد المواد', 0, summary.counts.materials);
       results.counts.materials = await this._insertMaterials(pgClient);
 
+      // 8.5. قوائم الأسعار (جملة، مفرد، نصف جملة، خاص...)
+      this._emit('إنشاء قوائم الأسعار', 0, 1);
+      results.counts.priceLists = await this._createPriceLists(pgClient);
+
       // 9. السنة المالية
       this._emit('إنشاء السنة المالية', 0, 1);
       results.counts.fiscalYear = await this._insertFiscalYear(pgClient);
@@ -155,6 +160,187 @@ class RsfMapper {
         try { await pgClient.query(`ALTER TABLE ${t} ENABLE TRIGGER ALL`); } catch {}
       }
 
+      // ═══ مزامنة يدوية: purchase_invoices → purchase_transactions ═══
+      // الـ triggers كانت معطلة أثناء INSERT، لذا نزامن يدوياً الآن
+      this._emit('مزامنة فواتير المشتريات', 0, 1);
+      try {
+        await pgClient.query(`
+          INSERT INTO purchase_transactions (
+            id, tenant_id, company_id, branch_id, stage, invoice_no,
+            supplier_id, doc_date, invoice_date, due_date,
+            warehouse_id, receipt_mode, shipment_id,
+            currency, exchange_rate,
+            subtotal, discount_amount, tax_amount, expenses_total, total_amount,
+            paid_amount, balance,
+            is_posted, is_active,
+            journal_entry_id, notes, supplier_invoice_number, supplier_invoice_date,
+            supplier_notes, confirmation_status,
+            created_by, created_at, updated_at,
+            expenses, attachments
+          )
+          SELECT
+            pi.id, pi.tenant_id, pi.company_id, pi.branch_id,
+            CASE
+              WHEN pi.status IN ('posted','paid','completed') THEN 'received'
+              WHEN pi.document_stage IN ('request','quotation','draft','confirmed','received','posted','cancelled') THEN pi.document_stage
+              WHEN pi.document_stage = 'invoice' THEN 'confirmed'
+              ELSE 'draft'
+            END,
+            pi.invoice_number,
+            pi.supplier_id, pi.invoice_date, pi.invoice_date, pi.due_date,
+            pi.warehouse_id, pi.receipt_mode, pi.shipment_id,
+            pi.currency, COALESCE(pi.exchange_rate, 1),
+            COALESCE(pi.subtotal, 0), COALESCE(pi.discount_amount, 0),
+            COALESCE(pi.tax_amount, 0), COALESCE(pi.expenses_total, 0),
+            COALESCE(pi.total_amount, 0),
+            0, COALESCE(pi.total_amount, 0),
+            CASE WHEN pi.status IN ('posted','paid','completed') THEN true ELSE COALESCE(pi.is_posted, false) END,
+            true,
+            pi.journal_entry_id, pi.notes, pi.supplier_invoice_number, pi.supplier_invoice_date,
+            pi.supplier_notes,
+            CASE WHEN pi.confirmation_status IN ('pending','confirmed','rejected') THEN pi.confirmation_status ELSE 'pending' END,
+            pi.created_by, pi.created_at, pi.updated_at,
+            COALESCE(pi.expenses, '[]'::jsonb), COALESCE(pi.attachments, '[]'::jsonb)
+          FROM purchase_invoices pi
+          WHERE pi.company_id = $1
+          ON CONFLICT (id) DO UPDATE SET
+            stage = EXCLUDED.stage,
+            invoice_no = EXCLUDED.invoice_no,
+            supplier_id = EXCLUDED.supplier_id,
+            total_amount = EXCLUDED.total_amount,
+            is_posted = EXCLUDED.is_posted,
+            updated_at = now()
+        `, [this.companyId]);
+      } catch (e) { console.warn('[RSF] ⚠️ purchase sync:', e.message); }
+
+      // ═══ مزامنة يدوية: sales_invoices → sales_transactions ═══
+      this._emit('مزامنة فواتير المبيعات', 0, 1);
+      try {
+        await pgClient.query(`
+          INSERT INTO sales_transactions (
+            id, tenant_id, company_id, branch_id, stage, invoice_no,
+            customer_id, customer_name, salesperson_id,
+            doc_date, invoice_date, due_date,
+            warehouse_id,
+            currency, exchange_rate,
+            subtotal, discount_amount, tax_amount, total_amount,
+            paid_amount, balance,
+            is_posted, is_active,
+            journal_entry_id, notes,
+            created_by, created_at, updated_at
+          )
+          SELECT
+            si.id, si.tenant_id, si.company_id, si.branch_id,
+            CASE
+              WHEN si.status = 'posted' THEN 'posted'
+              WHEN si.status = 'paid' THEN 'paid'
+              WHEN si.document_stage IN ('draft','quotation','reservation','confirmed','order','delivery','invoice','posted','cancelled','paid') THEN si.document_stage
+              ELSE 'draft'
+            END,
+            si.invoice_number,
+            si.customer_id, NULL, NULL,
+            si.invoice_date, si.invoice_date, si.due_date,
+            si.warehouse_id,
+            si.currency, COALESCE(si.exchange_rate, 1),
+            COALESCE(si.subtotal, 0), COALESCE(si.discount_amount, 0),
+            COALESCE(si.tax_amount, 0), COALESCE(si.total_amount, 0),
+            0, COALESCE(si.total_amount, 0),
+            CASE WHEN si.status IN ('posted','paid') THEN true ELSE COALESCE(si.is_posted, false) END,
+            true,
+            si.journal_entry_id, si.notes,
+            si.created_by, si.created_at, si.updated_at
+          FROM sales_invoices si
+          WHERE si.company_id = $1
+          ON CONFLICT (id) DO UPDATE SET
+            stage = EXCLUDED.stage,
+            invoice_no = EXCLUDED.invoice_no,
+            customer_id = EXCLUDED.customer_id,
+            total_amount = EXCLUDED.total_amount,
+            is_posted = EXCLUDED.is_posted,
+            updated_at = now()
+        `, [this.companyId]);
+      } catch (e) { console.warn('[RSF] ⚠️ sales sync:', e.message); }
+
+      // ═══ مزامنة البنود: purchase_invoice_items → purchase_transaction_items ═══
+      this._emit('مزامنة بنود المشتريات', 0, 1);
+      try {
+        await pgClient.query(`
+          INSERT INTO purchase_transaction_items (
+            id, transaction_id, line_number,
+            product_id, material_id, item_code,
+            description, description_ar,
+            quantity, received_qty, returned_qty,
+            unit, unit_price,
+            discount_amount, discount_percent,
+            tax_rate, tax_amount,
+            subtotal, total,
+            color_id, color_name,
+            warehouse_id, cost_price,
+            notes, created_at, updated_at
+          )
+          SELECT
+            pii.id, pii.invoice_id, pii.line_number,
+            pii.product_id, pii.material_id, NULL,
+            pii.description, pii.description,
+            pii.quantity, pii.quantity, 0,
+            NULL, pii.unit_price,
+            COALESCE(pii.discount_amount, 0), COALESCE(pii.discount_percentage, 0),
+            COALESCE(pii.tax_rate, 0), COALESCE(pii.tax_amount, 0),
+            COALESCE(pii.subtotal, 0), COALESCE(pii.total, 0),
+            pii.color_id, pii.color_name,
+            pii.warehouse_id, COALESCE(pii.unit_cost, pii.unit_price),
+            pii.notes, pii.created_at, pii.updated_at
+          FROM purchase_invoice_items pii
+          JOIN purchase_invoices pi ON pi.id = pii.invoice_id
+          WHERE pi.company_id = $1
+          ON CONFLICT (id) DO UPDATE SET
+            quantity = EXCLUDED.quantity,
+            unit_price = EXCLUDED.unit_price,
+            total = EXCLUDED.total,
+            updated_at = now()
+        `, [this.companyId]);
+      } catch (e) { console.warn('[RSF] ⚠️ purchase items sync:', e.message); }
+
+      // ═══ مزامنة البنود: sales_invoice_items → sales_transaction_items ═══
+      this._emit('مزامنة بنود المبيعات', 0, 1);
+      try {
+        await pgClient.query(`
+          INSERT INTO sales_transaction_items (
+            id, transaction_id, line_number,
+            product_id, material_id, item_code,
+            description, description_ar,
+            quantity, delivered_qty, returned_qty,
+            unit, unit_price,
+            discount_amount, discount_percent,
+            tax_rate, tax_amount,
+            subtotal, total,
+            warehouse_id, cost_price,
+            notes, created_at, updated_at
+          )
+          SELECT
+            sii.id, sii.invoice_id, sii.line_number,
+            sii.product_id, NULL, NULL,
+            sii.description, sii.description,
+            sii.quantity, sii.quantity, 0,
+            NULL, sii.unit_price,
+            COALESCE(sii.discount_amount, 0), COALESCE(sii.discount_percent, 0),
+            COALESCE(sii.tax_rate, 0), COALESCE(sii.tax_amount, 0),
+            COALESCE(sii.subtotal, 0), COALESCE(sii.total, 0),
+            sii.warehouse_id, COALESCE(sii.unit_cost, sii.unit_price),
+            sii.notes, sii.created_at, sii.updated_at
+          FROM sales_invoice_items sii
+          JOIN sales_invoices si ON si.id = sii.invoice_id
+          WHERE si.company_id = $1
+          ON CONFLICT (id) DO UPDATE SET
+            quantity = EXCLUDED.quantity,
+            unit_price = EXCLUDED.unit_price,
+            total = EXCLUDED.total,
+            updated_at = now()
+        `, [this.companyId]);
+      } catch (e) { console.warn('[RSF] ⚠️ sales items sync:', e.message); }
+
+      console.log('[RSF] ✅ مزامنة المشتريات والمبيعات (رؤوس + بنود) إلى جداول الـ transactions تمت بنجاح');
+
       await pgClient.query('COMMIT');
 
       // 11. إنشاء المستخدمين (بعد COMMIT — يستخدم GoTrue API منفصل)
@@ -170,7 +356,7 @@ class RsfMapper {
     } catch (err) {
       // إعادة تفعيل الـ triggers حتى في حالة الخطأ
       const importTables = [
-        'sales_invoice_items', 'sales_invoices',
+        'sales_transaction_items', 'sales_invoice_items', 'sales_transactions', 'sales_invoices',
         'purchase_transaction_items', 'purchase_transactions',
         'purchase_invoice_items', 'purchase_invoices',
         'inventory_movements', 'inventory_stock',
@@ -325,10 +511,12 @@ class RsfMapper {
 
     // 1. سطور فواتير المبيعات والمشتريات (الجداول الموحدة + القديمة)
     try { await pgClient.query(`DELETE FROM sales_invoice_items WHERE tenant_id = $1`, [this.tenantId]); } catch {}
+    try { await pgClient.query(`DELETE FROM sales_transaction_items WHERE transaction_id IN (SELECT id FROM sales_transactions WHERE company_id = $1)`, [this.companyId]); } catch {}
     try { await pgClient.query(`DELETE FROM purchase_transaction_items WHERE transaction_id IN (SELECT id FROM purchase_transactions WHERE company_id = $1)`, [this.companyId]); } catch {}
     try { await pgClient.query(`DELETE FROM purchase_invoice_items WHERE tenant_id = $1`, [this.tenantId]); } catch {}
 
     // 2. رؤوس الفواتير (الجداول الموحدة + القديمة)
+    try { await pgClient.query(`DELETE FROM sales_transactions WHERE company_id = $1`, [this.companyId]); } catch {}
     try { await pgClient.query(`DELETE FROM sales_invoices WHERE company_id = $1`, [this.companyId]); } catch {}
     try { await pgClient.query(`DELETE FROM purchase_transactions WHERE company_id = $1`, [this.companyId]); } catch {}
     try { await pgClient.query(`DELETE FROM purchase_invoices WHERE company_id = $1`, [this.companyId]); } catch {}
@@ -590,6 +778,7 @@ class RsfMapper {
 
       const actualSupId = supResult.rows[0]?.id || id;
       this.supplierMap[code] = actualSupId;
+      this.supplierNameMap[code] = sup.nameAr || sup.name || code;
       // ربط رمز الحساب المحاسبي أيضاً (للفواتير من البنية البديلة)
       // إذا كان الرمز نفسه يبدأ بـ 261 فهو رمز محاسبي بالفعل
       const supAccCode = sup.accountCode || (code.startsWith('261') ? code : `261${code.padStart(3, '0')}`);
@@ -850,13 +1039,17 @@ class RsfMapper {
       await pgClient.query(`
         INSERT INTO products 
         (id, tenant_id, company_id, sku, name, name_ar, name_en, 
-         base_uom, cost_price, selling_price, product_type, status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,'standard','active')
+         base_uom, cost_price, selling_price, default_price, currency_code,
+         minimum_stock, maximum_stock, product_type, status)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,'standard','active')
         ON CONFLICT DO NOTHING
       `, [
         productId, this.tenantId, this.companyId,
         sku, nameEn || nameAr, nameAr, nameEn,
-        unitCode, mat.buyPrice || 0, mat.sellPrice || 0
+        unitCode, mat.buyPrice || 0, mat.sellPrice || 0,
+        mat.wholesalePrice || mat.sellPrice || 0,
+        this.baseCurrencyCode || 'UAH',
+        mat.minimumPr || 0, mat.smax || 0
       ]);
 
       // إدخال في fabric_materials مع group_id
@@ -905,6 +1098,68 @@ class RsfMapper {
       console.log(`[RSF] 📦 ${this._materialStockMap.length} سجل رصيد مستودع محفوظ للإدراج`);
     }
     return inserted + Object.keys(groupMap).length;
+  }
+
+  // ═══════════════════════════════════════════════════════
+  // قوائم الأسعار (جملة، مفرد، نصف جملة، خاص...)
+  // ═══════════════════════════════════════════════════════
+
+  async _createPriceLists(pgClient) {
+    const materials = this.reader.getMaterials();
+    // فقط المواد الفعلية (ليست مجموعات)
+    const items = materials.filter(m => !m.isSub && this.productMap[m.code]);
+    if (items.length === 0) return 0;
+
+    // ═══ تعريف قوائم الأسعار ═══
+    const PRICE_LISTS = [
+      { code: 'RETAIL',         nameAr: 'سعر المفرد',      nameEn: 'Retail Price',         field: 'sellPrice',         isDefault: true },
+      { code: 'WHOLESALE',      nameAr: 'سعر الجملة',      nameEn: 'Wholesale Price',      field: 'wholesalePrice',    isDefault: false },
+      { code: 'HALF_WHOLESALE', nameAr: 'سعر نصف الجملة',  nameEn: 'Half Wholesale Price', field: 'halfWholesalePrice', isDefault: false },
+      { code: 'MIN_PRICE',      nameAr: 'الحد الأدنى للسعر', nameEn: 'Minimum Price',       field: 'minPrice',          isDefault: false },
+      { code: 'SPECIAL',        nameAr: 'السعر الخاص',     nameEn: 'Special Price',        field: 'specialPrice',      isDefault: false },
+      { code: 'FOREIGN',        nameAr: 'السعر بالعملة الأجنبية', nameEn: 'Foreign Currency Price', field: 'foreignPrice', isDefault: false },
+    ];
+
+    let totalItems = 0;
+
+    for (const pl of PRICE_LISTS) {
+      // تحقق إن كان هناك أي منتج بسعر > 0 لهذه القائمة
+      const hasAnyPrice = items.some(m => (m[pl.field] || 0) > 0);
+      if (!hasAnyPrice && !pl.isDefault) continue; // لا ننشئ قوائم فارغة
+
+      const plId = uuidv4();
+      const currency = pl.code === 'FOREIGN' ? (this.foreignCurrencyCode || 'USD') : (this.baseCurrencyCode || 'UAH');
+
+      await pgClient.query(`
+        INSERT INTO price_lists (id, tenant_id, company_id, code, name, name_ar, currency, is_active, is_default)
+        VALUES ($1, $2, $3, $4, $5, $6, $7, true, $8)
+        ON CONFLICT DO NOTHING
+      `, [plId, this.tenantId, this.companyId, pl.code, pl.nameEn, pl.nameAr, currency, pl.isDefault]);
+
+      // إضافة بنود الأسعار
+      let itemCount = 0;
+      for (const mat of items) {
+        const price = mat[pl.field] || 0;
+        if (price <= 0) continue;
+
+        const productId = this.productMap[mat.code];
+        if (!productId) continue;
+
+        await pgClient.query(`
+          INSERT INTO price_list_items (id, tenant_id, company_id, price_list_id, product_id, price)
+          VALUES ($1, $2, $3, $4, $5, $6)
+          ON CONFLICT DO NOTHING
+        `, [uuidv4(), this.tenantId, this.companyId, plId, productId, price]);
+        itemCount++;
+      }
+      totalItems += itemCount;
+      if (itemCount > 0) {
+        console.log(`[RSF] ✅ قائمة "${pl.nameAr}" (${pl.code}): ${itemCount} منتج بأسعار`);
+      }
+    }
+
+    console.log(`[RSF] ✅ تم إنشاء ${PRICE_LISTS.length} قوائم أسعار مع ${totalItems} بند`);
+    return totalItems;
   }
 
   // ═══════════════════════════════════════════════════════
@@ -1000,32 +1255,32 @@ class RsfMapper {
         }
 
         // ═══ حساب العملة وأسعار الصرف ═══
+        // currencyMap هو المصدر الوحيد للحقيقة عن عملة السطر
         const currInfo = this.currencyMap[line.currencyNum] || { code: this.baseCurrencyCode, rate: 1 };
-        const isBaseCurrency = (line.currencyNum === 0 || line.currencyNum === 1 || currInfo.code === this.baseCurrencyCode);
+        const isBaseCurrency = (line.currencyNum === 0 || currInfo.code === this.baseCurrencyCode);
         
         let localDebit = 0, localCredit = 0;
         let fcDebit = 0, fcCredit = 0;
         let exchangeRate = 1;
-        // العملة التي سيتم تخزينها — قد تختلف عن currInfo.code
+        // ═══ العملة تُحدد فقط من currencyMap — لا نُغيّرها أبداً ═══
         let lineCurrency = currInfo.code;
 
         if (isBaseCurrency) {
+          // ═══ السطر بالعملة المحلية (UAH) ═══
+          // Total/Total1 = المبلغ بالغريفن
+          // LocalTot = نفس المبلغ (بالغريفن)
+          // MianTot = المعادل بالدولار (إعلامي فقط — لا يُغيّر العملة!)
           localDebit = line.debit > 0 ? (line.localAmount || line.debit) : 0;
           localCredit = line.credit > 0 ? (line.localAmount || line.credit) : 0;
-          if (line.foreignAmount && line.foreignAmount > 0) {
-            const origAmt = line.debit || line.credit;
-            if (origAmt > 0) {
-              fcDebit = line.debit > 0 ? line.foreignAmount : 0;
-              fcCredit = line.credit > 0 ? line.foreignAmount : 0;
-              exchangeRate = origAmt / line.foreignAmount;
-              // ═══ إصلاح: إذا كان هناك مبلغ أجنبي → العملة هي العملة الأجنبية ═══
-              // currencyNum=1 (العملة المحلية) لكن foreignAmount > 0 يعني العملية بالدولار مثلاً
-              if (this.foreignCurrencyCode && this.foreignCurrencyCode !== this.baseCurrencyCode) {
-                lineCurrency = this.foreignCurrencyCode;
-              }
-            }
-          }
+          // MianTot هنا إعلامي فقط — نحفظه كمرجع لكن لا نُغيّر lineCurrency
+          exchangeRate = 1;
+          // لا fcDebit/fcCredit — السطر بالعملة المحلية
         } else {
+          // ═══ السطر بعملة أجنبية (USD مثلاً) ═══
+          // Total/Total1 = المبلغ بالعملة الأجنبية (USD)
+          // LocalTot = المعادل بالغريفن
+          // MianTot = نفس Total (بالعملة الأجنبية)
+          lineCurrency = currInfo.code;
           fcDebit = line.debit || 0;
           fcCredit = line.credit || 0;
           localDebit = line.debit > 0 ? (line.localAmount || line.debit * currInfo.rate) : 0;
@@ -1287,7 +1542,7 @@ class RsfMapper {
           // العملة وسعر الصرف
           const currNum = parseInt(raw.Currency) || 1;
           const currInfo = this.currencyMap[currNum] || { code: this.baseCurrencyCode, rate: 1 };
-          const isBaseCurrency = (currNum === 0 || currNum === 1 || currInfo.code === this.baseCurrencyCode);
+          const isBaseCurrency = (currNum === 0 || currInfo.code === this.baseCurrencyCode);
           const localTotal = parseFloat(raw.LocalTot) || invTotal;
           const fcTotal = parseFloat(raw.MianTot) || 0;
 
@@ -1377,19 +1632,29 @@ class RsfMapper {
     for (const inv of invoices) {
       const invId = uuidv4();
       const invDate = inv.date ? new Date(inv.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
-      const supplierId = this.supplierMap[inv.supplierCode] 
+      const supplierId = this.supplierMap[inv.supplierCode]
                       || this.supplierByAccountMap[inv.supplierCode] 
                       || null;
       const warehouseId = this.warehouseMap['main'] || null;
       const invTotal = inv.netTotal || inv.total || 0;
 
-      // ═══ الكتابة في purchase_transactions (الجدول الموحد الذي تقرأه واجهة دورة الشراء) ═══
+      // ═══ الكتابة في purchase_invoices (الجدول الرئيسي الذي تقرأه واجهة useReceiptSources) ═══
+      // receipt_status='received' + status='posted' + document_stage='posted'
+      // → لا تظهر في أذون الاستلام (useReceiptSources يفلتر receipt_status != 'received')
+      // → تظهر في دورة الشراء (عبر trigger trg_sync_to_purchase_transactions الذي يزامن تلقائياً)
+      // تحديد اسم المورد
+      const supplierName = this.supplierNameMap[inv.supplierCode]
+        || (inv._raw ? String(inv._raw.Document || '').trim() : '')
+        || '';
+
       await pgClient.query(`
-        INSERT INTO purchase_transactions
-        (id, company_id, tenant_id, invoice_no, doc_date, invoice_date,
-         supplier_id, stage, total_amount, subtotal, currency, notes,
-         warehouse_id, is_posted, receipt_mode, balance)
-        VALUES ($1,$2,$3,$4,$5,$5,$6,'posted',$7,$7,$8,$9,$10,true,'direct',$7)
+        INSERT INTO purchase_invoices
+        (id, company_id, tenant_id, invoice_number, invoice_date,
+         supplier_id, supplier_name, status, is_posted, posted_at,
+         subtotal, total_amount, currency, notes,
+         warehouse_id, receipt_mode, receipt_status, document_stage,
+         confirmation_status, created_by)
+        VALUES ($1,$2,$3,$4,$5,$6,$12,'posted',true,NOW(),$7,$7,$8,$9,$10,'direct','received','posted','confirmed',$11)
         ON CONFLICT DO NOTHING
       `, [
         invId, this.companyId, this.tenantId,
@@ -1397,10 +1662,11 @@ class RsfMapper {
         supplierId,
         invTotal,
         this.baseCurrencyCode, inv.notes || '',
-        warehouseId
+        warehouseId, this.userId,
+        supplierName
       ]);
 
-      // إدراج سطور الفاتورة في purchase_transaction_items + حركات المخزون
+      // إدراج سطور الفاتورة في purchase_invoice_items + حركات المخزون
       if (inv.lines && inv.lines.length > 0) {
         for (let i = 0; i < inv.lines.length; i++) {
           const line = inv.lines[i];
@@ -1418,18 +1684,17 @@ class RsfMapper {
             || '';
 
           await pgClient.query(`
-            INSERT INTO purchase_transaction_items
-            (id, transaction_id, line_number, material_id,
+            INSERT INTO purchase_invoice_items
+            (id, tenant_id, invoice_id, line_number, material_id,
              description, quantity, unit_price, discount_amount,
-             subtotal, total, received_qty, notes)
+             subtotal, total, notes)
             VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12)
           `, [
-            uuidv4(), invId, i + 1,
+            uuidv4(), this.tenantId, invId, i + 1,
             materialId,
             materialName,
             qty, price, disc,
             qty * price, total,
-            qty,
             String(line.Notes || '').trim()
           ]);
 
@@ -1442,16 +1707,16 @@ class RsfMapper {
               (id, company_id, tenant_id, material_id,
                from_warehouse_id, to_warehouse_id,
                movement_number, movement_type, movement_date,
-               quantity, unit_cost, notes,
-               reference_type, reference_id, created_by)
-              VALUES ($1,$2,$3,$4,$5,$5,$6,'purchase',$7,$8,$9,$10,'purchase',$11,$12)
+               quantity, unit_cost, total_cost, notes,
+               reference_type, reference_id, reference_number, created_by)
+              VALUES ($1,$2,$3,$4,$5,$5,$6,'purchase',$7,$8,$9,$10,$11,'purchase',$12,$13,$14)
             `, [
               uuidv4(), this.companyId, this.tenantId, materialId,
               lineWarehouseId,
               `RSF-PI-MV-${inv.number}-${i+1}`, invDate,
-              qty, price,
+              qty, price, qty * price,
               `شراء - فاتورة ${inv.number}`,
-              invId, this.userId
+              invId, `RSF-PI-${inv.number}`, this.userId
             ]);
           }
         }
@@ -1475,7 +1740,7 @@ class RsfMapper {
           // العملة وسعر الصرف
           const currNum = parseInt(raw.Currency) || 1;
           const currInfo = this.currencyMap[currNum] || { code: this.baseCurrencyCode, rate: 1 };
-          const isBaseCurrency = (currNum === 0 || currNum === 1 || currInfo.code === this.baseCurrencyCode);
+          const isBaseCurrency = (currNum === 0 || currInfo.code === this.baseCurrencyCode);
           const localTotal = parseFloat(raw.LocalTot) || invTotal;
           const fcTotal = parseFloat(raw.MianTot) || 0;
 
@@ -1541,7 +1806,7 @@ class RsfMapper {
 
           // ═══ ربط القيد بالفاتورة (الاتجاه العكسي) ═══
           await pgClient.query(`
-            UPDATE purchase_transactions 
+            UPDATE purchase_invoices 
             SET journal_entry_id = $1
             WHERE id = $2
           `, [jeId, invId]);
@@ -1653,16 +1918,16 @@ class RsfMapper {
             (id, company_id, tenant_id, material_id,
              from_warehouse_id, to_warehouse_id,
              movement_number, movement_type, movement_date,
-             quantity, unit_cost, notes,
-             reference_type, reference_id, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,'transfer_out',$8,$9,$10,$11,'stock_transfer',$12,$13)
+             quantity, unit_cost, total_cost, notes,
+             reference_type, reference_id, reference_number, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'transfer_out',$8,$9,$10,$11,$12,'stock_transfer',$13,$14,$15)
           `, [
             uuidv4(), this.companyId, this.tenantId, materialId,
             warehouseId, toWarehouseId,
             `${transferNumber}-OUT-${i+1}`, moveDate,
-            qty, cost,
+            qty, cost, qty * cost,
             `مناقلة خروج | ${transferNumber}`,
-            transferId, this.userId
+            transferId, transferNumber, this.userId
           ]);
 
           // حركة دخول (transfer_in)
@@ -1671,16 +1936,16 @@ class RsfMapper {
             (id, company_id, tenant_id, material_id,
              from_warehouse_id, to_warehouse_id,
              movement_number, movement_type, movement_date,
-             quantity, unit_cost, notes,
-             reference_type, reference_id, created_by)
-            VALUES ($1,$2,$3,$4,$5,$6,$7,'transfer_in',$8,$9,$10,$11,'stock_transfer',$12,$13)
+             quantity, unit_cost, total_cost, notes,
+             reference_type, reference_id, reference_number, created_by)
+            VALUES ($1,$2,$3,$4,$5,$6,$7,'transfer_in',$8,$9,$10,$11,$12,'stock_transfer',$13,$14,$15)
           `, [
             uuidv4(), this.companyId, this.tenantId, materialId,
             warehouseId, toWarehouseId,
             `${transferNumber}-IN-${i+1}`, moveDate,
-            qty, cost,
+            qty, cost, qty * cost,
             `مناقلة دخول | ${transferNumber}`,
-            transferId, this.userId
+            transferId, transferNumber, this.userId
           ]);
         }
 
@@ -1707,17 +1972,17 @@ class RsfMapper {
             (id, company_id, tenant_id, material_id,
              from_warehouse_id, to_warehouse_id,
              movement_number, movement_type, movement_date,
-             quantity, unit_cost, notes,
-             reference_type, created_by)
-            VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,$9,$10,$11,'adjustment',$12)
+             quantity, unit_cost, total_cost, notes,
+             reference_type, reference_number, created_by)
+            VALUES ($1,$2,$3,$4,$5,$5,$6,$7,$8,$9,$10,$11,$12,'adjustment',$13,$14)
           `, [
             uuidv4(), this.companyId, this.tenantId,
             materialId,
             detailWarehouseId,
             `RSF-ADJ-${moveSeq}`, moveType, moveDate,
-            qty, cost,
+            qty, cost, qty * cost,
             move.notes || `تسوية مخزنية رقم ${move.number}`,
-            this.userId
+            `RSF-ADJ-${moveSeq}`, this.userId
           ]);
         }
       } else {
@@ -1972,7 +2237,30 @@ class RsfMapper {
     if (foreignCurr) this.foreignCurrencyCode = foreignCurr.code;
 
     console.log(`[RSF] العملة المحلية: ${this.baseCurrencyCode}, الأجنبية: ${this.foreignCurrencyCode}`);
-    console.log(`[RSF] خريطة العملات:`, JSON.stringify(this.currencyMap));
+    console.log(`[RSF] خريطة العملات:`);
+    for (const [num, info] of Object.entries(this.currencyMap)) {
+      console.log(`  [RSF]   num=${num} → ${info.code} (rate=${info.rate}, name=${info.name})`);
+    }
+  }
+
+  /**
+   * ═══ اكتشاف العملة الأجنبية الفعلية للسطر ═══
+   * عندما currencyNum يشير للعملة الأساسية لكن هناك foreignAmount,
+   * نبحث عن العملة الأجنبية المناسبة من الخريطة.
+   * الأولوية: currencyMap[2] (العملة الأجنبية الرئيسية) → أول عملة غير أساسية
+   */
+  _detectLineForeignCurrency(lineCurrencyNum) {
+    // أولاً: العملة الأجنبية الرئيسية (num=2 عادةً)
+    if (this.foreignCurrencyCode && this.foreignCurrencyCode !== this.baseCurrencyCode) {
+      return this.foreignCurrencyCode;
+    }
+    // ثانياً: أول عملة غير أساسية في الخريطة
+    for (const [num, info] of Object.entries(this.currencyMap)) {
+      if (info.code !== this.baseCurrencyCode && parseInt(num) !== lineCurrencyNum) {
+        return info.code;
+      }
+    }
+    return null;
   }
 
   // ═══════════════════════════════════════════════════════
@@ -2056,7 +2344,9 @@ class RsfMapper {
           default_cash_account_id = COALESCE(default_cash_account_id, $4),
           default_bank_account_id = COALESCE(default_bank_account_id, $5),
           default_receivable_account_id = COALESCE(default_receivable_account_id, $6),
-          default_payable_account_id = COALESCE(default_payable_account_id, $7)
+          default_payable_account_id = COALESCE(default_payable_account_id, $7),
+          vat_enabled = false,
+          vat_rate = 0
         WHERE company_id = $1
       `, [this.companyId, this.baseCurrencyCode, '{' + supportedCurrencies.join(',') + '}',
           cashId, bankId, recvId, payId]);
@@ -2065,8 +2355,9 @@ class RsfMapper {
         INSERT INTO company_accounting_settings 
         (company_id, base_currency, supported_currencies,
          default_cash_account_id, default_bank_account_id,
-         default_receivable_account_id, default_payable_account_id)
-        VALUES ($1,$2,$3,$4,$5,$6,$7)
+         default_receivable_account_id, default_payable_account_id,
+         vat_enabled, vat_rate)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,false,0)
         ON CONFLICT DO NOTHING
       `, [this.companyId, this.baseCurrencyCode, '{' + supportedCurrencies.join(',') + '}',
           cashId, bankId, recvId, payId]);

@@ -494,6 +494,18 @@ class RsfReader {
         barcode: String(row.Barcode || '').trim(),
         notes: String(row.Notes || '').trim(),
         warehouseBalances, // { warehouseNum: quantity }
+        // ═══ مجموعات الأسعار الإضافية ═══
+        wholesalePrice: parseFloat(row.AllPrice) || 0,        // سعر الجملة
+        halfWholesalePrice: parseFloat(row.HalfPrice) || 0,   // سعر نصف الجملة
+        specialPrice: parseFloat(row.PrivatPrice) || 0,       // السعر الخاص
+        foreignPrice: parseFloat(row.ForeignPrice) || 0,      // السعر بالعملة الأجنبية
+        minPriceInFirst: parseFloat(row.MinPriceInFerst) || 0,// سعر المفرد الأول
+        maxPrice: parseFloat(row.MaxPrice) || 0,              // أعلى سعر
+        unit2Price: parseFloat(row.Unit2Price) || 0,          // سعر الوحدة الثانية
+        mainUnitPrice: parseFloat(row.MainUnitPrice) || 0,    // سعر الوحدة الرئيسية
+        mainUnit2Price: parseFloat(row.MainUnit2Price) || 0,  // سعر الوحدة الرئيسية 2
+        minimumPr: parseFloat(row.MinimumPr) || 0,            // الحد الأدنى للكمية/السعر
+        smax: parseFloat(row.Smax) || 0,                      // الحد الأعلى للمخزون
       };
     });
   }
