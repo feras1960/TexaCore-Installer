@@ -184,9 +184,46 @@ class ServiceManager {
   async startPostgres() {
     if (this.processes.postgres) return;
 
-    // Check port
+    // Check port — auto-kill stale PostgreSQL if needed
     if (!await this._isPortFree(PG_PORT)) {
-      throw new Error(`Port ${PG_PORT} is already in use. Please close any existing PostgreSQL instance.`);
+      console.warn(`[ServiceManager] Port ${PG_PORT} in use — attempting to stop stale PostgreSQL...`);
+      
+      // Try pg_ctl stop first (graceful)
+      try {
+        const pgCtl = path.join(this.pgBin, this.isWindows ? 'pg_ctl.exe' : 'pg_ctl');
+        const stopEnv = { ...process.env };
+        if (this.isWindows) {
+          stopEnv.PATH = this.pgBin + ';' + (stopEnv.PATH || '');
+        }
+        execSync(`"${pgCtl}" stop -D "${this.pgDataDir}" -m fast -w -t 10`, { env: stopEnv, timeout: 15000, stdio: 'ignore' });
+        console.log('[ServiceManager] Stale PostgreSQL stopped via pg_ctl');
+        await this._sleep(1000);
+      } catch {
+        // pg_ctl failed — force kill by port
+        console.warn('[ServiceManager] pg_ctl stop failed — force killing process on port', PG_PORT);
+        try {
+          if (this.isWindows) {
+            // Find and kill process on port 54322
+            const netstat = execSync(`netstat -ano | findstr :${PG_PORT}`, { timeout: 5000 }).toString();
+            const lines = netstat.split('\n').filter(l => l.includes('LISTENING'));
+            for (const line of lines) {
+              const pid = line.trim().split(/\s+/).pop();
+              if (pid && !isNaN(pid)) {
+                try { execSync(`taskkill /F /PID ${pid}`, { timeout: 5000 }); } catch {}
+              }
+            }
+          } else {
+            execSync(`lsof -ti:${PG_PORT} | xargs kill -9 2>/dev/null || true`, { timeout: 5000 });
+          }
+          await this._sleep(2000);
+        } catch { /* best effort */ }
+      }
+      
+      // Re-check
+      if (!await this._isPortFree(PG_PORT)) {
+        throw new Error(`Port ${PG_PORT} is still in use after cleanup. Please manually close any PostgreSQL instance and try again.`);
+      }
+      console.log(`[ServiceManager] Port ${PG_PORT} is now free`);
     }
 
     console.log('[ServiceManager] Starting PostgreSQL on port', PG_PORT);
