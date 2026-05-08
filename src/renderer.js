@@ -436,22 +436,48 @@ function checkSubdomain(value) {
     return;
   }
 
+  // Basic format validation
+  const cleaned = value.toLowerCase().replace(/[^a-z0-9-]/g, '');
+  if (cleaned !== value || !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(value)) {
+    statusEl.textContent = '❌ يُسمح فقط بأحرف إنجليزية صغيرة وأرقام وشرطات';
+    statusEl.style.color = 'var(--danger)';
+    btn.disabled = true;
+    return;
+  }
+
   statusEl.textContent = 'جاري التحقق ⏳...';
   statusEl.style.color = 'var(--warning)';
   btn.disabled = true;
 
   clearTimeout(checkTimeout);
-  checkTimeout = setTimeout(() => {
-    if (value === 'admin' || value === 'test' || value === 'texacore') {
-      statusEl.textContent = '❌ النطاق غير متاح';
-      statusEl.style.color = 'var(--danger)';
-      btn.disabled = true;
-    } else {
-      statusEl.textContent = '✅ النطاق متاح!';
-      statusEl.style.color = 'var(--accent)';
+  checkTimeout = setTimeout(async () => {
+    try {
+      const res = await fetch('https://wzkklenfsaepegymfxfz.supabase.co/functions/v1/check-subdomain', {
+        method: 'POST',
+        headers: { 'Content-Type': 'application/json' },
+        body: JSON.stringify({ subdomain: value })
+      });
+      const data = await res.json();
+
+      if (data.available) {
+        statusEl.textContent = '✅ النطاق متاح!';
+        statusEl.style.color = 'var(--accent)';
+        btn.disabled = false;
+      } else {
+        const reason = data.reason === 'reserved' ? 'اسم محجوز' : 
+                       data.reason === 'taken' ? 'محجوز مسبقاً' : 
+                       data.reason === 'invalid_format' ? 'صيغة غير صحيحة' : 'غير متاح';
+        statusEl.textContent = `❌ النطاق غير متاح — ${reason}`;
+        statusEl.style.color = 'var(--danger)';
+        btn.disabled = true;
+      }
+    } catch (err) {
+      // Offline fallback — allow registration (server will validate)
+      statusEl.textContent = '⚠️ تعذر التحقق — جرّب التسجيل';
+      statusEl.style.color = 'var(--warning)';
       btn.disabled = false;
     }
-  }, 800);
+  }, 600);
 }
 
 async function registerSubdomain() {
