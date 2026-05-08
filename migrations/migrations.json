@@ -1,7 +1,7 @@
 {
   "version": "2026.05.04",
   "generated": "2026-05-04T18:21:12.260Z",
-  "totalFiles": 172,
+  "totalFiles": 173,
   "migrations": [
     {
       "order": 1,
@@ -810,11 +810,16 @@
     },
     {
       "order": 162,
+      "file": "20260506213000_fix_dashboard_rpcs_performance.sql",
+      "name": "20260506213000_fix_dashboard_rpcs_performance"
+    },
+    {
+      "order": 163,
       "file": "99999999_recalculate_balances_from_journal.sql",
       "name": "99999999_recalculate_balances_from_journal"
     },
     {
-      "order": 163,
+      "order": 164,
       "file": "99999999_rollup_group_balances.sql",
       "name": "99999999_rollup_group_balances"
     },
