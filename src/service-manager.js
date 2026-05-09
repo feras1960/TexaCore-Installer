@@ -814,23 +814,40 @@ window.__TEXACORE_CONFIG__ = {
       return;
     }
 
-    // Find cloudflared binary
+    // Find cloudflared binary (cross-platform)
+    const isWin = process.platform === 'win32';
+    const cfExe = isWin ? 'cloudflared.exe' : 'cloudflared';
     let cloudflaredBin = null;
-    const possiblePaths = [
-      '/opt/homebrew/bin/cloudflared',
-      '/usr/local/bin/cloudflared',
-      '/usr/bin/cloudflared',
-    ];
+    
+    const possiblePaths = [];
+    // 1. Bundled with app
+    possiblePaths.push(path.join(this.binsDir, 'cloudflared', cfExe));
+    // 2. System paths
+    if (isWin) {
+      possiblePaths.push(path.join(process.env.ProgramFiles || 'C:\\Program Files', 'cloudflared', cfExe));
+      possiblePaths.push(path.join(process.env.LOCALAPPDATA || '', 'cloudflared', cfExe));
+      // Common install location from winget/scoop
+      const userProfile = process.env.USERPROFILE || '';
+      if (userProfile) possiblePaths.push(path.join(userProfile, '.cloudflared', cfExe));
+    } else {
+      possiblePaths.push('/opt/homebrew/bin/cloudflared');
+      possiblePaths.push('/usr/local/bin/cloudflared');
+      possiblePaths.push('/usr/bin/cloudflared');
+    }
+    
     for (const p of possiblePaths) {
-      if (fs.existsSync(p)) { cloudflaredBin = p; break; }
+      if (p && fs.existsSync(p)) { cloudflaredBin = p; break; }
     }
 
     if (!cloudflaredBin) {
       // Try to find via PATH
       try {
-        cloudflaredBin = execSync('which cloudflared', { timeout: 3000 }).toString().trim();
+        const findCmd = isWin ? 'where cloudflared' : 'which cloudflared';
+        cloudflaredBin = execSync(findCmd, { timeout: 3000 }).toString().trim().split('\n')[0].trim();
+        if (!fs.existsSync(cloudflaredBin)) cloudflaredBin = null;
       } catch {
         console.warn('[ServiceManager] cloudflared not found — cloud access unavailable');
+        console.warn('[ServiceManager]   Install: https://developers.cloudflare.com/cloudflare-one/connections/connect-networks/downloads/');
         return;
       }
     }
