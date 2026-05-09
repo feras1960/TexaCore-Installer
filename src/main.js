@@ -895,18 +895,53 @@ ipcMain.handle('import-rsf', async (_, filePath) => {
       }
     }
 
-    // 5. إنشاء ملف TCDB بجانب RSF
-    if (result.success && backupManager) {
-      const rsfDir = path.dirname(filePath);
-      const tcdbPath = path.join(rsfDir, rsfCompanyName + '.tcdb');
-      
+    // 5. إنشاء ملف TCDB بعد استيراد RSF
+    if (result.success) {
       try {
+        const documentsDir = path.join(require('os').homedir(), 'Documents', 'TexaCore');
+        if (!fs.existsSync(documentsDir)) fs.mkdirSync(documentsDir, { recursive: true });
+        const tcdbPath = path.join(documentsDir, rsfCompanyName + '.tcdb');
+
+        // Initialize backupManager if not already done
+        if (!backupManager) {
+          const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : '/opt/homebrew/bin';
+          backupManager = new BackupManager({
+            pgBinDir: pgBinDir,
+            dbHost: 'localhost',
+            dbPort: ServiceManager.PG_PORT || 54322,
+            dbName: 'postgres',
+            dbUser: 'postgres',
+            dbPassword: ServiceManager.DB_PASSWORD || 'texacore-local-super-secret',
+            backupPath: tcdbPath,
+            encryptionKey: 'texacore-default-backup-key-2026',
+            intervalMs: 5 * 60 * 1000,
+            onProgress: (phase, detail) => {
+              console.log(`[Backup] ${phase}: ${detail}`);
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('backup-progress', { phase, detail });
+              }
+            },
+            onError: (err) => console.error('[Backup] Error:', err.message),
+          });
+        }
+
         backupManager.backupPath = tcdbPath;
-        await backupManager.backup();
-        result.tcdbPath = tcdbPath;
-        console.log('[RSF Import] TCDB created:', tcdbPath);
+        const backupResult = await backupManager.backup();
+        if (backupResult) {
+          result.tcdbPath = tcdbPath;
+          console.log('[RSF Import] ✅ TCDB created:', tcdbPath, `(${(backupResult.size / 1024).toFixed(0)} KB)`);
+        }
+
+        // Save to config for auto-resume
+        const config = loadConfig();
+        config.companies = [{ name: rsfCompanyName, tcdbPath, storagePath: documentsDir }];
+        saveConfig(config);
+
+        // Start periodic sync
+        backupManager.startSync();
       } catch (backupErr) {
-        console.warn('[RSF Import] TCDB creation failed:', backupErr.message);
+        console.error('[RSF Import] ❌ TCDB creation failed:', backupErr.message);
+        console.error('[RSF Import]   Stack:', backupErr.stack);
       }
     }
 
@@ -1504,8 +1539,54 @@ const httpServer = http.createServer(async (req, res) => {
       }
     });
   } else if (req.method === 'GET' && req.url === '/api/ping') {
-    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
     res.end(JSON.stringify({ success: true, message: 'TexaCore Local API is running' }));
+
+  // ─── POST /api/backup ────────────────────────────────────
+  } else if (req.method === 'POST' && req.url === '/api/backup') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (!backupManager) {
+      res.writeHead(400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'Backup not initialized. Import an RSF file first.' }));
+      return;
+    }
+    try {
+      const result = await backupManager.backup();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, ...(result || {}) }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+
+  // ─── GET /api/backup-status ──────────────────────────────
+  } else if (req.method === 'GET' && req.url === '/api/backup-status') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    if (!backupManager) {
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ initialized: false }));
+      return;
+    }
+    const status = backupManager.getStatus();
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ initialized: true, ...status }));
+
+  // ─── GET /api/companies ──────────────────────────────────
+  } else if (req.method === 'GET' && req.url === '/api/companies') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    try {
+      const { Client } = require('pg');
+      const pgC = new Client({ host: 'localhost', port: ServiceManager.PG_PORT, database: 'postgres', user: 'postgres', password: ServiceManager.DB_PASSWORD });
+      await pgC.connect();
+      const { rows } = await pgC.query('SELECT id, name, tenant_id FROM public.companies LIMIT 10');
+      await pgC.end();
+      res.writeHead(200, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: true, companies: rows }));
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+
   } else {
     res.writeHead(404);
     res.end();
