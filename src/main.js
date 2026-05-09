@@ -1575,13 +1575,25 @@ const httpServer = http.createServer(async (req, res) => {
               const sizeKB = backupResult.size ? (backupResult.size / 1024).toFixed(0) : '?';
               console.log(`[RSF API] ✅ TCDB created: ${tcdbPath} (${sizeKB} KB)`);
 
-              // Copy to secondary backup location
+              // Copy to secondary backup location (AppData)
               try {
                 const secondaryPath = path.join(appBackupDir, rsfCompanyName + '.tcdb');
                 fs.copyFileSync(tcdbPath, secondaryPath);
                 console.log(`[RSF API] ✅ Secondary backup: ${secondaryPath}`);
               } catch (cpErr) {
                 console.warn('[RSF API] ⚠️ Secondary backup failed:', cpErr.message);
+              }
+
+              // Copy to Desktop (next to RSF file)
+              try {
+                const desktopDir = path.join(os.homedir(), 'Desktop');
+                if (fs.existsSync(desktopDir)) {
+                  const desktopPath = path.join(desktopDir, rsfCompanyName + '.tcdb');
+                  fs.copyFileSync(tcdbPath, desktopPath);
+                  console.log(`[RSF API] ✅ Desktop copy: ${desktopPath}`);
+                }
+              } catch (dtErr) {
+                console.warn('[RSF API] ⚠️ Desktop copy failed:', dtErr.message);
               }
             } else {
               console.error('[RSF API] ❌ backupManager.backup() returned falsy');
