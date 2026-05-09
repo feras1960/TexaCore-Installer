@@ -1734,7 +1734,6 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: err.message }));
     }
-    }
 
   // ─── GET /api/tunnel-fix ────────────────────────────────────
   // Re-registers subdomain to get a fresh tunnel token and starts cloudflared
