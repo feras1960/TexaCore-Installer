@@ -1,0 +1,1 @@
+const e=(n,r,i,u="")=>{if(!n)return u;const o=`${r}_${i}`;return n[o]!==void 0&&n[o]!==null&&n[o]!==""?String(n[o]):n[r]!==void 0&&n[r]!==null&&n[r]!==""?String(n[r]):u},g=(n,r,i="N/A")=>e(n,"name",r,i);export{e as a,g};
