@@ -1785,6 +1785,124 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ success: false, error: err.message }));
     }
 
+  // ─── POST /api/import-rsf-path ───────────────────────────────
+  // Import RSF by file path (from native dialog) — creates TCDB in SAME folder
+  } else if (req.method === 'POST' && req.url === '/api/import-rsf-path') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', async () => {
+      try {
+        const { filePath } = JSON.parse(Buffer.concat(chunks).toString());
+        if (!filePath || !fs.existsSync(filePath)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'File not found: ' + filePath }));
+          return;
+        }
+
+        const rsfDir = path.dirname(filePath);
+        console.log(`[RSF-Path] Importing from: ${filePath}`);
+        console.log(`[RSF-Path] TCDB will be created in same dir: ${rsfDir}`);
+
+        // Use the existing import logic
+        const { RsfReader, detectFileType } = require('./rsf-reader');
+        const { mapRsfToSupabase } = require('./rsf-mapper');
+        const { Client } = require('pg');
+
+        const pgClient = new Client({
+          host: 'localhost', port: ServiceManager.PG_PORT,
+          database: 'postgres', user: 'postgres',
+          password: svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD,
+        });
+        await pgClient.connect();
+
+        const reader = new RsfReader(filePath);
+        await reader.open();
+
+        let freshReader;
+        try { freshReader = new RsfReader(filePath); await freshReader.open(); } catch { freshReader = reader; }
+
+        const result = await mapRsfToSupabase(reader, pgClient, { freshReader });
+
+        const rsfCompanyName = result.companyName || path.basename(filePath, '.rsf');
+
+        // Notify PostgREST to reload schema
+        try { await pgClient.query("NOTIFY pgrst, 'reload schema'"); } catch {}
+
+        reader.close();
+        try { freshReader.close(); } catch {}
+        await pgClient.end();
+
+        // ═══ Create TCDB in the SAME folder as RSF ═══
+        if (result.success) {
+          try {
+            const tcdbPath = path.join(rsfDir, rsfCompanyName + '.tcdb');
+            console.log(`[RSF-Path] 📦 Creating TCDB at: ${tcdbPath}`);
+
+            if (!backupManager) {
+              const os = require('os');
+              const isWin = process.platform === 'win32';
+              const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
+              const dbPass = svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD;
+              backupManager = new BackupManager({
+                pgBinDir, dbHost: 'localhost', dbPort: ServiceManager.PG_PORT || 54322,
+                dbName: 'postgres', dbUser: 'postgres', dbPassword: dbPass,
+                backupPath: tcdbPath,
+                encryptionKey: 'texacore-default-backup-key-2026',
+                intervalMs: 5 * 60 * 1000,
+                onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
+                onError: (err) => console.error('[Backup] Error:', err.message),
+              });
+            }
+
+            backupManager.backupPath = tcdbPath;
+            const backupResult = await backupManager.backup();
+
+            if (backupResult) {
+              result.tcdbPath = tcdbPath;
+              console.log(`[RSF-Path] ✅ TCDB created: ${tcdbPath}`);
+
+              // Also copy to C:\TexaCore or ~/Documents/TexaCore as secondary
+              try {
+                const os = require('os');
+                const isWin = process.platform === 'win32';
+                const secondaryDir = isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore');
+                if (!fs.existsSync(secondaryDir)) fs.mkdirSync(secondaryDir, { recursive: true });
+                fs.copyFileSync(tcdbPath, path.join(secondaryDir, rsfCompanyName + '.tcdb'));
+              } catch {}
+            }
+
+            // Save config pointing to ORIGINAL location
+            try {
+              const config = loadConfig();
+              config.companies = [{ name: rsfCompanyName, tcdbPath, storagePath: rsfDir }];
+              saveConfig(config);
+            } catch {}
+
+            backupManager.startSync();
+          } catch (backupErr) {
+            console.error('[RSF-Path] ❌ TCDB failed:', backupErr.message);
+            result.tcdbError = backupErr.message;
+          }
+        }
+
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({
+          success: result.success,
+          companyName: rsfCompanyName,
+          counts: result.counts,
+          users: result.users,
+          tcdbPath: result.tcdbPath,
+          errors: result.errors,
+        }));
+      } catch (err) {
+        console.error('[RSF-Path] ❌ Error:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+
   // ─── POST /api/restore-tcdb ──────────────────────────────
   } else if (req.method === 'POST' && req.url === '/api/restore-tcdb') {
     res.setHeader('Access-Control-Allow-Origin', '*');
