@@ -1680,6 +1680,106 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ success: false, error: err.message }));
     }
 
+  // ─── POST /api/restore-tcdb ──────────────────────────────
+  } else if (req.method === 'POST' && req.url === '/api/restore-tcdb') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    
+    // Upload TCDB file via multipart, restore DB, and set backup path
+    const chunks = [];
+    req.on('data', (chunk) => chunks.push(chunk));
+    req.on('end', async () => {
+      try {
+        const body = Buffer.concat(chunks);
+        const boundary = req.headers['content-type']?.split('boundary=')[1];
+        
+        if (!boundary) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'No boundary in multipart' }));
+          return;
+        }
+        
+        // Extract file data from multipart
+        const boundaryBuf = Buffer.from('--' + boundary);
+        const parts = [];
+        let start = body.indexOf(boundaryBuf);
+        while (start !== -1) {
+          const nextStart = body.indexOf(boundaryBuf, start + boundaryBuf.length);
+          if (nextStart === -1) break;
+          parts.push(body.subarray(start + boundaryBuf.length, nextStart));
+          start = nextStart;
+        }
+        
+        let fileData = null;
+        let fileName = 'backup.tcdb';
+        
+        for (const part of parts) {
+          const headerEnd = part.indexOf('\r\n\r\n');
+          if (headerEnd === -1) continue;
+          const header = part.subarray(0, headerEnd).toString();
+          if (header.includes('filename=')) {
+            const match = header.match(/filename="([^"]+)"/);
+            if (match) fileName = match[1];
+            fileData = part.subarray(headerEnd + 4, part.lastIndexOf('\r\n'));
+            break;
+          }
+        }
+        
+        if (!fileData) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'No file in request' }));
+          return;
+        }
+        
+        // Save to C:\TexaCore (Windows) or ~/Documents/TexaCore (Mac)
+        const os = require('os');
+        const isWin = process.platform === 'win32';
+        const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore');
+        if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
+        const tcdbPath = path.join(tcdbDir, fileName);
+        fs.writeFileSync(tcdbPath, fileData);
+        console.log(`[Restore] TCDB saved to: ${tcdbPath} (${(fileData.length / 1024).toFixed(0)} KB)`);
+        
+        // Initialize backupManager if needed
+        if (!backupManager) {
+          const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
+          const dbPass = svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD;
+          backupManager = new BackupManager({
+            pgBinDir, dbHost: 'localhost', dbPort: ServiceManager.PG_PORT || 54322,
+            dbName: 'postgres', dbUser: 'postgres', dbPassword: dbPass,
+            backupPath: tcdbPath,
+            encryptionKey: 'texacore-default-backup-key-2026',
+            intervalMs: 5 * 60 * 1000,
+            onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
+            onError: (err) => console.error('[Backup] Error:', err.message),
+          });
+        }
+        
+        // Restore the database from TCDB
+        backupManager.backupPath = tcdbPath;
+        const restoreResult = await backupManager.restore(tcdbPath);
+        
+        // Start periodic sync to keep this file updated
+        backupManager.startSync();
+        
+        // Save config
+        try {
+          const config = loadConfig();
+          const companyName = fileName.replace('.tcdb', '');
+          config.companies = [{ name: companyName, tcdbPath, storagePath: tcdbDir }];
+          saveConfig(config);
+        } catch {}
+        
+        console.log(`[Restore] ✅ DB restored from ${tcdbPath}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, tcdbPath, ...restoreResult }));
+      } catch (err) {
+        console.error('[Restore] ❌ Failed:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+
   } else {
     res.writeHead(404);
     res.end();
