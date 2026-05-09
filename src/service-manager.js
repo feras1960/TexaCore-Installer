@@ -809,8 +809,57 @@ window.__TEXACORE_CONFIG__ = {
       }
     } catch { /* ignore */ }
 
-    if (!config.enableCloud || !config.tunnelToken) {
-      console.log('[ServiceManager] Cloud access not configured — skipping cloudflared');
+    if (!config.enableCloud) {
+      console.log('[ServiceManager] Cloud access not enabled — skipping cloudflared');
+      return;
+    }
+
+    // Auto-fix: if subdomain is set but token is missing, re-register automatically
+    if (!config.tunnelToken && config.subdomain) {
+      console.log(`[ServiceManager] ⚠️ Tunnel token missing for "${config.subdomain}" — auto-fixing...`);
+      try {
+        const https = require('https');
+        const autoFixResult = await new Promise((resolve, reject) => {
+          const postData = JSON.stringify({
+            licenseKey: config.licenseKey || 'desktop-user',
+            subdomain: config.subdomain,
+            machineId: require('os').hostname(),
+            companyName: 'TexaCore Desktop'
+          });
+          const url = new URL('https://wzkklenfsaepegymfxfz.supabase.co/functions/v1/register-subdomain');
+          const reqOpts = {
+            hostname: url.hostname, port: 443, path: url.pathname,
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(postData) }
+          };
+          const req = https.request(reqOpts, (res) => {
+            let body = '';
+            res.on('data', c => body += c);
+            res.on('end', () => { try { resolve(JSON.parse(body)); } catch { reject(new Error('Invalid response')); } });
+          });
+          req.on('error', reject);
+          req.setTimeout(10000, () => { req.destroy(); reject(new Error('Timeout')); });
+          req.write(postData);
+          req.end();
+        });
+
+        if (autoFixResult.success && autoFixResult.tunnel_token) {
+          config.tunnelToken = autoFixResult.tunnel_token;
+          // Save back to config file
+          fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+          console.log(`[ServiceManager] ✅ Tunnel token auto-fixed (${config.tunnelToken.length} chars)`);
+        } else {
+          console.error('[ServiceManager] ❌ Auto-fix failed:', autoFixResult.error || 'Unknown error');
+          return;
+        }
+      } catch (fixErr) {
+        console.error('[ServiceManager] ❌ Auto-fix network error:', fixErr.message);
+        return;
+      }
+    }
+
+    if (!config.tunnelToken) {
+      console.log('[ServiceManager] No tunnel token available — skipping cloudflared');
       return;
     }
 

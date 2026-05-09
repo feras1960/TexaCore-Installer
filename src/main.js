@@ -64,7 +64,19 @@ function loadConfig() {
 
 function saveConfig(config) {
   ensureDataDir();
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(config, null, 2));
+  // Merge with existing to preserve tunnelToken and cloud fields
+  let existing = {};
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      existing = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    }
+  } catch {}
+  const merged = { ...existing, ...config };
+  // Never lose these critical fields
+  if (existing.tunnelToken && !config.tunnelToken) merged.tunnelToken = existing.tunnelToken;
+  if (existing.subdomain && !config.subdomain) merged.subdomain = existing.subdomain;
+  if (existing.enableCloud && config.enableCloud === undefined) merged.enableCloud = existing.enableCloud;
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(merged, null, 2));
 }
 
 // ─── Create Window ───────────────────────────────────────────
