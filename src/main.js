@@ -898,9 +898,10 @@ ipcMain.handle('import-rsf', async (_, filePath) => {
     // 5. إنشاء ملف TCDB بعد استيراد RSF
     if (result.success) {
       try {
-        const documentsDir = path.join(require('os').homedir(), 'Documents', 'TexaCore');
-        if (!fs.existsSync(documentsDir)) fs.mkdirSync(documentsDir, { recursive: true });
-        const tcdbPath = path.join(documentsDir, rsfCompanyName + '.tcdb');
+        const isWin = process.platform === 'win32';
+        const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(require('os').homedir(), 'Documents', 'TexaCore');
+        if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
+        const tcdbPath = path.join(tcdbDir, rsfCompanyName + '.tcdb');
 
         // Initialize backupManager if not already done
         if (!backupManager) {
@@ -1525,6 +1526,86 @@ const httpServer = http.createServer(async (req, res) => {
         // Cleanup temp file
         try { fs.unlinkSync(rsfPath); } catch {}
 
+        // ═══ 6. إنشاء ملف TCDB فور الاستيراد ═══
+        if (result.success) {
+          try {
+            const os = require('os');
+            const isWin = process.platform === 'win32';
+            const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore');
+            if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
+            const tcdbPath = path.join(tcdbDir, rsfCompanyName + '.tcdb');
+
+            // Secondary backup in app data dir
+            const appBackupDir = path.join(DATA_DIR, 'backups');
+            if (!fs.existsSync(appBackupDir)) fs.mkdirSync(appBackupDir, { recursive: true });
+
+            console.log('[RSF API] 📦 Creating TCDB backup at:', tcdbPath);
+
+            // Initialize backupManager if not already done
+            if (!backupManager) {
+              const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (process.platform === 'win32' ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
+              const dbPass = svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD;
+              
+              backupManager = new BackupManager({
+                pgBinDir: pgBinDir,
+                dbHost: 'localhost',
+                dbPort: ServiceManager.PG_PORT || 54322,
+                dbName: 'postgres',
+                dbUser: 'postgres',
+                dbPassword: dbPass,
+                backupPath: tcdbPath,
+                encryptionKey: 'texacore-default-backup-key-2026',
+                intervalMs: 5 * 60 * 1000,
+                onProgress: (phase, detail) => {
+                  console.log(`[Backup] ${phase}: ${detail}`);
+                  if (mainWindow && !mainWindow.isDestroyed()) {
+                    mainWindow.webContents.send('backup-progress', { phase, detail });
+                  }
+                },
+                onError: (err) => console.error('[Backup] Error:', err.message),
+              });
+              console.log('[RSF API] ✅ BackupManager initialized with pgBinDir:', pgBinDir);
+            }
+
+            backupManager.backupPath = tcdbPath;
+            const backupResult = await backupManager.backup();
+            
+            if (backupResult) {
+              result.tcdbPath = tcdbPath;
+              const sizeKB = backupResult.size ? (backupResult.size / 1024).toFixed(0) : '?';
+              console.log(`[RSF API] ✅ TCDB created: ${tcdbPath} (${sizeKB} KB)`);
+
+              // Copy to secondary backup location
+              try {
+                const secondaryPath = path.join(appBackupDir, rsfCompanyName + '.tcdb');
+                fs.copyFileSync(tcdbPath, secondaryPath);
+                console.log(`[RSF API] ✅ Secondary backup: ${secondaryPath}`);
+              } catch (cpErr) {
+                console.warn('[RSF API] ⚠️ Secondary backup failed:', cpErr.message);
+              }
+            } else {
+              console.error('[RSF API] ❌ backupManager.backup() returned falsy');
+            }
+
+            // Save config for auto-resume
+            try {
+              const config = loadConfig();
+              config.companies = [{ name: rsfCompanyName, tcdbPath, storagePath: documentsDir }];
+              saveConfig(config);
+            } catch (cfgErr) {
+              console.warn('[RSF API] Config save error:', cfgErr.message);
+            }
+
+            // Start periodic sync (every 5 min)
+            backupManager.startSync();
+            console.log('[RSF API] 🔄 Auto-backup sync started (every 5 min)');
+          } catch (backupErr) {
+            console.error('[RSF API] ❌ TCDB creation failed:', backupErr.message);
+            console.error('[RSF API]   Stack:', backupErr.stack);
+            result.tcdbError = backupErr.message;
+          }
+        }
+
         // Ensure `error` field exists for frontend compatibility
         if (!result.success && result.errors && result.errors.length > 0) {
           result.error = result.errors.join('; ');
@@ -1912,6 +1993,19 @@ app.on('before-quit', async () => {
     try {
       console.log('[TexaCore] Running final backup before quit...');
       await backupManager.backup();
+      
+      // Copy to secondary backup location
+      const primaryPath = backupManager.backupPath;
+      if (primaryPath && fs.existsSync(primaryPath)) {
+        const appBackupDir = path.join(DATA_DIR, 'backups');
+        if (!fs.existsSync(appBackupDir)) fs.mkdirSync(appBackupDir, { recursive: true });
+        const backupName = path.basename(primaryPath);
+        fs.copyFileSync(primaryPath, path.join(appBackupDir, backupName));
+        // Keep timestamped version too
+        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
+        fs.copyFileSync(primaryPath, path.join(appBackupDir, `${backupName}.${ts}.bak`));
+        console.log('[TexaCore] ✅ Secondary backup saved to:', appBackupDir);
+      }
     } catch (e) {
       console.warn('[TexaCore] Final backup failed:', e.message);
     }

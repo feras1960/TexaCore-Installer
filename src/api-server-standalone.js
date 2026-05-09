@@ -622,7 +622,8 @@ const httpServer = http.createServer(async (req, res) => {
         if (result.success) {
           try {
             // Save TCDB in user's Documents folder (cross-platform)
-            const documentsDir = path.join(require('os').homedir(), 'Documents', 'TexaCore');
+            const isWin = process.platform === 'win32';
+            const documentsDir = isWin ? 'C:\\TexaCore' : path.join(require('os').homedir(), 'Documents', 'TexaCore');
             if (!fs.existsSync(documentsDir)) fs.mkdirSync(documentsDir, { recursive: true });
             const tcdbPath = path.join(documentsDir, rsfCompanyName + '.tcdb');
             
@@ -835,7 +836,8 @@ proxyServer.listen(API_PORT, '0.0.0.0', () => {
       
       if (rows.length > 0 && !backupManager) {
         const companyName = rows[0].name || 'TexaCore';
-        const tcdbDir = path.join(require('os').homedir(), 'Documents', 'TexaCore');
+        const isWin = process.platform === 'win32';
+        const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(require('os').homedir(), 'Documents', 'TexaCore');
         if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
         const tcdbPath = path.join(tcdbDir, companyName + '.tcdb');
         
