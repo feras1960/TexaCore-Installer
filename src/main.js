@@ -1734,6 +1734,72 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: err.message }));
     }
+    }
+
+  // ─── GET /api/tunnel-fix ────────────────────────────────────
+  // Re-registers subdomain to get a fresh tunnel token and starts cloudflared
+  } else if (req.method === 'GET' && req.url === '/api/tunnel-fix') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    try {
+      const config = loadConfig();
+      const subdomain = config.subdomain;
+      
+      if (!subdomain) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'No subdomain configured' }));
+        return;
+      }
+      
+      console.log(`[TunnelFix] Re-registering subdomain: ${subdomain}`);
+      
+      // Call Edge Function to get a fresh token
+      const result = await httpPost(`${LICENSING_URL}/register-subdomain`, {
+        licenseKey: config.licenseKey || 'desktop-user',
+        subdomain,
+        machineId: require('os').hostname(),
+        companyName: 'TexaCore Desktop'
+      });
+      
+      if (result.success && result.tunnel_token) {
+        // Save token to config
+        config.tunnelToken = result.tunnel_token;
+        config.enableCloud = true;
+        saveConfig(config);
+        console.log(`[TunnelFix] ✅ Token saved (${result.tunnel_token.length} chars)`);
+        
+        // Kill existing and restart
+        if (svcManager) {
+          if (svcManager.processes.cloudflared) {
+            svcManager.processes.cloudflared.kill('SIGTERM');
+            svcManager.processes.cloudflared = null;
+            await new Promise(r => setTimeout(r, 1000));
+          }
+          await svcManager.startCloudflared();
+          await new Promise(r => setTimeout(r, 3000));
+          
+          const isRunning = svcManager.processes.cloudflared && !svcManager.processes.cloudflared.killed;
+          
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ 
+            success: true, 
+            subdomain,
+            url: `https://${subdomain}.texacore.ai`,
+            tunnelRunning: !!isRunning,
+            tokenLength: result.tunnel_token.length
+          }));
+        } else {
+          res.writeHead(200, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: true, subdomain, tokenSaved: true, note: 'Restart the app to apply' }));
+        }
+      } else {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: result.error || 'Failed to get token' }));
+      }
+    } catch (err) {
+      console.error('[TunnelFix] ❌ Error:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
 
   // ─── GET /api/open-tcdb ─────────────────────────────────────
   // Opens native file dialog → gets full path (even USB) → restores → syncs to same file
