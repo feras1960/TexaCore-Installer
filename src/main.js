@@ -1680,6 +1680,61 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ success: false, error: err.message }));
     }
 
+  // ─── GET /api/tunnel-status ─────────────────────────────────
+  } else if (req.method === 'GET' && req.url === '/api/tunnel-status') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    
+    const config = loadConfig();
+    const isRunning = svcManager && svcManager.processes && svcManager.processes.cloudflared && !svcManager.processes.cloudflared.killed;
+    const logFile = svcManager ? path.join(svcManager.logDir, 'cloudflared.log') : null;
+    let lastLogs = '';
+    try {
+      if (logFile && fs.existsSync(logFile)) {
+        const content = fs.readFileSync(logFile, 'utf8');
+        lastLogs = content.split('\n').slice(-20).join('\n'); // last 20 lines
+      }
+    } catch {}
+    
+    res.end(JSON.stringify({
+      success: true,
+      enabled: !!config.enableCloud,
+      subdomain: config.subdomain || null,
+      hasTunnelToken: !!config.tunnelToken,
+      tunnelTokenLength: config.tunnelToken ? config.tunnelToken.length : 0,
+      processRunning: !!isRunning,
+      processPid: isRunning ? svcManager.processes.cloudflared.pid : null,
+      lastLogs,
+    }));
+
+  // ─── POST /api/tunnel-restart ───────────────────────────────
+  } else if (req.method === 'POST' && req.url === '/api/tunnel-restart') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    try {
+      if (svcManager) {
+        // Kill existing
+        if (svcManager.processes.cloudflared) {
+          svcManager.processes.cloudflared.kill('SIGTERM');
+          svcManager.processes.cloudflared = null;
+          await new Promise(r => setTimeout(r, 1000));
+        }
+        // Restart
+        await svcManager.startCloudflared();
+        
+        await new Promise(r => setTimeout(r, 2000)); // Wait for it to connect
+        const isRunning = svcManager.processes.cloudflared && !svcManager.processes.cloudflared.killed;
+        
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, running: !!isRunning }));
+      } else {
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Service manager not initialized' }));
+      }
+    } catch (err) {
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+
   // ─── GET /api/open-tcdb ─────────────────────────────────────
   // Opens native file dialog → gets full path (even USB) → restores → syncs to same file
   } else if (req.method === 'GET' && req.url === '/api/open-tcdb') {

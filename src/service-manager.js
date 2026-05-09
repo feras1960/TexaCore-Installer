@@ -853,25 +853,71 @@ window.__TEXACORE_CONFIG__ = {
     }
 
     console.log(`[ServiceManager] Starting Cloudflare Tunnel (${config.subdomain}.texacore.ai)...`);
+    console.log(`[ServiceManager] cloudflared binary: ${cloudflaredBin}`);
     const logFile = path.join(this.logDir, 'cloudflared.log');
 
-    const proc = spawn(cloudflaredBin, [
-      'tunnel', '--no-autoupdate', 'run',
-      '--token', config.tunnelToken
-    ], {
-      stdio: ['ignore', fs.openSync(logFile, 'a'), fs.openSync(logFile, 'a')],
-    });
+    // Determine the actual port the frontend is running on
+    const frontendPort = (this.frontendServer && this.frontendServer.address()) 
+      ? this.frontendServer.address().port 
+      : 8080;
+    console.log(`[ServiceManager] Tunnel will route to localhost:${frontendPort}`);
 
-    proc.on('error', err => {
-      console.error('[ServiceManager] cloudflared error:', err.message);
-      this.processes.cloudflared = null;
-    });
-    proc.on('exit', code => {
-      console.log('[ServiceManager] cloudflared exited with code', code);
-      this.processes.cloudflared = null;
-    });
+    const startTunnelProcess = () => {
+      const proc = spawn(cloudflaredBin, [
+        'tunnel', '--no-autoupdate', 'run',
+        '--token', config.tunnelToken
+      ], {
+        stdio: ['ignore', 'pipe', 'pipe'],
+        env: { ...process.env },
+      });
 
-    this.processes.cloudflared = proc;
+      // Log stdout to file and console
+      const logStream = fs.createWriteStream(logFile, { flags: 'a' });
+      proc.stdout.on('data', (data) => {
+        const line = data.toString().trim();
+        logStream.write(line + '\n');
+        if (line.includes('ERR') || line.includes('error') || line.includes('failed')) {
+          console.error(`[cloudflared] ${line}`);
+        } else if (line.includes('Registered') || line.includes('connected') || line.includes('serving')) {
+          console.log(`[cloudflared] ✅ ${line}`);
+        }
+      });
+      proc.stderr.on('data', (data) => {
+        const line = data.toString().trim();
+        logStream.write(`[stderr] ${line}\n`);
+        // cloudflared writes most of its output to stderr
+        if (line.includes('ERR') || line.includes('error') || line.includes('failed')) {
+          console.error(`[cloudflared] ${line}`);
+        } else if (line.includes('Registered') || line.includes('connected') || line.includes('Connection')) {
+          console.log(`[cloudflared] ✅ ${line}`);
+        } else {
+          console.log(`[cloudflared] ${line}`);
+        }
+      });
+
+      proc.on('error', err => {
+        console.error('[ServiceManager] cloudflared spawn error:', err.message);
+        this.processes.cloudflared = null;
+      });
+      proc.on('exit', (code, signal) => {
+        console.log(`[ServiceManager] cloudflared exited — code: ${code}, signal: ${signal}`);
+        this.processes.cloudflared = null;
+        
+        // Auto-restart after 5 seconds if it crashed (not intentionally killed)
+        if (code !== 0 && code !== null && signal !== 'SIGTERM' && signal !== 'SIGKILL') {
+          console.log('[ServiceManager] cloudflared crashed — restarting in 5s...');
+          setTimeout(() => {
+            if (!this.processes.cloudflared && this.status === 'running') {
+              startTunnelProcess();
+            }
+          }, 5000);
+        }
+      });
+
+      this.processes.cloudflared = proc;
+    };
+
+    startTunnelProcess();
     console.log(`[ServiceManager] Cloudflare Tunnel started — https://${config.subdomain}.texacore.ai`);
   }
 
