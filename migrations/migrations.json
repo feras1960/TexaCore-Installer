@@ -1,7 +1,7 @@
 {
   "version": "2026.05.04",
   "generated": "2026-05-04T18:21:12.260Z",
-  "totalFiles": 173,
+  "totalFiles": 174,
   "migrations": [
     {
       "order": 1,
@@ -867,6 +867,11 @@
       "order": 172,
       "file": "translate_coa_ru_uk.sql",
       "name": "translate_coa_ru_uk"
+    },
+    {
+      "order": 173,
+      "file": "20260509_fix_party_balances_dual_currency.sql",
+      "name": "20260509_fix_party_balances_dual_currency"
     }
   ]
 }
