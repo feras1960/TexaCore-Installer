@@ -1680,6 +1680,111 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ success: false, error: err.message }));
     }
 
+  // ─── GET /api/open-tcdb ─────────────────────────────────────
+  // Opens native file dialog → gets full path (even USB) → restores → syncs to same file
+  } else if (req.method === 'GET' && req.url === '/api/open-tcdb') {
+    res.setHeader('Access-Control-Allow-Origin', '*');
+    try {
+      const { dialog } = require('electron');
+      const result = await dialog.showOpenDialog(mainWindow, {
+        title: 'فتح ملف بيانات TexaCore',
+        filters: [
+          { name: 'TexaCore Database', extensions: ['tcdb'] },
+          { name: 'Al-Rasheed', extensions: ['rsf'] },
+        ],
+        properties: ['openFile'],
+      });
+
+      if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, canceled: true }));
+        return;
+      }
+
+      const selectedPath = result.filePaths[0];
+      const fileName = path.basename(selectedPath);
+      const fileDir = path.dirname(selectedPath);
+      const isRsf = fileName.endsWith('.rsf');
+      const isTcdb = fileName.endsWith('.tcdb');
+
+      console.log(`[OpenTCDB] User selected: ${selectedPath}`);
+
+      if (isTcdb) {
+        // ── Restore from TCDB and sync back to SAME file ──
+        const os = require('os');
+        const isWin = process.platform === 'win32';
+
+        // Initialize backupManager pointing to the ORIGINAL file path
+        if (!backupManager) {
+          const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
+          const dbPass = svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD;
+          backupManager = new BackupManager({
+            pgBinDir, dbHost: 'localhost', dbPort: ServiceManager.PG_PORT || 54322,
+            dbName: 'postgres', dbUser: 'postgres', dbPassword: dbPass,
+            backupPath: selectedPath,
+            encryptionKey: 'texacore-default-backup-key-2026',
+            intervalMs: 5 * 60 * 1000,
+            onProgress: (phase, detail) => {
+              console.log(`[Backup] ${phase}: ${detail}`);
+              if (mainWindow && !mainWindow.isDestroyed()) {
+                mainWindow.webContents.send('backup-progress', { phase, detail });
+              }
+            },
+            onError: (err) => console.error('[Backup] Error:', err.message),
+          });
+        }
+
+        // Point backup to the ORIGINAL file (USB, Desktop, wherever)
+        backupManager.backupPath = selectedPath;
+        
+        // Restore DB from the file
+        const restoreResult = await backupManager.restore(selectedPath);
+        
+        // Also copy to C:\TexaCore as secondary
+        try {
+          const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore');
+          if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
+          const secondaryPath = path.join(tcdbDir, fileName);
+          if (selectedPath !== secondaryPath) {
+            fs.copyFileSync(selectedPath, secondaryPath);
+            console.log(`[OpenTCDB] Secondary copy → ${secondaryPath}`);
+          }
+        } catch {}
+        
+        // Start periodic sync — writes back to ORIGINAL file
+        backupManager.startSync();
+
+        // Save config
+        const companyName = fileName.replace('.tcdb', '');
+        try {
+          const config = loadConfig();
+          config.companies = [{ name: companyName, tcdbPath: selectedPath, storagePath: fileDir }];
+          saveConfig(config);
+        } catch {}
+
+        console.log(`[OpenTCDB] ✅ Restored & syncing to: ${selectedPath}`);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ 
+          success: true, 
+          type: 'tcdb',
+          companyName,
+          tcdbPath: selectedPath,
+          ...restoreResult 
+        }));
+      } else if (isRsf) {
+        // Pass path back to frontend — it will trigger the RSF import flow
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: true, type: 'rsf', filePath: selectedPath }));
+      } else {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'Unsupported file type' }));
+      }
+    } catch (err) {
+      console.error('[OpenTCDB] ❌ Error:', err.message);
+      res.writeHead(500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message }));
+    }
+
   // ─── POST /api/restore-tcdb ──────────────────────────────
   } else if (req.method === 'POST' && req.url === '/api/restore-tcdb') {
     res.setHeader('Access-Control-Allow-Origin', '*');
