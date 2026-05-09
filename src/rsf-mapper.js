@@ -343,6 +343,12 @@ class RsfMapper {
 
       await pgClient.query('COMMIT');
 
+      // ═══ إعلام PostgREST بتحديث الـ schema cache ═══
+      try {
+        await pgClient.query("NOTIFY pgrst, 'reload schema'");
+        console.log('[RSF] 📡 PostgREST schema reload notified');
+      } catch (e) { console.warn('[RSF] PostgREST notify:', e.message); }
+
       // 11. إنشاء المستخدمين (بعد COMMIT — يستخدم GoTrue API منفصل)
       if (options.gotrueRequest) {
         this._emit('إنشاء المستخدمين', 0, summary.counts.users);

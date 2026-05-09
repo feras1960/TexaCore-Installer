@@ -28,25 +28,52 @@ if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
 // ─── BackupManager for .tcdb file creation ────────────────────
 const BackupManager = require('./backup-manager');
 
-// Auto-detect pg_dump location
+// Auto-detect pg_dump location (cross-platform)
 function findPgBinDir() {
-  const candidates = [
-    '/opt/homebrew/bin',
-    '/usr/local/bin',
-    '/usr/bin',
-    path.join(__dirname, '..', 'pg', 'bin'),
-  ];
-  for (const dir of candidates) {
-    const pgDump = path.join(dir, 'pg_dump');
-    if (fs.existsSync(pgDump)) return dir;
+  const isWin = process.platform === 'win32';
+  const exe = isWin ? 'pg_dump.exe' : 'pg_dump';
+  
+  const candidates = [];
+  
+  // 1. Packaged Electron app: resources/bin/pg/bin/
+  try {
+    const electron = require('electron');
+    if (electron.app && electron.app.isPackaged) {
+      candidates.push(path.join(process.resourcesPath, 'bin', 'pg', 'bin'));
+    }
+  } catch {}
+  
+  // 2. Relative to this file (dev mode)
+  candidates.push(path.join(__dirname, '..', 'bin', isWin ? 'windows-x64' : 'macos-arm64', 'pg', 'bin'));
+  candidates.push(path.join(__dirname, '..', 'pg', 'bin'));
+  
+  // 3. System paths
+  if (isWin) {
+    candidates.push('C:\\Program Files\\PostgreSQL\\16\\bin');
+    candidates.push('C:\\Program Files\\PostgreSQL\\15\\bin');
+    candidates.push('C:\\Program Files\\PostgreSQL\\14\\bin');
+  } else {
+    candidates.push('/opt/homebrew/bin');
+    candidates.push('/usr/local/bin');
+    candidates.push('/usr/bin');
   }
-  return '/opt/homebrew/bin'; // fallback
+  
+  for (const dir of candidates) {
+    const pgDump = path.join(dir, exe);
+    if (fs.existsSync(pgDump)) {
+      console.log(`[Standalone] ✅ pg_dump found at: ${dir}`);
+      return dir;
+    }
+  }
+  
+  console.warn('[Standalone] ⚠️ pg_dump NOT found in any candidate path!');
+  console.warn('[Standalone]   Searched:', candidates.join(', '));
+  return isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin';
 }
 
 let backupManager = null;
 let lastDriveUploadTime = null;
 const PG_BIN_DIR = findPgBinDir();
-console.log(`[Standalone] pg_dump found at: ${PG_BIN_DIR}`);
 
 // ─── Cloud backup config ──────────────────────────────────────
 const CLOUD_SUPABASE_URL = 'https://wzkklenfsaepegymfxfz.supabase.co';
@@ -594,8 +621,14 @@ const httpServer = http.createServer(async (req, res) => {
         // ═══ Create .tcdb backup file after successful RSF import ═══
         if (result.success) {
           try {
-            const tcdbDir = path.join(require('os').homedir(), 'Desktop');
-            const tcdbPath = path.join(tcdbDir, rsfCompanyName + '.tcdb');
+            // Save TCDB in user's Documents folder (cross-platform)
+            const documentsDir = path.join(require('os').homedir(), 'Documents', 'TexaCore');
+            if (!fs.existsSync(documentsDir)) fs.mkdirSync(documentsDir, { recursive: true });
+            const tcdbPath = path.join(documentsDir, rsfCompanyName + '.tcdb');
+            
+            console.log('[API] 🔧 Creating TCDB backup...');
+            console.log('[API]   pg_dump path:', PG_BIN_DIR);
+            console.log('[API]   target:', tcdbPath);
             
             backupManager = new BackupManager({
               pgBinDir: PG_BIN_DIR,
@@ -612,14 +645,19 @@ const httpServer = http.createServer(async (req, res) => {
             });
 
             const backupResult = await backupManager.backup();
-            result.tcdbPath = tcdbPath;
-            console.log('[API] ✅ TCDB backup created:', tcdbPath, `(${(backupResult.size / 1024).toFixed(0)} KB)`);
+            if (backupResult) {
+              result.tcdbPath = tcdbPath;
+              console.log('[API] ✅ TCDB backup created:', tcdbPath, `(${(backupResult.size / 1024).toFixed(0)} KB)`);
+            } else {
+              console.warn('[API] ⚠️ TCDB backup returned null (may be running already)');
+            }
 
             // Start periodic sync
             backupManager.startSync();
             console.log('[API] 🔄 Real-time backup sync started');
           } catch (backupErr) {
-            console.warn('[API] ⚠️ TCDB creation failed:', backupErr.message);
+            console.error('[API] ❌ TCDB creation failed:', backupErr.message);
+            console.error('[API]   Stack:', backupErr.stack);
           }
         }
 
@@ -797,7 +835,8 @@ proxyServer.listen(API_PORT, '0.0.0.0', () => {
       
       if (rows.length > 0 && !backupManager) {
         const companyName = rows[0].name || 'TexaCore';
-        const tcdbDir = path.join(require('os').homedir(), 'Desktop');
+        const tcdbDir = path.join(require('os').homedir(), 'Documents', 'TexaCore');
+        if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
         const tcdbPath = path.join(tcdbDir, companyName + '.tcdb');
         
         backupManager = new BackupManager({
