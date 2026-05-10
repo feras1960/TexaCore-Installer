@@ -60,82 +60,99 @@ class RealtimePresence {
     this.reconnectTimer = null;
     this.ref = 0;
     this.channelJoined = false;
+    this.licenseKey = null;
   }
 
   connect(licenseKey) {
     if (!licenseKey) { fileLog('[Presence] No license key — skipping'); return; }
     if (this.ws) return;
+    this.licenseKey = licenseKey;
 
+    // Supabase Realtime v2 WebSocket URL
     const wsUrl = `wss://${SUPABASE_URL}/realtime/v1/websocket?apikey=${SUPABASE_ANON_KEY}&vsn=1.0.0`;
-    fileLog('[Presence] Connecting to Realtime WebSocket...');
+    fileLog('[Presence] Connecting to:', wsUrl.substring(0, 80) + '...');
 
     try {
       const WebSocket = require('ws');
       this.ws = new WebSocket(wsUrl);
-    } catch {
-      fileLog('[Presence] ws module not available — using built-in');
-      return; // ws module not bundled
+    } catch (e) {
+      fileLog('[Presence] ws module error:', e.message);
+      return;
     }
 
     this.ws.on('open', () => {
       fileLog('[Presence] ✅ WebSocket connected');
-      // Start Phoenix heartbeat (every 30s)
+
+      // Phoenix heartbeat every 30s to keep connection alive
       this.heartbeatTimer = setInterval(() => {
         this._send({ topic: 'phoenix', event: 'heartbeat', payload: {}, ref: String(++this.ref) });
       }, 30000);
 
-      // Join presence channel
-      const os = require('os');
-      this._send({
-        topic: 'realtime:desktop-presence',
-        event: 'phx_join',
-        payload: {
-          config: {
-            presence: { key: licenseKey },
-            broadcast: { self: true },
-          }
-        },
-        ref: String(++this.ref),
-      });
+      // Join the presence channel
+      this._joinChannel();
     });
 
     this.ws.on('message', (data) => {
       try {
         const msg = JSON.parse(data.toString());
-        if (msg.event === 'phx_reply' && msg.payload?.status === 'ok' && !this.channelJoined) {
+        
+        // Channel join success
+        if (msg.event === 'phx_reply' && msg.payload?.status === 'ok' && msg.topic === 'realtime:desktop-presence' && !this.channelJoined) {
           this.channelJoined = true;
-          fileLog('[Presence] ✅ Joined channel — broadcasting online status');
-          // Track presence
-          const os = require('os');
-          const config = loadConfig();
-          this._send({
-            topic: 'realtime:desktop-presence',
-            event: 'presence',
-            payload: {
-              type: 'presence',
-              event: 'track',
-              payload: {
-                license_key: licenseKey,
-                hostname: os.hostname(),
-                app_version: app.getVersion(),
-                online_since: new Date().toISOString(),
-                subdomain: config.subdomain || null,
-              }
-            },
-            ref: String(++this.ref),
-          });
+          fileLog('[Presence] ✅ Channel joined — tracking presence');
+          this._trackPresence();
+        }
+
+        // Log presence events for debugging
+        if (msg.event === 'presence_state' || msg.event === 'presence_diff') {
+          fileLog(`[Presence] Event: ${msg.event}`);
         }
       } catch {}
     });
 
-    this.ws.on('close', () => {
-      fileLog('[Presence] WebSocket disconnected — reconnecting in 10s...');
+    this.ws.on('close', (code) => {
+      fileLog(`[Presence] WebSocket closed (code: ${code}) — reconnecting in 5s...`);
       this._cleanup();
-      this.reconnectTimer = setTimeout(() => this.connect(licenseKey), 10000);
+      this.reconnectTimer = setTimeout(() => this.connect(licenseKey), 5000);
     });
 
     this.ws.on('error', (err) => {
       fileLog('[Presence] WebSocket error:', err.message);
+    });
+  }
+
+  _joinChannel() {
+    this._send({
+      topic: 'realtime:desktop-presence',
+      event: 'phx_join',
+      payload: {
+        config: {
+          presence: { key: this.licenseKey },
+          broadcast: { self: true },
+        }
+      },
+      ref: String(++this.ref),
+    });
+  }
+
+  _trackPresence() {
+    const os = require('os');
+    const config = loadConfig();
+    this._send({
+      topic: 'realtime:desktop-presence',
+      event: 'presence',
+      payload: {
+        type: 'presence',
+        event: 'track',
+        payload: {
+          license_key: this.licenseKey,
+          hostname: os.hostname(),
+          app_version: app.getVersion(),
+          online_since: new Date().toISOString(),
+          subdomain: config.subdomain || null,
+        }
+      },
+      ref: String(++this.ref),
     });
   }
 
@@ -155,6 +172,7 @@ class RealtimePresence {
   disconnect() {
     if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
     if (this.ws) { this.ws.close(); this._cleanup(); }
+    fileLog('[Presence] Disconnected');
   }
 }
 
