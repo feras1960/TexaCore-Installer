@@ -3,7 +3,7 @@
 // ════════════════════════════════════════════════════════════════
 
 const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage } = require('electron');
-const { exec, spawn } = require('child_process');
+const { exec, spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
 const https = require('https');
@@ -15,6 +15,22 @@ const BackupManager = require('./backup-manager');
 const { RsfReader, detectFileType } = require('./rsf-reader');
 const { RsfMapper } = require('./rsf-mapper');
 const { RsfExporter, RsfSyncManager } = require('./rsf-exporter');
+
+// ─── File Logger ─────────────────────────────────────────────
+// Saves all console output to a log file for debugging
+const LOG_DIR = path.join(app.getPath('userData'), 'logs');
+try { if (!fs.existsSync(LOG_DIR)) fs.mkdirSync(LOG_DIR, { recursive: true }); } catch {}
+const LOG_FILE = path.join(LOG_DIR, 'heartbeat.log');
+// Rotate log if > 1MB
+try { if (fs.existsSync(LOG_FILE) && fs.statSync(LOG_FILE).size > 1024 * 1024) fs.unlinkSync(LOG_FILE); } catch {}
+
+function fileLog(...args) {
+  const ts = new Date().toISOString();
+  const msg = `[${ts}] ${args.map(a => typeof a === 'object' ? JSON.stringify(a) : String(a)).join(' ')}`;
+  try { fs.appendFileSync(LOG_FILE, msg + '\n'); } catch {}
+  console.log(...args);
+}
+fileLog('═══ TexaCore started ═══ Log file:', LOG_FILE);
 
 // ─── Global Error Handlers ──────────────────────────────────
 // Suppress EPIPE and similar non-fatal errors that would show
@@ -32,7 +48,117 @@ process.on('unhandledRejection', (reason) => {
 
 // ─── Constants ───────────────────────────────────────────────
 const LICENSING_URL = 'https://wzkklenfsaepegymfxfz.supabase.co/functions/v1';
+const SUPABASE_URL = 'wzkklenfsaepegymfxfz.supabase.co';
+const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6a2tsZW5mc2FlcGVneW1meGZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg3NTIxNzcsImV4cCI6MjA4NDMyODE3N30.ATYSK_WvOfbqEaInbg5nKau-wgixF0lIGaue3m8AJtI';
 const APP_PORT = 8080;
+
+// ─── Realtime Presence (instant online/offline like messaging apps) ──
+class RealtimePresence {
+  constructor() {
+    this.ws = null;
+    this.heartbeatTimer = null;
+    this.reconnectTimer = null;
+    this.ref = 0;
+    this.channelJoined = false;
+  }
+
+  connect(licenseKey) {
+    if (!licenseKey) { fileLog('[Presence] No license key — skipping'); return; }
+    if (this.ws) return;
+
+    const wsUrl = `wss://${SUPABASE_URL}/realtime/v1/websocket?apikey=${SUPABASE_ANON_KEY}&vsn=1.0.0`;
+    fileLog('[Presence] Connecting to Realtime WebSocket...');
+
+    try {
+      const WebSocket = require('ws');
+      this.ws = new WebSocket(wsUrl);
+    } catch {
+      fileLog('[Presence] ws module not available — using built-in');
+      return; // ws module not bundled
+    }
+
+    this.ws.on('open', () => {
+      fileLog('[Presence] ✅ WebSocket connected');
+      // Start Phoenix heartbeat (every 30s)
+      this.heartbeatTimer = setInterval(() => {
+        this._send({ topic: 'phoenix', event: 'heartbeat', payload: {}, ref: String(++this.ref) });
+      }, 30000);
+
+      // Join presence channel
+      const os = require('os');
+      this._send({
+        topic: 'realtime:desktop-presence',
+        event: 'phx_join',
+        payload: {
+          config: {
+            presence: { key: licenseKey },
+            broadcast: { self: true },
+          }
+        },
+        ref: String(++this.ref),
+      });
+    });
+
+    this.ws.on('message', (data) => {
+      try {
+        const msg = JSON.parse(data.toString());
+        if (msg.event === 'phx_reply' && msg.payload?.status === 'ok' && !this.channelJoined) {
+          this.channelJoined = true;
+          fileLog('[Presence] ✅ Joined channel — broadcasting online status');
+          // Track presence
+          const os = require('os');
+          const config = loadConfig();
+          this._send({
+            topic: 'realtime:desktop-presence',
+            event: 'presence',
+            payload: {
+              type: 'presence',
+              event: 'track',
+              payload: {
+                license_key: licenseKey,
+                hostname: os.hostname(),
+                app_version: app.getVersion(),
+                online_since: new Date().toISOString(),
+                subdomain: config.subdomain || null,
+              }
+            },
+            ref: String(++this.ref),
+          });
+        }
+      } catch {}
+    });
+
+    this.ws.on('close', () => {
+      fileLog('[Presence] WebSocket disconnected — reconnecting in 10s...');
+      this._cleanup();
+      this.reconnectTimer = setTimeout(() => this.connect(licenseKey), 10000);
+    });
+
+    this.ws.on('error', (err) => {
+      fileLog('[Presence] WebSocket error:', err.message);
+    });
+  }
+
+  _send(msg) {
+    if (this.ws?.readyState === 1) {
+      this.ws.send(JSON.stringify(msg));
+    }
+  }
+
+  _cleanup() {
+    if (this.heartbeatTimer) clearInterval(this.heartbeatTimer);
+    this.heartbeatTimer = null;
+    this.channelJoined = false;
+    this.ws = null;
+  }
+
+  disconnect() {
+    if (this.reconnectTimer) clearTimeout(this.reconnectTimer);
+    if (this.ws) { this.ws.close(); this._cleanup(); }
+  }
+}
+
+const realtimePresence = new RealtimePresence();
 
 // ─── Data Directory ──────────────────────────────────────────
 const DATA_DIR = path.join(app.getPath('userData'), 'texacore-data');
@@ -169,84 +295,419 @@ function httpPost(url, data) {
 class HeartbeatSender {
   constructor() {
     this.interval = null;
-    this.INTERVAL_MS = 5 * 60 * 1000; // 5 minutes
+    this.INTERVAL_MS = 3 * 60 * 1000; // 3 minutes for reliable connection status
+    this.retryCount = 0;
+    this.MAX_RETRIES = 3;
+    this.lastSuccessAt = null;
+    this._lastPayload = null;
   }
 
   start() {
     if (this.interval) return;
-    // Send first heartbeat after 30 seconds (let services boot)
-    setTimeout(() => this.send(), 30000);
-    this.interval = setInterval(() => this.send(), this.INTERVAL_MS);
-    console.log('[Heartbeat] Started — interval 5 min');
+    fileLog('[Heartbeat] ═══════════════════════════════════════');
+    fileLog('[Heartbeat] Starting heartbeat system...');
+    fileLog('[Heartbeat] Config file:', CONFIG_FILE);
+    const cfg = loadConfig();
+    fileLog('[Heartbeat] License key:', cfg.licenseKey ? `${cfg.licenseKey.substring(0, 10)}...` : '❌ EMPTY');
+    fileLog('[Heartbeat] Interval: 3 min, First beat in 5s');
+    fileLog('[Heartbeat] ═══════════════════════════════════════');
+    
+    // Send first heartbeat quickly (5 seconds — just let Electron app init)
+    setTimeout(() => this._sendWithRetry(), 5000);
+    this.interval = setInterval(() => this._sendWithRetry(), this.INTERVAL_MS);
   }
 
   stop() {
     if (this.interval) { clearInterval(this.interval); this.interval = null; }
   }
 
-  async send() {
-    try {
-      const config = loadConfig();
-      if (!config.licenseKey) return;
-
-      const os = require('os');
-      if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
-      const hardwareId = licenseGuard.getHardwareId();
-
-      // Gather system metrics
-      const cpuPercent = await this._getCpuPercent();
-      const totalMem = os.totalmem() / (1024 * 1024 * 1024);
-      const freeMem = os.freemem() / (1024 * 1024 * 1024);
-      const ramUsed = +(totalMem - freeMem).toFixed(2);
-
-      // Gather service statuses
-      const servicesStatus = {};
-      if (svcManager) {
-        try {
-          const statuses = await svcManager.getStatuses();
-          if (statuses) Object.assign(servicesStatus, statuses);
-        } catch {}
-      }
-
-      // DB size (attempt via local PostgREST or pg)
-      let dbSizeMb = 0;
-      let companiesCount = 0;
-      let invoicesCount = 0;
-      let usersActive = 0;
+  // Retry wrapper: tries up to MAX_RETRIES with exponential backoff
+  async _sendWithRetry() {
+    fileLog('[Heartbeat] ─── Sending heartbeat... ───');
+    for (let attempt = 1; attempt <= this.MAX_RETRIES; attempt++) {
       try {
-        const statsUrl = `http://localhost:${APP_PORT}/rest/v1/rpc/get_system_stats`;
-        // Only if endpoint exists
-      } catch {}
-
-      const payload = {
-        license_key: config.licenseKey,
-        hardware_id: hardwareId,
-        app_version: app.getVersion(),
-        subdomain: config.subdomain || null,
-        hostname: os.hostname(),
-        users_active: usersActive,
-        companies_count: companiesCount,
-        invoices_count: invoicesCount,
-        db_size_mb: dbSizeMb,
-        storage_used_mb: 0,
-        cpu_percent: cpuPercent,
-        ram_used_gb: ramUsed,
-        ram_total_gb: +totalMem.toFixed(2),
-        disk_used_percent: null,
-        services_status: servicesStatus,
-        errors: [],
-      };
-
-      const result = await httpPost(`${LICENSING_URL}/license-heartbeat`, payload);
-      if (result && result.command === 'STOP') {
-        console.warn('[Heartbeat] Server says STOP — license issue');
-        if (mainWindow) mainWindow.webContents.send('license-warning', result.warning || 'License expired');
-      } else if (result && result.warning) {
-        if (mainWindow) mainWindow.webContents.send('license-warning', result.warning);
+        await this.send();
+        this.retryCount = 0;
+        this.lastSuccessAt = Date.now();
+        fileLog('[Heartbeat] ✅ SUCCESS on attempt', attempt);
+        return; // Success — exit
+      } catch (err) {
+        fileLog(`[Heartbeat] ❌ Attempt ${attempt}/${this.MAX_RETRIES} failed:`, err.message);
+        if (attempt < this.MAX_RETRIES) {
+          const backoff = Math.min(attempt * 5000, 15000); // 5s, 10s, 15s
+          console.log(`[Heartbeat] Retrying in ${backoff/1000}s...`);
+          await new Promise(r => setTimeout(r, backoff));
+        }
       }
-      console.log('[Heartbeat] Sent OK —', result?.command || 'OK');
+    }
+    // All retries failed — try fallback method
+    fileLog('[Heartbeat] Trying fallback (direct REST API)...');
+    try {
+      await this._sendFallback();
+      fileLog('[Heartbeat] ✅ Fallback method succeeded');
+      this.lastSuccessAt = Date.now();
+    } catch (fbErr) {
+      fileLog('[Heartbeat] ❌❌ ALL methods failed:', fbErr.message);
+    }
+  }
+
+  async send() {
+    let config = loadConfig();
+    
+    // ── Auto-recover license key if missing ──
+    if (!config.licenseKey) {
+      fileLog('[Heartbeat] License key missing — attempting recovery...');
+      
+      // Method 1: Check LicenseGuard stored license
+      try {
+        if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+        const storedLicense = licenseGuard.loadLicense();
+        if (storedLicense && storedLicense.license_key) {
+          config.licenseKey = storedLicense.license_key;
+          saveConfig(config);
+          fileLog('[Heartbeat] ✅ Recovered key from LicenseGuard:', config.licenseKey.substring(0, 15) + '...');
+        }
+      } catch (e) {
+        fileLog('[Heartbeat] LicenseGuard recovery failed:', e.message);
+      }
+      
+      // Method 2: Try cloud recovery by hardware_id
+      if (!config.licenseKey) {
+        try {
+          if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+          const hwId = licenseGuard.getHardwareId();
+          const os = require('os');
+          fileLog('[Heartbeat] Trying cloud recovery with hardware_id:', hwId.substring(0, 10) + '...');
+          const trialResult = await httpPost(`${LICENSING_URL}/license-trial`, {
+            hardware_id: hwId,
+            hostname: os.hostname(),
+            os_info: `${process.platform} ${process.arch}`,
+          });
+          if (trialResult && trialResult.license && trialResult.license.license_key) {
+            config.licenseKey = trialResult.license.license_key;
+            saveConfig(config);
+            licenseGuard.saveLicense(trialResult.license);
+            fileLog('[Heartbeat] ✅ Recovered key from cloud:', config.licenseKey.substring(0, 15) + '...');
+          } else if (trialResult && trialResult.error === 'trial_already_exists' && trialResult.license) {
+            config.licenseKey = trialResult.license.license_key;
+            saveConfig(config);
+            licenseGuard.saveLicense(trialResult.license);
+            fileLog('[Heartbeat] ✅ Synced existing key from cloud:', config.licenseKey.substring(0, 15) + '...');
+          } else {
+            fileLog('[Heartbeat] Cloud recovery response:', JSON.stringify(trialResult).substring(0, 200));
+          }
+        } catch (e) {
+          fileLog('[Heartbeat] Cloud recovery failed:', e.message);
+        }
+      }
+      
+      if (!config.licenseKey) {
+        throw new Error('No license key — all recovery methods failed');
+      }
+    }
+    
+    fileLog('[Heartbeat] Sending for key:', config.licenseKey.substring(0, 15) + '...');
+    const os = require('os');
+    if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+    const hardwareId = licenseGuard.getHardwareId();
+
+    // Gather system metrics
+    const cpuPercent = await this._getCpuPercent();
+    const totalMem = os.totalmem() / (1024 * 1024 * 1024);
+    const freeMem = os.freemem() / (1024 * 1024 * 1024);
+    const ramUsed = +(totalMem - freeMem).toFixed(2);
+
+    // Gather service statuses
+    const servicesStatus = {};
+    if (svcManager) {
+      try {
+        const statuses = await svcManager.getStatuses();
+        if (statuses) Object.assign(servicesStatus, statuses);
+      } catch {}
+    }
+
+    let dbSizeMb = 0, companiesCount = 0, invoicesCount = 0, usersActive = 0;
+
+    // Gather network info
+    let localIps = [];
+    try {
+      const nets = os.networkInterfaces();
+      for (const name of Object.keys(nets)) {
+        for (const net of nets[name]) {
+          if (!net.internal && net.family === 'IPv4') {
+            localIps.push({ iface: name, ip: net.address, mac: net.mac });
+          }
+        }
+      }
+    } catch {}
+
+    // Disk usage
+    let diskUsedPercent = null;
+    try {
+      if (process.platform === 'win32') {
+        const { execSync } = require('child_process');
+        const out = execSync('wmic logicaldisk get size,freespace,caption /format:csv', { encoding: 'utf8', timeout: 5000 });
+        const lines = out.trim().split('\n').filter(l => l.includes(','));
+        if (lines.length > 1) {
+          const parts = lines[1].split(',');
+          if (parts.length >= 4) {
+            const free = parseInt(parts[2]);
+            const total = parseInt(parts[3]);
+            if (total > 0) diskUsedPercent = +((1 - free / total) * 100).toFixed(1);
+          }
+        }
+      }
+    } catch {}
+
+    // Load local license dates for cloud sync
+    let licenseCreatedAt = null, licenseExpiresAt = null, licenseTier = null, licenseStatus = null, daysRemaining = null;
+    try {
+      const localLicense = licenseGuard.loadLicense();
+      if (localLicense) {
+        licenseCreatedAt = localLicense.created_at || localLicense.activated_at || null;
+        licenseExpiresAt = localLicense.expires_at || null;
+        licenseTier = localLicense.tier || 'trial';
+        licenseStatus = localLicense.status || 'active';
+        if (licenseExpiresAt) {
+          daysRemaining = Math.ceil((new Date(licenseExpiresAt).getTime() - Date.now()) / 86400000);
+        }
+      }
+    } catch {}
+
+    // Resolve public IP and geolocation from client side
+    let publicIp = null, geoCountry = null, geoCity = null, geoCountryCode = null;
+    try {
+      const https = require('https');
+      const ipData = await new Promise((resolve) => {
+        https.get('https://api.ipify.org?format=json', { timeout: 5000 }, (res) => {
+          let d = '';
+          res.on('data', c => d += c);
+          res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
+        }).on('error', () => resolve(null));
+      });
+      if (ipData && ipData.ip) {
+        publicIp = ipData.ip;
+        const http = require('http');
+        const geoData = await new Promise((resolve) => {
+          http.get(`http://ip-api.com/json/${publicIp}?fields=country,city,countryCode`, { timeout: 5000 }, (res) => {
+            let d = '';
+            res.on('data', c => d += c);
+            res.on('end', () => { try { resolve(JSON.parse(d)); } catch { resolve(null); } });
+          }).on('error', () => resolve(null));
+        });
+        if (geoData) {
+          geoCountry = geoData.country || null;
+          geoCity = geoData.city || null;
+          geoCountryCode = geoData.countryCode || null;
+        }
+      }
+    } catch {}
+
+    // Detect actual Windows edition (Server 2016 vs Windows 10, etc.)
+    let osEdition = `${process.platform} ${os.release()} ${process.arch}`;
+    try {
+      if (process.platform === 'win32') {
+        const caption = execSync('wmic os get Caption /format:list', { encoding: 'utf8', timeout: 3000 });
+        const match = caption.match(/Caption=(.+)/);
+        if (match) osEdition = `${match[1].trim()} (${process.arch})`;
+      }
+    } catch {}
+
+    this._lastPayload = {
+      license_key: config.licenseKey,
+      hardware_id: hardwareId,
+      app_version: app.getVersion(),
+      subdomain: config.subdomain || null,
+      hostname: os.hostname(),
+      os_info: osEdition,
+      os_type: osEdition,
+      os_platform: process.platform,
+      os_arch: process.arch,
+      os_release: os.release(),
+      local_ips: localIps,
+      users_active: usersActive,
+      companies_count: companiesCount,
+      invoices_count: invoicesCount,
+      db_size_mb: dbSizeMb,
+      storage_used_mb: 0,
+      cpu_percent: cpuPercent,
+      cpu_model: os.cpus().length > 0 ? os.cpus()[0].model : 'unknown',
+      cpu_cores: os.cpus().length,
+      ram_used_gb: ramUsed,
+      ram_total_gb: +totalMem.toFixed(2),
+      disk_used_percent: diskUsedPercent,
+      uptime_hours: +(os.uptime() / 3600).toFixed(1),
+      services_status: servicesStatus,
+      errors: [],
+      license_created_at: licenseCreatedAt,
+      license_expires_at: licenseExpiresAt,
+      license_tier: licenseTier,
+      license_status: licenseStatus,
+      days_remaining: daysRemaining,
+      public_ip: publicIp,
+      geo_country: geoCountry,
+      geo_city: geoCity,
+      geo_country_code: geoCountryCode,
+    };
+
+    fileLog('[Heartbeat] Calling Edge Function: license-heartbeat...');
+    const result = await httpPost(`${LICENSING_URL}/license-heartbeat`, this._lastPayload);
+    fileLog('[Heartbeat] Edge Function response:', JSON.stringify(result).substring(0, 200));
+    
+    // If license not found in cloud, auto-re-register
+    if (result && (result.code === 'NOT_FOUND' || result.accepted === false)) {
+      console.warn('[Heartbeat] License not in cloud — auto-re-registering...');
+      try {
+        const trialResult = await httpPost(`${LICENSING_URL}/license-trial`, {
+          hardware_id: hardwareId,
+          hostname: os.hostname(),
+          os_info: `${process.platform} ${process.arch}`,
+        });
+        if (trialResult && trialResult.success && trialResult.license) {
+          const config2 = loadConfig();
+          config2.licenseKey = trialResult.license.license_key;
+          saveConfig(config2);
+          fileLog('[Heartbeat] ✅ Re-registered as:', trialResult.license.license_key);
+          this._lastPayload.license_key = trialResult.license.license_key;
+          await httpPost(`${LICENSING_URL}/license-heartbeat`, this._lastPayload);
+        } else if (trialResult && trialResult.error === 'trial_already_exists' && trialResult.license) {
+          const config2 = loadConfig();
+          config2.licenseKey = trialResult.license.license_key;
+          saveConfig(config2);
+          fileLog('[Heartbeat] ✅ Synced cloud key:', trialResult.license.license_key);
+          this._lastPayload.license_key = trialResult.license.license_key;
+          await httpPost(`${LICENSING_URL}/license-heartbeat`, this._lastPayload);
+        }
+      } catch (regErr) {
+        console.warn('[Heartbeat] Re-register failed:', regErr.message);
+      }
+    } else if (result && result.command === 'STOP') {
+      console.warn('[Heartbeat] Server says STOP — license issue');
+      if (mainWindow) mainWindow.webContents.send('license-warning', result.warning || 'License expired or revoked');
+    } else if (result && result.warning) {
+      if (mainWindow) mainWindow.webContents.send('license-warning', result.warning);
+    }
+    fileLog('[Heartbeat] ✅ Sent OK —', result?.command || 'OK');
+
+    // Upload TCDB cloud backup (twice daily or when file changes)
+    this._uploadCloudBackup(config);
+  }
+
+  // Fallback: Direct REST API update to Supabase (bypasses Edge Function)
+  async _sendFallback() {
+    const config = loadConfig();
+    if (!config.licenseKey) throw new Error('No license key');
+
+    const https = require('https');
+    const os = require('os');
+    
+    // Minimal heartbeat via direct Supabase PostgREST
+    const updateData = {
+      last_heartbeat_at: new Date().toISOString(),
+      app_version: app.getVersion(),
+      hostname: os.hostname(),
+      os_info: `${process.platform} ${os.release()} ${process.arch}`,
+      cpu_model: os.cpus().length > 0 ? os.cpus()[0].model : 'unknown',
+      ram_total_gb: +(os.totalmem() / (1024 * 1024 * 1024)).toFixed(2),
+    };
+
+    return new Promise((resolve, reject) => {
+      const SUPABASE_URL = 'wzkklenfsaepegymfxfz.supabase.co';
+      const SERVICE_KEY = SUPABASE_ANON_KEY;
+      const postData = JSON.stringify(updateData);
+      const encodedKey = encodeURIComponent(config.licenseKey);
+      
+      const req = https.request({
+        hostname: SUPABASE_URL,
+        port: 443,
+        path: `/rest/v1/licenses?license_key=eq.${encodedKey}`,
+        method: 'PATCH',
+        headers: {
+          'Content-Type': 'application/json',
+          'apikey': SERVICE_KEY,
+          'Authorization': `Bearer ${SERVICE_KEY}`,
+          'Prefer': 'return=minimal',
+          'Accept-Profile': 'licensing',
+          'Content-Profile': 'licensing',
+          'Content-Length': Buffer.byteLength(postData),
+        },
+        timeout: 10000,
+      }, (res) => {
+        let body = '';
+        res.on('data', c => body += c);
+        res.on('end', () => {
+          if (res.statusCode < 300) resolve({ success: true });
+          else reject(new Error(`Fallback HTTP ${res.statusCode}: ${body}`));
+        });
+      });
+      req.on('error', reject);
+      req.on('timeout', () => { req.destroy(); reject(new Error('Fallback timeout')); });
+      req.write(postData);
+      req.end();
+    });
+  }
+
+  async _uploadCloudBackup(config) {
+    try {
+      if (!config.licenseKey) return;
+      
+      // Find TCDB file to upload
+      let tcdbPath = null;
+      if (config.currentDbPath && fs.existsSync(config.currentDbPath)) {
+        tcdbPath = config.currentDbPath;
+      } else if (config.companies && config.companies.length > 0) {
+        // Check company TCDB paths
+        for (const co of config.companies) {
+          const p = co.tcdbPath || co.storagePath;
+          if (p && fs.existsSync(p)) { tcdbPath = p; break; }
+        }
+      }
+      if (!tcdbPath) {
+        // Check default location
+        const defaultPath = path.join(DATA_DIR, 'texacore-data.tcdb');
+        if (fs.existsSync(defaultPath)) tcdbPath = defaultPath;
+      }
+      
+      if (!tcdbPath) return; // No TCDB file to upload
+
+      const stats = fs.statSync(tcdbPath);
+      const fileSizeMb = +(stats.size / (1024 * 1024)).toFixed(2);
+      
+      // Skip if file too large (> 100MB)
+      if (fileSizeMb > 100) return;
+      
+      // Upload twice daily (every 12 hours) OR immediately if file size changed
+      const TWELVE_HOURS = 12 * 60 * 60 * 1000;
+      const fileChanged = this._lastUploadSize !== stats.size;
+      const timeElapsed = !this._lastUploadTime || (Date.now() - this._lastUploadTime >= TWELVE_HOURS);
+      
+      if (!fileChanged && !timeElapsed) {
+        return; // File unchanged and not time for scheduled upload yet
+      }
+
+      // Upload file via Edge Function (it has service_role access)
+      const fileBuffer = fs.readFileSync(tcdbPath);
+      const fileBase64 = fileBuffer.toString('base64');
+
+      const result = await httpPost(`${LICENSING_URL}/license-cloud-backup`, {
+        license_key: config.licenseKey,
+        file_base64: fileBase64,
+        file_size_mb: fileSizeMb,
+        db_size_mb: fileSizeMb,
+        companies_count: config.companies?.length || 1,
+        invoices_count: 0,
+        backup_type: 'auto',
+      });
+      
+      if (result && result.success) {
+        this._lastUploadSize = stats.size;
+        this._lastUploadTime = Date.now();
+        console.log(`[CloudBackup] ✅ Uploaded ${path.basename(tcdbPath)} (${fileSizeMb}MB) via Edge Function`);
+      } else {
+        console.warn('[CloudBackup] Upload response:', JSON.stringify(result));
+      }
     } catch (err) {
-      console.warn('[Heartbeat] Send failed:', err.message);
+      console.warn('[CloudBackup] Upload failed:', err.message);
     }
   }
 
@@ -428,7 +889,7 @@ function gotrueRequest(method, reqPath, body, { serviceRoleKey, apiPort }) {
 
 async function handleCreateLocalCompany(companyData) {
   try {
-    console.log('[TexaCore] Starting company creation:', companyData.companyName);
+    fileLog('[TexaCore] Starting company creation:', companyData.companyName);
 
     // ── Guard: Services must be running ─────────────────────────
     if (!svcManager || !svcManager.isRunning()) {
@@ -465,7 +926,7 @@ async function handleCreateLocalCompany(companyData) {
       ? companyData.adminEmail
       : `${(companyData.adminUsername || 'admin').replace(/\s+/g, '_')}@texacore.local`;
 
-    console.log('[TexaCore] Admin email:', adminEmail);
+    fileLog('[TexaCore] Admin email:', adminEmail);
 
     // ── 2. Setup .tcdb backup file path ──────────────────────────
     let tcdbFilePath = null;
@@ -476,7 +937,7 @@ async function handleCreateLocalCompany(companyData) {
         if (!fs.existsSync(basePath)) fs.mkdirSync(basePath, { recursive: true });
         const fileName = (companyData.dbFileName || 'my_company') + '.tcdb';
         tcdbFilePath = path.join(basePath, fileName);
-        console.log('[TexaCore] Backup file path:', tcdbFilePath);
+        fileLog('[TexaCore] Backup file path:', tcdbFilePath);
       } catch (err) {
         console.warn('[TexaCore] Could not setup backup path:', err.message);
       }
@@ -494,9 +955,9 @@ async function handleCreateLocalCompany(companyData) {
       const licInfo = licenseGuard.loadLicense();
       if (licInfo && licInfo.enabled_modules && Array.isArray(licInfo.enabled_modules) && licInfo.enabled_modules.length > 0) {
         enabledModules = licInfo.enabled_modules;
-        console.log('[TexaCore] License modules:', enabledModules.join(', '));
+        fileLog('[TexaCore] License modules:', enabledModules.join(', '));
       } else {
-        console.log('[TexaCore] No license modules found — using defaults');
+        fileLog('[TexaCore] No license modules found — using defaults');
       }
     } catch (e) {
       console.warn('[TexaCore] Could not read license modules:', e.message);
@@ -563,7 +1024,7 @@ async function handleCreateLocalCompany(companyData) {
       -- Reload PostgREST schema cache so new objects are available
       NOTIFY pgrst, 'reload schema';
     `);
-    console.log('[TexaCore] Tenant & company created in DB');
+    fileLog('[TexaCore] Tenant & company created in DB');
 
 
     // ── 4. Create auth user via GoTrue Admin API ─────────────────
@@ -584,16 +1045,16 @@ async function handleCreateLocalCompany(companyData) {
 
     if (createRes.status === 200 || createRes.status === 201) {
       adminUserId = createRes.body.id;
-      console.log('[TexaCore] Auth user created:', adminUserId);
+      fileLog('[TexaCore] Auth user created:', adminUserId);
 
     } else if (createRes.body?.error_code === 'email_exists') {
       // User exists from a previous failed attempt — find & delete, then recreate
-      console.log('[TexaCore] Email exists, finding user to replace...');
+      fileLog('[TexaCore] Email exists, finding user to replace...');
       const listRes = await gotrueRequest('GET', `/admin/users?email=${encodeURIComponent(adminEmail)}&page=1&per_page=1`, null, ctx);
       const existingUser = listRes.body?.users?.[0];
 
       if (existingUser) {
-        console.log('[TexaCore] Deleting old user:', existingUser.id);
+        fileLog('[TexaCore] Deleting old user:', existingUser.id);
         await gotrueRequest('DELETE', `/admin/users/${existingUser.id}`, null, ctx);
       }
 
@@ -610,7 +1071,7 @@ async function handleCreateLocalCompany(companyData) {
         throw new Error(`Auth user creation failed (${recreateRes.status}): ${JSON.stringify(recreateRes.body)}`);
       }
       adminUserId = recreateRes.body.id;
-      console.log('[TexaCore] Auth user recreated:', adminUserId);
+      fileLog('[TexaCore] Auth user recreated:', adminUserId);
 
     } else {
       throw new Error(`Auth user creation failed (${createRes.status}): ${JSON.stringify(createRes.body)}`);
@@ -655,7 +1116,7 @@ async function handleCreateLocalCompany(companyData) {
         RAISE NOTICE 'Assigned company_owner to user ${adminUserId}';
       END $$;
     `);
-    console.log('[TexaCore] User profile + company_owner role assigned');
+    fileLog('[TexaCore] User profile + company_owner role assigned');
 
     // ── 5.5. Provision silent super admin account ───────────────
     //       TexaCore support account — added to every installation
@@ -715,7 +1176,7 @@ async function handleCreateLocalCompany(companyData) {
           VALUES ('${saUserId}', '${SA_EMAIL}', true)
           ON CONFLICT (user_id) DO NOTHING;
         `);
-        console.log('[TexaCore] Support account provisioned');
+        fileLog('[TexaCore] Support account provisioned');
       }
     } catch (saErr) {
       // Silent failure — don't block company creation
@@ -733,7 +1194,7 @@ async function handleCreateLocalCompany(companyData) {
     if (signInRes.status === 200 && signInRes.body?.access_token) {
       accessToken  = signInRes.body.access_token;
       refreshToken = signInRes.body.refresh_token;
-      console.log('[TexaCore] Auto sign-in successful');
+      fileLog('[TexaCore] Auto sign-in successful');
     } else {
       console.warn('[TexaCore] Auto sign-in failed:', signInRes.body);
     }
@@ -769,7 +1230,7 @@ async function handleCreateLocalCompany(companyData) {
 
         // Start real-time sync
         backupManager.startSync();
-        console.log('[TexaCore] Real-time backup started → ' + tcdbFilePath);
+        fileLog('[TexaCore] Real-time backup started → ' + tcdbFilePath);
 
         // Configure cloud backup sync
         const cfg = loadConfig();
@@ -780,6 +1241,12 @@ async function handleCreateLocalCompany(companyData) {
             cloudIntervalMs: 6 * 60 * 60 * 1000, // every 6 hours
           });
           backupManager.startCloudSync();
+          
+          // Immediately upload to cloud
+          cfg.currentDbPath = tcdbFilePath;
+          heartbeatSender._uploadCloudBackup(cfg).catch(e => 
+            console.warn('[TexaCore] Initial cloud backup failed:', e.message)
+          );
         }
       } catch (backupErr) {
         console.warn('[TexaCore] Backup init failed:', backupErr.message);
@@ -943,6 +1410,13 @@ ipcMain.handle('import-rsf', async (_, filePath) => {
         if (backupResult) {
           result.tcdbPath = tcdbPath;
           console.log('[RSF Import] ✅ TCDB created:', tcdbPath, `(${(backupResult.size / 1024).toFixed(0)} KB)`);
+          
+          // Immediately upload to cloud
+          const cfgForUpload = loadConfig();
+          cfgForUpload.currentDbPath = tcdbPath;
+          heartbeatSender._uploadCloudBackup(cfgForUpload).catch(e => 
+            console.warn('[RSF Import] Cloud backup upload failed:', e.message)
+          );
         }
 
         // Save to config for auto-resume
@@ -1043,7 +1517,7 @@ function initBackupOnStartup() {
     });
 
     backupManager.startSync();
-    console.log('[TexaCore] Auto-backup started on launch → ' + tcdbPath);
+    fileLog('[TexaCore] Auto-backup started on launch → ' + tcdbPath);
   } catch (e) {
     console.warn('[TexaCore] Auto-backup init skipped:', e.message);
   }
@@ -1221,7 +1695,7 @@ const httpServer = http.createServer(async (req, res) => {
           // 8. Reload PostgREST schema cache
           await pgClient.query("NOTIFY pgrst, 'reload schema'");
 
-          console.log('[TexaCore] Company deleted successfully:', companyId);
+          fileLog('[TexaCore] Company deleted successfully:', companyId);
         } finally {
           await pgClient.end();
         }
@@ -2427,15 +2901,72 @@ app.whenReady().then(() => {
   createWindow();
   setupAutoUpdater();
 
-  // Start heartbeat if license already exists
+  // Always start heartbeat — it will handle missing license gracefully
   const config = loadConfig();
+  fileLog('[TexaCore] App ready — Config loaded');
+  fileLog('[TexaCore] Config path:', CONFIG_FILE);
+  fileLog('[TexaCore] License key:', config.licenseKey ? `${config.licenseKey.substring(0, 15)}... ✅` : '❌ NOT SET');
+  fileLog('[TexaCore] Data dir:', DATA_DIR);
+  fileLog('[TexaCore] Log file:', LOG_FILE);
+  heartbeatSender.start();
+
+  // Start Realtime Presence for instant online/offline status
   if (config.licenseKey) {
-    heartbeatSender.start();
+    realtimePresence.connect(config.licenseKey);
   }
+  // Also connect presence after license recovery (give heartbeat time to recover key)
+  setTimeout(() => {
+    const cfg = loadConfig();
+    if (cfg.licenseKey && !realtimePresence.ws) {
+      realtimePresence.connect(cfg.licenseKey);
+    }
+  }, 15000);
+
+  // Quick connectivity test (2s after start)
+  setTimeout(async () => {
+    fileLog('[Diag] Running connectivity diagnostic...');
+    try {
+      const testResult = await new Promise((resolve, reject) => {
+        const req = https.request({
+          hostname: 'wzkklenfsaepegymfxfz.supabase.co',
+          port: 443,
+          path: '/functions/v1/license-heartbeat',
+          method: 'POST',
+          headers: { 'Content-Type': 'application/json' },
+          timeout: 10000,
+        }, (res) => {
+          let body = '';
+          res.on('data', c => body += c);
+          res.on('end', () => resolve({ status: res.statusCode, body: body.substring(0, 500) }));
+        });
+        req.on('error', e => reject(e));
+        req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+        req.write(JSON.stringify({ license_key: config.licenseKey || 'TEST', hardware_id: 'DIAG_TEST' }));
+        req.end();
+      });
+      fileLog('[Diag] ✅ Supabase reachable! Status:', testResult.status, 'Body:', testResult.body);
+    } catch (err) {
+      fileLog('[Diag] ❌ Cannot reach Supabase:', err.message);
+    }
+  }, 2000);
 
   // Set dock icon (macOS)
   if (process.platform === 'darwin') {
     app.dock.setIcon(path.join(__dirname, '..', 'build', 'icon.png'));
+  }
+});
+
+// IPC: Read heartbeat log file
+ipcMain.handle('get-heartbeat-log', async () => {
+  try {
+    if (fs.existsSync(LOG_FILE)) {
+      const content = fs.readFileSync(LOG_FILE, 'utf8');
+      // Return last 5000 chars
+      return content.length > 5000 ? content.substring(content.length - 5000) : content;
+    }
+    return 'No log file found at: ' + LOG_FILE;
+  } catch (e) {
+    return 'Error reading log: ' + e.message;
   }
 });
 
@@ -2458,7 +2989,7 @@ app.on('before-quit', async () => {
     backupManager.stopSync();
     backupManager.stopCloudSync();
     try {
-      console.log('[TexaCore] Running final backup before quit...');
+      fileLog('[TexaCore] Running final backup before quit...');
       await backupManager.backup();
       
       // Copy to secondary backup location
@@ -2471,7 +3002,7 @@ app.on('before-quit', async () => {
         // Keep timestamped version too
         const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
         fs.copyFileSync(primaryPath, path.join(appBackupDir, `${backupName}.${ts}.bak`));
-        console.log('[TexaCore] ✅ Secondary backup saved to:', appBackupDir);
+        fileLog('[TexaCore] ✅ Secondary backup saved to:', appBackupDir);
       }
     } catch (e) {
       console.warn('[TexaCore] Final backup failed:', e.message);
