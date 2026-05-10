@@ -2392,8 +2392,42 @@ const httpServer = http.createServer(async (req, res) => {
         // Start periodic sync — writes back to ORIGINAL file
         backupManager.startSync();
 
+        let companyName = fileName.replace('.tcdb', '');
+        // Query actual company info from restored DB
+        let companyId = null;
+        let tenantId = null;
+        let users = [];
+        try {
+          const { Client } = require('pg');
+          const pgClient = new Client({
+            host: 'localhost', port: ServiceManager.PG_PORT,
+            database: 'postgres', user: 'postgres',
+            password: svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD,
+          });
+          await pgClient.connect();
+          
+          const { rows: companies } = await pgClient.query("SELECT id, tenant_id, name FROM companies LIMIT 1");
+          if (companies.length > 0) {
+            companyId = companies[0].id;
+            tenantId = companies[0].tenant_id;
+            // Also get company name from DB if available
+            if (companies[0].name) companyName = companies[0].name;
+          }
+          
+          // Get auth users for login hints
+          const { rows: authUsers } = await pgClient.query("SELECT email FROM auth.users ORDER BY created_at LIMIT 10");
+          users = authUsers.map(u => u.email);
+          
+          // Notify PostgREST to reload schema after restore
+          try { await pgClient.query("NOTIFY pgrst, 'reload schema'"); } catch {}
+          
+          await pgClient.end();
+          console.log(`[OpenTCDB] DB info: company=${companyId}, tenant=${tenantId}, users=${users.join(', ')}`);
+        } catch (dbErr) {
+          console.warn('[OpenTCDB] Could not query restored DB:', dbErr.message);
+        }
+
         // Save config
-        const companyName = fileName.replace('.tcdb', '');
         try {
           const config = loadConfig();
           config.companies = [{ name: companyName, tcdbPath: selectedPath, storagePath: fileDir }];
@@ -2406,6 +2440,9 @@ const httpServer = http.createServer(async (req, res) => {
           success: true, 
           type: 'tcdb',
           companyName,
+          companyId,
+          tenantId,
+          users,
           tcdbPath: selectedPath,
           ...restoreResult 
         }));
