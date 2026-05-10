@@ -2440,6 +2440,8 @@ const httpServer = http.createServer(async (req, res) => {
 
         const rsfDir = path.dirname(filePath);
         console.log(`[RSF-Path] Importing from: ${filePath}`);
+        console.log(`[RSF-Path] File exists: ${fs.existsSync(filePath)}`);
+        console.log(`[RSF-Path] File size: ${fs.statSync(filePath).size} bytes`);
         console.log(`[RSF-Path] TCDB will be created in same dir: ${rsfDir}`);
 
         // Use the existing import logic
@@ -2447,20 +2449,39 @@ const httpServer = http.createServer(async (req, res) => {
         const { mapRsfToSupabase } = require('./rsf-mapper');
         const { Client } = require('pg');
 
+        const dbPassword = svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD;
+        console.log(`[RSF-Path] Connecting to PG on port ${ServiceManager.PG_PORT} with password: ${dbPassword ? '***' : 'MISSING'}`);
+        
         const pgClient = new Client({
           host: 'localhost', port: ServiceManager.PG_PORT,
           database: 'postgres', user: 'postgres',
-          password: svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD,
+          password: dbPassword,
         });
-        await pgClient.connect();
+        
+        try {
+          await pgClient.connect();
+          console.log('[RSF-Path] ✅ PG connected');
+        } catch (pgErr) {
+          console.error('[RSF-Path] ❌ PG connection failed:', pgErr.message);
+          throw new Error('فشل الاتصال بقاعدة البيانات: ' + pgErr.message);
+        }
 
-        const reader = new RsfReader(filePath);
-        await reader.open();
+        let reader, freshReader;
+        try {
+          reader = new RsfReader(filePath);
+          await reader.open();
+          console.log('[RSF-Path] ✅ RSF file opened');
+        } catch (readErr) {
+          console.error('[RSF-Path] ❌ RSF read failed:', readErr.message);
+          await pgClient.end();
+          throw new Error('فشل قراءة ملف الرشيد: ' + readErr.message);
+        }
 
-        let freshReader;
         try { freshReader = new RsfReader(filePath); await freshReader.open(); } catch { freshReader = reader; }
 
+        console.log('[RSF-Path] Starting mapRsfToSupabase...');
         const result = await mapRsfToSupabase(reader, pgClient, { freshReader });
+        console.log('[RSF-Path] ✅ mapRsfToSupabase done, success:', result.success);
 
         const rsfCompanyName = result.companyName || path.basename(filePath, '.rsf');
 
@@ -2535,6 +2556,7 @@ const httpServer = http.createServer(async (req, res) => {
         }));
       } catch (err) {
         console.error('[RSF-Path] ❌ Error:', err.message);
+        console.error('[RSF-Path] Stack:', err.stack);
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: err.message }));
       }
