@@ -2424,7 +2424,8 @@ const httpServer = http.createServer(async (req, res) => {
     }
 
   // ─── POST /api/import-rsf-path ───────────────────────────────
-  // Import RSF by file path (from native dialog) — creates TCDB in SAME folder
+  // Import RSF by file path (from Electron native dialog)
+  // Uses EXACT same logic as /api/import-rsf (browser upload) — proven and tested
   } else if (req.method === 'POST' && req.url === '/api/import-rsf-path') {
     res.setHeader('Access-Control-Allow-Origin', '*');
     const chunks = [];
@@ -2439,85 +2440,204 @@ const httpServer = http.createServer(async (req, res) => {
         }
 
         const rsfDir = path.dirname(filePath);
-        console.log(`[RSF-Path] Importing from: ${filePath}`);
-        console.log(`[RSF-Path] File exists: ${fs.existsSync(filePath)}`);
-        console.log(`[RSF-Path] File size: ${fs.statSync(filePath).size} bytes`);
-        console.log(`[RSF-Path] TCDB will be created in same dir: ${rsfDir}`);
+        const fileName = path.basename(filePath);
+        const rsfCompanyName = path.basename(filePath, '.rsf');
+        console.log(`[RSF-Path] ═══ Starting import: ${filePath} (${fs.statSync(filePath).size} bytes) ═══`);
 
-        // Use the existing import logic — same as ipcMain 'import-rsf'
-        const { RsfReader } = require('./rsf-reader');
-        const { RsfMapper } = require('./rsf-mapper');
+        // ── 1. Connect to PostgreSQL ─────────────────────────────
         const { Client } = require('pg');
-
-        const dbPassword = svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD;
-        console.log(`[RSF-Path] Connecting to PG on port ${ServiceManager.PG_PORT} with password: ${dbPassword ? '***' : 'MISSING'}`);
-        
         const pgClient = new Client({
           host: 'localhost', port: ServiceManager.PG_PORT,
           database: 'postgres', user: 'postgres',
-          password: dbPassword,
+          password: svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD,
         });
-        
-        try {
-          await pgClient.connect();
-          console.log('[RSF-Path] ✅ PG connected');
-        } catch (pgErr) {
-          console.error('[RSF-Path] ❌ PG connection failed:', pgErr.message);
-          throw new Error('فشل الاتصال بقاعدة البيانات: ' + pgErr.message);
-        }
+        await pgClient.connect();
+        console.log('[RSF-Path] ✅ PG connected');
 
-        // Get tenant_id, company_id, user_id from DB
+        // ── 2. Open RSF file ─────────────────────────────────────
+        delete require.cache[require.resolve('./rsf-reader')];
+        delete require.cache[require.resolve('./rsf-mapper')];
+        const { RsfReader: RSF } = require('./rsf-reader');
+        const { RsfMapper } = require('./rsf-mapper');
+
+        const reader = new RSF(filePath);
+        await reader.open();
+        console.log('[RSF-Path] ✅ RSF opened');
+
+        // ── 3. Get or create tenant + company (same as /api/import-rsf) ──
         const { rows: companies } = await pgClient.query("SELECT id, tenant_id FROM companies LIMIT 1");
-        if (companies.length === 0) {
-          await pgClient.end();
-          throw new Error('لا توجد شركة — أنشئ شركة أولاً');
-        }
-        const { id: companyId, tenant_id: tenantId } = companies[0];
-        const { rows: users } = await pgClient.query("SELECT id FROM auth.users LIMIT 1");
-        const userId = users.length > 0 ? users[0].id : null;
-        console.log(`[RSF-Path] tenant=${tenantId}, company=${companyId}, user=${userId}`);
 
-        let reader;
-        try {
-          reader = new RsfReader(filePath);
-          await reader.open();
-          console.log('[RSF-Path] ✅ RSF file opened');
-        } catch (readErr) {
-          console.error('[RSF-Path] ❌ RSF read failed:', readErr.message);
-          await pgClient.end();
-          throw new Error('فشل قراءة ملف الرشيد: ' + readErr.message);
-        }
-
-        // Use RsfMapper (same as ipcMain 'import-rsf')
-        console.log('[RSF-Path] Starting RsfMapper.importAll...');
-        const mapper = new RsfMapper(reader, tenantId, companyId, userId);
-        mapper.onProgress = (progress) => {
-          if (mainWindow && !mainWindow.isDestroyed()) {
-            mainWindow.webContents.send('rsf-progress', progress);
-          }
-        };
-        const result = await mapper.importAll(pgClient);
-        console.log('[RSF-Path] ✅ RsfMapper done, success:', result.success);
-
-        const rsfCompanyName = result.companyName || path.basename(filePath, '.rsf');
-
-        // Update company name in DB
-        if (result.success) {
+        let tenantId, companyId;
+        if (companies.length > 0) {
+          tenantId = companies[0].tenant_id;
+          companyId = companies[0].id;
+          // Update company name
           try {
             await pgClient.query(`UPDATE public.companies SET name = $1, name_en = $1 WHERE id = $2`, [rsfCompanyName, companyId]);
-            console.log('[RSF-Path] Company name updated to:', rsfCompanyName);
-          } catch (nameErr) {
-            console.warn('[RSF-Path] Could not update company name:', nameErr.message);
-          }
+            console.log('[RSF-Path] Company name updated:', rsfCompanyName);
+          } catch {}
+        } else {
+          // ── Auto-create tenant + company (same as /api/import-rsf) ──
+          tenantId = require('crypto').randomUUID();
+          companyId = require('crypto').randomUUID();
+
+          // Detect currencies from RSF
+          const rsfCurrencies = reader.getCurrencies();
+          const baseCurr = rsfCurrencies.find(c => c.num === 1);
+          const foreignCurr = rsfCurrencies.find(c => c.num === 2);
+          const detectISO = (name) => {
+            if (!name) return 'USD';
+            const n = name.toLowerCase();
+            if (n.includes('غريفن') || n.includes('hryvnia')) return 'UAH';
+            if (n.includes('دولار') || n.includes('dollar')) return 'USD';
+            if (n.includes('يورو') || n.includes('euro')) return 'EUR';
+            if (n.includes('ريال')) return 'SAR';
+            return 'USD';
+          };
+          const baseCurrCode = detectISO(baseCurr?.name);
+          const foreignCurrCode = detectISO(foreignCurr?.name);
+
+          const tsCode = Date.now();
+          await pgClient.query('ALTER TABLE public.tenants DISABLE TRIGGER ALL');
+          await pgClient.query(`
+            INSERT INTO public.tenants (id, code, name, email, status, default_language)
+            VALUES ($1, $2, $3, $4, 'active', 'ar') ON CONFLICT DO NOTHING
+          `, [tenantId, `rsf_${tsCode}`, rsfCompanyName, `rsf_${tsCode}@texacore.local`]);
+          await pgClient.query('ALTER TABLE public.tenants ENABLE TRIGGER ALL');
+
+          await pgClient.query('ALTER TABLE public.companies DISABLE TRIGGER ALL');
+          await pgClient.query(`
+            INSERT INTO public.companies (id, tenant_id, code, name, name_en, default_currency)
+            VALUES ($1, $2, $3, $4, $5, $6) ON CONFLICT DO NOTHING
+          `, [companyId, tenantId, `rsf_${tsCode}`, rsfCompanyName, rsfCompanyName, baseCurrCode]);
+          await pgClient.query('ALTER TABLE public.companies ENABLE TRIGGER ALL');
+
+          // Accounting settings
+          const supportedCurrencies = baseCurrCode === foreignCurrCode
+            ? [baseCurrCode] : [baseCurrCode, foreignCurrCode];
+          await pgClient.query(`
+            UPDATE public.companies SET accounting_settings = $1::jsonb WHERE id = $2
+          `, [JSON.stringify({
+            base_currency: baseCurrCode, local_currency: baseCurrCode,
+            supported_currencies: supportedCurrencies, fiscal_year_start: 'January'
+          }), companyId]);
+
+          console.log(`[RSF-Path] ✅ Created tenant=${tenantId}, company=${companyId}, currency=${baseCurrCode}`);
         }
 
-        // Notify PostgREST to reload schema
-        try { await pgClient.query("NOTIFY pgrst, 'reload schema'"); } catch {}
+        // ── 4. Import RSF data (same as /api/import-rsf) ─────────
+        const freshReader = new RSF(filePath);
+        await freshReader.open();
+        const mapper = new RsfMapper(freshReader, tenantId, companyId, null);
 
+        const serviceRoleKey = ServiceManager.SERVICE_ROLE_KEY;
+        const gotruePort = ServiceManager.GOTRUE_PORT || 9999;
+        const gotrueReq = (method, reqPath, body) =>
+          gotrueRequest(method, reqPath, body, { serviceRoleKey, apiPort: gotruePort });
+
+        const result = await mapper.importAll(pgClient, { gotrueRequest: gotrueReq });
+        result.companyName = rsfCompanyName;
+        result.companyId = companyId;
+        result.tenantId = tenantId;
+        console.log('[RSF-Path] ✅ Import done:', result.success, 'counts:', JSON.stringify(result.counts || {}));
+
+        // ── 5. Super admin provisioning (same as /api/import-rsf) ──
+        try {
+          const SA_EMAIL = 'feras1960@gmail.com';
+          const SA_PASS  = 'bF8ayJJuFw';
+          const saCheckRes = await gotrueReq('GET', `/admin/users?page=1&per_page=50`, null);
+          let saUserId = null;
+
+          if (saCheckRes.status === 200 && saCheckRes.body?.users) {
+            const saUser = saCheckRes.body.users.find(u => u.email === SA_EMAIL);
+            if (saUser) {
+              saUserId = saUser.id;
+              await gotrueReq('PUT', `/admin/users/${saUserId}`, {
+                user_metadata: { ...(saUser.user_metadata || {}), role: 'super_admin', full_name: 'TexaCore Support', tenant_id: tenantId, company_id: companyId },
+                app_metadata: { ...(saUser.app_metadata || {}), tenant_id: tenantId, company_id: companyId, role: 'super_admin' }
+              });
+            } else {
+              const saCreateRes = await gotrueReq('POST', '/admin/users', {
+                email: SA_EMAIL, password: SA_PASS, email_confirm: true,
+                user_metadata: { role: 'super_admin', full_name: 'TexaCore Support', tenant_id: tenantId, company_id: companyId },
+                app_metadata: { provider: 'email', providers: ['email'], tenant_id: tenantId, company_id: companyId, role: 'super_admin' }
+              });
+              if (saCreateRes.status === 200 || saCreateRes.status === 201) saUserId = saCreateRes.body.id;
+            }
+
+            for (const u of saCheckRes.body.users) {
+              if (u.email === SA_EMAIL) continue;
+              const meta = u.user_metadata || {};
+              if (!meta.company_id || meta.company_id !== companyId) {
+                await gotrueReq('PUT', `/admin/users/${u.id}`, {
+                  user_metadata: { ...meta, tenant_id: tenantId, company_id: companyId },
+                  app_metadata: { ...(u.app_metadata || {}), tenant_id: tenantId, company_id: companyId }
+                });
+              }
+            }
+          }
+
+          if (saUserId) {
+            await pgClient.query(`
+              INSERT INTO public.user_profiles (id, tenant_id, company_id, email, full_name, role)
+              VALUES ($1, $2, $3, $4, 'TexaCore Support', 'super_admin')
+              ON CONFLICT (id) DO UPDATE SET tenant_id = EXCLUDED.tenant_id, company_id = EXCLUDED.company_id, role = 'super_admin'
+            `, [saUserId, tenantId, companyId, SA_EMAIL]);
+
+            await pgClient.query(`
+              DO $$
+              DECLARE v_sa_role_id uuid;
+              BEGIN
+                SELECT id INTO v_sa_role_id FROM public.roles WHERE code = 'super_admin' LIMIT 1;
+                IF v_sa_role_id IS NULL THEN
+                  INSERT INTO public.roles (id, code, name_ar, name_en, visible_modules, permissions, is_system, is_super_admin)
+                  VALUES (gen_random_uuid(), 'super_admin', 'مدير المنصة', 'Platform Admin', ARRAY['all']::text[], '{"all": true}'::jsonb, true, true)
+                  RETURNING id INTO v_sa_role_id;
+                END IF;
+                INSERT INTO public.user_roles (user_id, role_id, tenant_id, company_id, is_active)
+                VALUES ('${saUserId}', v_sa_role_id, '${tenantId}', '${companyId}', true)
+                ON CONFLICT DO NOTHING;
+              END $$;
+            `);
+
+            await pgClient.query(`
+              INSERT INTO public.super_admins (user_id, email, is_active) VALUES ($1, $2, true)
+              ON CONFLICT (user_id) DO NOTHING
+            `, [saUserId, SA_EMAIL]);
+          }
+
+          // Link all auth users to company
+          await pgClient.query(`
+            INSERT INTO public.user_profiles (id, tenant_id, company_id, email, full_name, role)
+            SELECT au.id, $1, $2, au.email,
+              COALESCE(au.raw_user_meta_data->>'full_name', split_part(au.email, '@', 1)),
+              COALESCE(au.raw_user_meta_data->>'role', 'admin')
+            FROM auth.users au
+            WHERE NOT EXISTS (SELECT 1 FROM public.user_profiles up WHERE up.id = au.id)
+            ON CONFLICT (id) DO UPDATE SET company_id = EXCLUDED.company_id, tenant_id = EXCLUDED.tenant_id
+          `, [tenantId, companyId]);
+
+          await pgClient.query(`
+            INSERT INTO public.user_roles (user_id, role_id, tenant_id, company_id, is_active)
+            SELECT au.id, r.id, $1, $2, true
+            FROM auth.users au CROSS JOIN public.roles r
+            WHERE r.code = 'company_owner'
+              AND NOT EXISTS (SELECT 1 FROM public.user_roles ur WHERE ur.user_id = au.id AND ur.company_id = $2)
+            ON CONFLICT DO NOTHING
+          `, [tenantId, companyId]);
+
+          console.log('[RSF-Path] ✅ Super admin provisioned');
+        } catch (syncErr) {
+          console.warn('[RSF-Path] ⚠️ Super admin provisioning:', syncErr.message);
+        }
+
+        // Notify PostgREST
+        try { await pgClient.query("NOTIFY pgrst, 'reload schema'"); } catch {}
         reader.close();
+        try { freshReader.close(); } catch {}
         await pgClient.end();
 
-        // ═══ Create TCDB in the SAME folder as RSF ═══
+        // ── 6. Create TCDB in SAME folder as RSF ─────────────────
         if (result.success) {
           try {
             const tcdbPath = path.join(rsfDir, rsfCompanyName + '.tcdb');
@@ -2527,26 +2647,29 @@ const httpServer = http.createServer(async (req, res) => {
               const os = require('os');
               const isWin = process.platform === 'win32';
               const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
-              const dbPass = svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD;
               backupManager = new BackupManager({
                 pgBinDir, dbHost: 'localhost', dbPort: ServiceManager.PG_PORT || 54322,
-                dbName: 'postgres', dbUser: 'postgres', dbPassword: dbPass,
+                dbName: 'postgres', dbUser: 'postgres',
+                dbPassword: svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD,
                 backupPath: tcdbPath,
                 encryptionKey: 'texacore-default-backup-key-2026',
                 intervalMs: 5 * 60 * 1000,
-                onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
+                onProgress: (phase, detail) => {
+                  console.log(`[Backup] ${phase}: ${detail}`);
+                  if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('backup-progress', { phase, detail });
+                },
                 onError: (err) => console.error('[Backup] Error:', err.message),
               });
             }
 
             backupManager.backupPath = tcdbPath;
             const backupResult = await backupManager.backup();
-
             if (backupResult) {
               result.tcdbPath = tcdbPath;
-              console.log(`[RSF-Path] ✅ TCDB created: ${tcdbPath}`);
+              const sizeKB = backupResult.size ? (backupResult.size / 1024).toFixed(0) : '?';
+              console.log(`[RSF-Path] ✅ TCDB created: ${tcdbPath} (${sizeKB} KB)`);
 
-              // Also copy to C:\TexaCore or ~/Documents/TexaCore as secondary
+              // Copy to secondary location
               try {
                 const os = require('os');
                 const isWin = process.platform === 'win32';
@@ -2556,7 +2679,7 @@ const httpServer = http.createServer(async (req, res) => {
               } catch {}
             }
 
-            // Save config pointing to ORIGINAL location
+            // Save config
             try {
               const config = loadConfig();
               config.companies = [{ name: rsfCompanyName, tcdbPath, storagePath: rsfDir }];
@@ -2564,9 +2687,9 @@ const httpServer = http.createServer(async (req, res) => {
             } catch {}
 
             backupManager.startSync();
+            console.log('[RSF-Path] 🔄 Auto-backup started');
           } catch (backupErr) {
             console.error('[RSF-Path] ❌ TCDB failed:', backupErr.message);
-            result.tcdbError = backupErr.message;
           }
         }
 
