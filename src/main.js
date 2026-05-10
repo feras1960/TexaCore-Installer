@@ -2309,17 +2309,19 @@ const httpServer = http.createServer(async (req, res) => {
   } else if (req.method === 'GET' && req.url === '/api/open-tcdb') {
     res.setHeader('Access-Control-Allow-Origin', '*');
     try {
-      const { dialog } = require('electron');
+      const { dialog, BrowserWindow } = require('electron');
 
-      // 🔝 Bring Electron window to front BEFORE opening dialog
-      // This ensures the file picker appears on top of the browser
-      if (mainWindow) {
-        mainWindow.setAlwaysOnTop(true);
-        mainWindow.show();
-        mainWindow.focus();
-      }
+      // Use a hidden parent window to ensure dialog appears on top
+      // without showing the main Electron window
+      const dialogParent = new BrowserWindow({
+        width: 0, height: 0,
+        show: false,
+        alwaysOnTop: true,
+        skipTaskbar: true,
+      });
+      dialogParent.setAlwaysOnTop(true, 'screen-saver');
 
-      const result = await dialog.showOpenDialog(mainWindow, {
+      const result = await dialog.showOpenDialog(dialogParent, {
         title: 'فتح ملف بيانات TexaCore',
         filters: [
           { name: 'TexaCore Database', extensions: ['tcdb'] },
@@ -2328,10 +2330,8 @@ const httpServer = http.createServer(async (req, res) => {
         properties: ['openFile'],
       });
 
-      // 🔝 Restore normal z-order after dialog closes
-      if (mainWindow) {
-        mainWindow.setAlwaysOnTop(false);
-      }
+      // Clean up hidden window
+      dialogParent.destroy();
 
       if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
