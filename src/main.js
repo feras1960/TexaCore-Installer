@@ -2444,9 +2444,9 @@ const httpServer = http.createServer(async (req, res) => {
         console.log(`[RSF-Path] File size: ${fs.statSync(filePath).size} bytes`);
         console.log(`[RSF-Path] TCDB will be created in same dir: ${rsfDir}`);
 
-        // Use the existing import logic
-        const { RsfReader, detectFileType } = require('./rsf-reader');
-        const { mapRsfToSupabase } = require('./rsf-mapper');
+        // Use the existing import logic — same as ipcMain 'import-rsf'
+        const { RsfReader } = require('./rsf-reader');
+        const { RsfMapper } = require('./rsf-mapper');
         const { Client } = require('pg');
 
         const dbPassword = svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD;
@@ -2466,7 +2466,18 @@ const httpServer = http.createServer(async (req, res) => {
           throw new Error('فشل الاتصال بقاعدة البيانات: ' + pgErr.message);
         }
 
-        let reader, freshReader;
+        // Get tenant_id, company_id, user_id from DB
+        const { rows: companies } = await pgClient.query("SELECT id, tenant_id FROM companies LIMIT 1");
+        if (companies.length === 0) {
+          await pgClient.end();
+          throw new Error('لا توجد شركة — أنشئ شركة أولاً');
+        }
+        const { id: companyId, tenant_id: tenantId } = companies[0];
+        const { rows: users } = await pgClient.query("SELECT id FROM auth.users LIMIT 1");
+        const userId = users.length > 0 ? users[0].id : null;
+        console.log(`[RSF-Path] tenant=${tenantId}, company=${companyId}, user=${userId}`);
+
+        let reader;
         try {
           reader = new RsfReader(filePath);
           await reader.open();
@@ -2477,19 +2488,33 @@ const httpServer = http.createServer(async (req, res) => {
           throw new Error('فشل قراءة ملف الرشيد: ' + readErr.message);
         }
 
-        try { freshReader = new RsfReader(filePath); await freshReader.open(); } catch { freshReader = reader; }
-
-        console.log('[RSF-Path] Starting mapRsfToSupabase...');
-        const result = await mapRsfToSupabase(reader, pgClient, { freshReader });
-        console.log('[RSF-Path] ✅ mapRsfToSupabase done, success:', result.success);
+        // Use RsfMapper (same as ipcMain 'import-rsf')
+        console.log('[RSF-Path] Starting RsfMapper.importAll...');
+        const mapper = new RsfMapper(reader, tenantId, companyId, userId);
+        mapper.onProgress = (progress) => {
+          if (mainWindow && !mainWindow.isDestroyed()) {
+            mainWindow.webContents.send('rsf-progress', progress);
+          }
+        };
+        const result = await mapper.importAll(pgClient);
+        console.log('[RSF-Path] ✅ RsfMapper done, success:', result.success);
 
         const rsfCompanyName = result.companyName || path.basename(filePath, '.rsf');
+
+        // Update company name in DB
+        if (result.success) {
+          try {
+            await pgClient.query(`UPDATE public.companies SET name = $1, name_en = $1 WHERE id = $2`, [rsfCompanyName, companyId]);
+            console.log('[RSF-Path] Company name updated to:', rsfCompanyName);
+          } catch (nameErr) {
+            console.warn('[RSF-Path] Could not update company name:', nameErr.message);
+          }
+        }
 
         // Notify PostgREST to reload schema
         try { await pgClient.query("NOTIFY pgrst, 'reload schema'"); } catch {}
 
         reader.close();
-        try { freshReader.close(); } catch {}
         await pgClient.end();
 
         // ═══ Create TCDB in the SAME folder as RSF ═══
