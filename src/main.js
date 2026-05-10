@@ -2310,6 +2310,15 @@ const httpServer = http.createServer(async (req, res) => {
     res.setHeader('Access-Control-Allow-Origin', '*');
     try {
       const { dialog } = require('electron');
+
+      // 🔝 Bring Electron window to front BEFORE opening dialog
+      // This ensures the file picker appears on top of the browser
+      if (mainWindow) {
+        mainWindow.setAlwaysOnTop(true);
+        mainWindow.show();
+        mainWindow.focus();
+      }
+
       const result = await dialog.showOpenDialog(mainWindow, {
         title: 'فتح ملف بيانات TexaCore',
         filters: [
@@ -2318,6 +2327,11 @@ const httpServer = http.createServer(async (req, res) => {
         ],
         properties: ['openFile'],
       });
+
+      // 🔝 Restore normal z-order after dialog closes
+      if (mainWindow) {
+        mainWindow.setAlwaysOnTop(false);
+      }
 
       if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
