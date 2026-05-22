@@ -45,6 +45,7 @@ class BackupManager {
     this.dbUser = opts.dbUser || 'postgres';
     this.dbPassword = opts.dbPassword;
     this.backupPath = opts.backupPath;
+    this.secondaryBackupPath = opts.secondaryBackupPath || null; // Redundant copy path
     this.encryptionKey = opts.encryptionKey;
     this.intervalMs = opts.intervalMs || 5 * 60 * 1000; // 5 minutes default
     this.onProgress = opts.onProgress || (() => {});
@@ -94,6 +95,41 @@ class BackupManager {
       this.onProgress('dump', 'تصدير قاعدة البيانات...');
       const dumpData = await this._pgDump();
 
+      // Step 1.5: Verify dump completeness — CRITICAL: prevent empty backups
+      this.onProgress('verify', 'التحقق من اكتمال البيانات...');
+      const dumpStr = dumpData.toString('utf8'); // Scan full dump
+      const hasCompanies = dumpStr.includes('CREATE TABLE') && dumpStr.includes('companies');
+      const hasCopyStatements = (dumpStr.match(/^COPY /gm) || []).length;
+      const hasAuthSchema = dumpStr.includes('auth.');
+      
+      // Check if COPY public.companies actually has data (not just "\.")
+      const companyCopyIdx = dumpStr.indexOf('COPY public.companies');
+      let hasCompanyData = false;
+      if (companyCopyIdx > -1) {
+        const afterCopy = dumpStr.substring(companyCopyIdx, companyCopyIdx + 2000);
+        const firstNewline = afterCopy.indexOf('\n');
+        const secondNewline = afterCopy.indexOf('\n', firstNewline + 1);
+        const dataLine = afterCopy.substring(firstNewline + 1, secondNewline);
+        hasCompanyData = dataLine.trim() !== '\\.' && dataLine.trim().length > 10;
+      }
+
+      if (!hasCompanyData) {
+        const warnMsg = `🛑 Backup SKIPPED — no company data in dump! (companies_table=${hasCompanies}, COPY_count=${hasCopyStatements})`;
+        console.warn(`[BackupManager] ${warnMsg}`);
+        this.onProgress('verify', warnMsg);
+        // ABORT: Don't overwrite a good backup with an empty one
+        return null;
+      }
+      
+      if (!hasCompanies || hasCopyStatements < 5) {
+        const warnMsg = `⚠️ Dump may be incomplete: companies=${hasCompanies}, COPY_count=${hasCopyStatements}, auth=${hasAuthSchema}`;
+        console.warn(`[BackupManager] ${warnMsg}`);
+        this.onProgress('verify', warnMsg);
+        // Don't abort — save anyway but warn
+      } else {
+        console.log(`[BackupManager] ✅ Dump verified: ${hasCopyStatements} tables with data, auth=${hasAuthSchema}, company_data=✅`);
+      }
+
       // Step 2: Compress with gzip
       this.onProgress('compress', 'ضغط البيانات...');
       const compressed = await this._compress(dumpData);
@@ -127,6 +163,17 @@ class BackupManager {
       this.onProgress('done', `✅ تم النسخ الاحتياطي (${(stats.size / 1024 / 1024).toFixed(1)} MB) في ${(duration / 1000).toFixed(1)}s`);
       console.log(`[BackupManager] Backup #${this._backupCount} complete: ${(stats.size / 1024).toFixed(0)} KB in ${duration}ms`);
 
+      // ─── Copy to secondary backup location ───
+      if (this.secondaryBackupPath) {
+        try {
+          const secDir = path.dirname(this.secondaryBackupPath);
+          if (!fs.existsSync(secDir)) fs.mkdirSync(secDir, { recursive: true });
+          fs.copyFileSync(this.backupPath, this.secondaryBackupPath);
+        } catch (e) {
+          console.warn(`[BackupManager] Secondary copy failed: ${e.message}`);
+        }
+      }
+
       return stats;
     } catch (error) {
       this.onProgress('error', `❌ فشل النسخ الاحتياطي: ${error.message}`);
@@ -154,11 +201,9 @@ class BackupManager {
         '-d', this.dbName,
         '--no-owner',
         '--no-acl',
-        '--clean',
-        '--if-exists',
+        // Full dump: structure + data (complete database snapshot)
         '--schema=public',
         '--schema=auth',
-        // Include data + schema
         '--format=plain',
         '--encoding=UTF8',
       ];
@@ -384,7 +429,11 @@ class BackupManager {
   _executeSql(sqlBuffer) {
     return new Promise((resolve, reject) => {
       const tmpFile = this.backupPath + '.restore.sql';
-      fs.writeFileSync(tmpFile, sqlBuffer);
+      // Wrap SQL with FK constraint disable/enable for reliable restoration
+      // Without this, COPY statements fail due to FK ordering issues
+      const header = Buffer.from("SET session_replication_role = 'replica';\n");
+      const footer = Buffer.from("\nSET session_replication_role = 'origin';\n");
+      fs.writeFileSync(tmpFile, Buffer.concat([header, sqlBuffer, footer]));
 
       const env = {
         ...process.env,

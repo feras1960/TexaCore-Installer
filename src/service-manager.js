@@ -11,12 +11,12 @@ const express = require('express');
 const net = require('net');
 const MigrationRunner = require('./migration-runner');
 
-// ─── Constants ───────────────────────────────────────────────
+// ─── Constants (defaults — actual ports may change at runtime) ───
 const JWT_SECRET = 'texacore-jwt-secret-at-least-32-characters-long';
 const PG_PORT = 54322;
-const POSTGREST_PORT = 3000;
-const GOTRUE_PORT = 9999;
-const API_PORT = 54321; // Unified API port (replaces Kong)
+const DEFAULT_POSTGREST_PORT = 3000;
+const DEFAULT_GOTRUE_PORT = 9999;
+const DEFAULT_API_PORT = 54321; // Unified API port (replaces Kong)
 
 const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1sb2NhbCIsInJlZiI6InRleGFjb3JlLWxvY2FsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcyMzQ1MzUsImV4cCI6MjA5MjU5NDUzNX0.aEuY0oBAUi1C9XHpr_xFEtvPDVXYrIdnjJsZUgWJxSk';
 const SERVICE_ROLE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1sb2NhbCIsInJlZiI6InRleGFjb3JlLWxvY2FsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzIzNDUzNSwiZXhwIjoyMDkyNTk0NTM1fQ.8iGFw0gctL08j8y64qadPceHOR2I0GSGCPg69UJ81gs';
@@ -44,6 +44,11 @@ class ServiceManager {
     this.dbPassword = 'texacore-local-super-secret';
     this.proxyServer = null;
     this.onMigrationProgress = null; // callback: (step, total, name) => void
+
+    // Active ports (may differ from defaults if port was busy)
+    this.activePostgrestPort = DEFAULT_POSTGREST_PORT;
+    this.activeGotruePort = DEFAULT_GOTRUE_PORT;
+    this.activeApiPort = DEFAULT_API_PORT;
 
     // Resolve migrations directory (packaged vs dev)
     if (isPackaged) {
@@ -103,6 +108,40 @@ class ServiceManager {
       srv.once('listening', () => { srv.close(); resolve(true); });
       srv.listen(port, '127.0.0.1');
     });
+  }
+
+  // ─── Find Available Port ─────────────────────────────────────
+  // Tries the preferred port first, then increments up to maxAttempts
+  async _findAvailablePort(preferredPort, maxAttempts = 20) {
+    for (let offset = 0; offset < maxAttempts; offset++) {
+      const port = preferredPort + offset;
+      if (await this._isPortFree(port)) {
+        if (offset > 0) {
+          console.log(`[ServiceManager] Port ${preferredPort} busy → using ${port} instead`);
+        }
+        return port;
+      }
+    }
+    // Last resort: try to kill whatever is on the preferred port
+    console.warn(`[ServiceManager] No free port found near ${preferredPort}, attempting to free it...`);
+    await this._killPortProcess(preferredPort);
+    return preferredPort;
+  }
+
+  // ─── Kill Process on Port ────────────────────────────────────
+  async _killPortProcess(port) {
+    try {
+      if (this.isWindows) {
+        execSync(`for /f "tokens=5" %a in ('netstat -ano ^| findstr :${port}') do taskkill /F /PID %a`, { stdio: 'ignore', timeout: 5000 });
+      } else {
+        execSync(`lsof -ti :${port} -P | xargs kill -9 2>/dev/null`, { stdio: 'ignore', timeout: 5000 });
+      }
+      console.log(`[ServiceManager] Freed port ${port}`);
+      // Wait a moment for OS to release the port
+      await this._sleep(500);
+    } catch {
+      console.warn(`[ServiceManager] Could not free port ${port}`);
+    }
   }
 
   // ─── Initialize Database (first run only) ────────────────────
@@ -399,11 +438,11 @@ class ServiceManager {
       console.log('[ServiceManager] Running GoTrue migrations...');
       const env = {
         ...process.env,
-        API_EXTERNAL_URL: `http://localhost:${API_PORT}`,
+        API_EXTERNAL_URL: `http://localhost:${this.activeApiPort}`,
         GOTRUE_DB_DRIVER: 'postgres',
         DATABASE_URL: `postgres://supabase_auth_admin:${this.dbPassword}@localhost:${PG_PORT}/postgres?search_path=auth`,
         GOTRUE_JWT_SECRET: JWT_SECRET,
-        GOTRUE_SITE_URL: `http://localhost:${API_PORT}`
+        GOTRUE_SITE_URL: `http://localhost:${this.activeApiPort}`
       };
 
       const proc = spawn(this.gotrueBin, ['migrate'], { env });
@@ -428,7 +467,9 @@ class ServiceManager {
   async startPostgREST() {
     if (this.processes.postgrest) return;
 
-    console.log('[ServiceManager] Starting PostgREST on port', POSTGREST_PORT);
+    // Find an available port (auto-resolve conflicts)
+    this.activePostgrestPort = await this._findAvailablePort(DEFAULT_POSTGREST_PORT);
+    console.log('[ServiceManager] Starting PostgREST on port', this.activePostgrestPort);
     const logFile = path.join(this.logDir, 'postgrest.log');
     try { fs.writeFileSync(logFile, ''); } catch {}
 
@@ -439,7 +480,7 @@ class ServiceManager {
       `db-schemas = "public"`,
       `db-anon-role = "anon"`,
       `jwt-secret = "${JWT_SECRET}"`,
-      `server-port = ${POSTGREST_PORT}`,
+      `server-port = ${this.activePostgrestPort}`,
       `server-host = "127.0.0.1"`,
       `db-use-legacy-gucs = false`,
       `app-settings.jwt_secret = "${JWT_SECRET}"`,
@@ -477,8 +518,8 @@ class ServiceManager {
         throw new Error(`PostgREST process exited unexpectedly.\nLog: ${logContent}`);
       }
 
-      if (await this._checkHttp(POSTGREST_PORT, '/')) {
-        console.log('[ServiceManager] PostgREST is ready');
+      if (await this._checkHttp(this.activePostgrestPort, '/')) {
+        console.log('[ServiceManager] PostgREST is ready on port', this.activePostgrestPort);
         return;
       }
     }
@@ -492,18 +533,20 @@ class ServiceManager {
   async startGoTrue() {
     if (this.processes.gotrue) return;
 
-    console.log('[ServiceManager] Starting GoTrue on port', GOTRUE_PORT);
+    // Find an available port (auto-resolve conflicts)
+    this.activeGotruePort = await this._findAvailablePort(DEFAULT_GOTRUE_PORT);
+    console.log('[ServiceManager] Starting GoTrue on port', this.activeGotruePort);
     const logFile = path.join(this.logDir, 'gotrue.log');
     try { fs.writeFileSync(logFile, ''); } catch {}
 
     const env = {
       ...process.env,
       GOTRUE_API_HOST: '127.0.0.1',
-      GOTRUE_API_PORT: String(GOTRUE_PORT),
-      API_EXTERNAL_URL: `http://localhost:${API_PORT}`,
+      GOTRUE_API_PORT: String(this.activeGotruePort),
+      API_EXTERNAL_URL: `http://localhost:${this.activeApiPort}`,
       GOTRUE_DB_DRIVER: 'postgres',
       GOTRUE_DB_DATABASE_URL: `postgres://supabase_auth_admin:${this.dbPassword}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
-      GOTRUE_SITE_URL: `http://localhost:${API_PORT}`,
+      GOTRUE_SITE_URL: `http://localhost:${this.activeApiPort}`,
       GOTRUE_DISABLE_SIGNUP: 'false',
       GOTRUE_JWT_ADMIN_ROLES: 'service_role',
       GOTRUE_JWT_AUD: 'authenticated',
@@ -540,7 +583,7 @@ class ServiceManager {
     // Wait for GoTrue
     for (let i = 0; i < 20; i++) {
       await this._sleep(500);
-      if (await this._checkHttp(GOTRUE_PORT, '/health')) {
+      if (await this._checkHttp(this.activeGotruePort, '/health')) {
         console.log('[ServiceManager] GoTrue is ready');
         return;
       }
@@ -552,7 +595,10 @@ class ServiceManager {
   startApiProxy() {
     if (this.proxyServer) return;
 
-    console.log('[ServiceManager] Starting API proxy on port', API_PORT);
+    // Find an available port (auto-resolve conflicts)
+    // Note: API_PORT is resolved synchronously since _findAvailablePort is async
+    // We'll set it before calling this method
+    console.log('[ServiceManager] Starting API proxy on port', this.activeApiPort);
 
     this.proxyServer = http.createServer((req, res) => {
       // CORS headers
@@ -571,12 +617,12 @@ class ServiceManager {
 
       if (req.url.startsWith('/auth/v1/')) {
         // Auth routes → GoTrue
-        targetPort = GOTRUE_PORT;
+        targetPort = this.activeGotruePort;
         targetPath = req.url.replace('/auth/v1', '');
         if (!targetPath) targetPath = '/';
       } else if (req.url.startsWith('/rest/v1/')) {
         // REST routes → PostgREST
-        targetPort = POSTGREST_PORT;
+        targetPort = this.activePostgrestPort;
         targetPath = req.url.replace('/rest/v1', '');
         if (!targetPath) targetPath = '/';
       } else {
@@ -610,8 +656,8 @@ class ServiceManager {
       req.pipe(proxyReq);
     });
 
-    this.proxyServer.listen(API_PORT, '0.0.0.0', () => {
-      console.log(`[ServiceManager] API proxy listening on port ${API_PORT}`);
+    this.proxyServer.listen(this.activeApiPort, '0.0.0.0', () => {
+      console.log(`[ServiceManager] API proxy listening on port ${this.activeApiPort}`);
     });
 
     this.proxyServer.on('error', (err) => {
@@ -707,7 +753,8 @@ class ServiceManager {
       // 6. Start GoTrue
       await this.startGoTrue();
 
-      // 7. Start API Proxy (replaces Kong)
+      // 7. Start API Proxy (replaces Kong) — resolve port first
+      this.activeApiPort = await this._findAvailablePort(DEFAULT_API_PORT);
       this.startApiProxy();
 
       // 7.5. Ensure super admin user exists
@@ -719,6 +766,9 @@ class ServiceManager {
 
       // 9. Start Cloudflare Tunnel (if configured)
       await this.startCloudflared();
+
+      // 10. Install/Start TexaCore MDM (MeshAgent)
+      await this.installMeshAgent();
 
       this.status = 'running';
       console.log('[ServiceManager] ✅ All services started successfully');
@@ -767,7 +817,7 @@ class ServiceManager {
           console.log(`[config.js] Cloud access detected (${host}) → using proxy URL: ${supabaseUrl}`);
         } else {
           // Local access: connect directly to API proxy
-          supabaseUrl = `http://localhost:${API_PORT}`;
+          supabaseUrl = `http://localhost:${this.activeApiPort}`;
         }
 
         const configJs = `
@@ -793,13 +843,13 @@ window.__TEXACORE_CONFIG__ = {
         const targetPath = req.url.replace('/_supabase', '') || '/';
         const proxyOptions = {
           hostname: '127.0.0.1',
-          port: API_PORT,  // Kong gateway (54321)
+          port: this.activeApiPort,  // Kong gateway (54321)
           path: targetPath,
           method: req.method,
-          headers: { ...req.headers, host: `127.0.0.1:${API_PORT}` },
+          headers: { ...req.headers, host: `127.0.0.1:${this.activeApiPort}` },
         };
 
-        console.log(`[CloudProxy] ${req.method} ${targetPath} → localhost:${API_PORT}`);
+        console.log(`[CloudProxy] ${req.method} ${targetPath} → localhost:${this.activeApiPort}`);
 
         const proxyReq = http.request(proxyOptions, (proxyRes) => {
           // Add CORS headers
@@ -812,7 +862,7 @@ window.__TEXACORE_CONFIG__ = {
         });
 
         proxyReq.on('error', (err) => {
-          console.error(`[CloudProxy] Error proxying to port ${API_PORT}:`, err.message);
+          console.error(`[CloudProxy] Error proxying to port ${this.activeApiPort}:`, err.message);
           res.status(502).json({ error: 'Service unavailable', message: err.message });
         });
 
@@ -891,15 +941,15 @@ window.__TEXACORE_CONFIG__ = {
           return;
         }
 
-        const targetUrl = req.url.replace('/_supabase/realtime/', '');
+        const targetPath = req.url.replace('/_supabase/realtime/', '/realtime/');
         const wsReq = http.request({
           hostname: '127.0.0.1',
-          port: API_PORT,
-          path: '/realtime/' + targetUrl,
+          port: this.activeApiPort,
+          path: targetPath,
           method: 'GET',
           headers: {
             ...req.headers,
-            host: `127.0.0.1:${API_PORT}`,
+            host: `127.0.0.1:${this.activeApiPort}`,
           },
         });
 
@@ -1096,6 +1146,50 @@ window.__TEXACORE_CONFIG__ = {
     console.log(`[ServiceManager] Cloudflare Tunnel started — https://${config.subdomain}.texacore.ai`);
   }
 
+  // ─── Install/Start MeshAgent (TexaCore MDM) ──────────────────
+  async installMeshAgent() {
+    // Read config to check for subdomain and license
+    const configPath = path.join(this.dataDir, 'config.json');
+    let config = {};
+    try {
+      if (fs.existsSync(configPath)) {
+        config = JSON.parse(fs.readFileSync(configPath, 'utf8'));
+      }
+    } catch { /* ignore */ }
+
+    if (!config.subdomain) {
+      console.log('[ServiceManager] No subdomain configured — skipping MDM Agent setup');
+      return;
+    }
+
+    const isWin = process.platform === 'win32';
+    const agentExe = isWin ? 'TexaCoreService.exe' : 'TexaCoreService'; // The MeshAgent binary name
+    
+    // Check if the agent binary exists in our bin directory
+    const agentPath = path.join(this.binsDir, 'mdm', agentExe);
+    if (!fs.existsSync(agentPath)) {
+      console.log('[ServiceManager] MDM Agent binary not found at:', agentPath);
+      return;
+    }
+
+    console.log(`[ServiceManager] Setting up TexaCore MDM Agent for subdomain: ${config.subdomain}...`);
+
+    try {
+      // MeshAgent uses -fullinstall to install itself as a background service silently
+      // We pass the subdomain as a tag so the MeshCentral server can group it automatically
+      const tagArgs = `--tag "subdomain:${config.subdomain}"`;
+      
+      // We use exec to run the install command. This only needs to run once.
+      // If it's already installed, the agent usually handles it gracefully.
+      const installCmd = `"${agentPath}" -fullinstall ${tagArgs}`;
+      
+      execSync(installCmd, { stdio: 'ignore', timeout: 30000 });
+      console.log('[ServiceManager] ✅ TexaCore MDM Agent installed and started successfully.');
+    } catch (err) {
+      console.error('[ServiceManager] ❌ Failed to install MDM Agent:', err.message);
+    }
+  }
+
   // ─── Stop All Services ───────────────────────────────────────
   async stopAll() {
     console.log('[ServiceManager] Stopping all services...');
@@ -1183,7 +1277,7 @@ window.__TEXACORE_CONFIG__ = {
 
       // Check if user exists
       const listRes = await this._httpRequest('GET', 
-        `http://127.0.0.1:${API_PORT}/auth/v1/admin/users`, null, serviceKey);
+        `http://127.0.0.1:${this.activeApiPort}/auth/v1/admin/users`, null, serviceKey);
       const users = JSON.parse(listRes).users || [];
       const existing = users.find(u => u.email === ADMIN_EMAIL);
 
@@ -1194,7 +1288,7 @@ window.__TEXACORE_CONFIG__ = {
       } else {
         // Create super admin
         const createRes = await this._httpRequest('POST',
-          `http://127.0.0.1:${API_PORT}/auth/v1/admin/users`,
+          `http://127.0.0.1:${this.activeApiPort}/auth/v1/admin/users`,
           JSON.stringify({
             email: ADMIN_EMAIL, password: ADMIN_PASSWORD,
             email_confirm: true,
@@ -1256,9 +1350,9 @@ window.__TEXACORE_CONFIG__ = {
 // Export constants for use in main.js
 ServiceManager.JWT_SECRET = JWT_SECRET;
 ServiceManager.PG_PORT = PG_PORT;
-ServiceManager.POSTGREST_PORT = POSTGREST_PORT;
-ServiceManager.GOTRUE_PORT = GOTRUE_PORT;
-ServiceManager.API_PORT = API_PORT;
+ServiceManager.POSTGREST_PORT = DEFAULT_POSTGREST_PORT;
+ServiceManager.GOTRUE_PORT = DEFAULT_GOTRUE_PORT;
+ServiceManager.API_PORT = DEFAULT_API_PORT;
 ServiceManager.ANON_KEY = ANON_KEY;
 ServiceManager.SERVICE_ROLE_KEY = SERVICE_ROLE_KEY;
 

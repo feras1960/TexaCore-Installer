@@ -662,30 +662,121 @@ class RsfReader {
   }
 
   // ═══════════════════════════════════════════════════════
+  // 11b. طلبيات الشراء (من جدول Claim)
+  // ═══════════════════════════════════════════════════════
+
+  getPurchaseOrders() {
+    const rows = this._readTable('Claim');
+    if (rows.length === 0) return [];
+
+    // تجميع البنود حسب رقم الطلبية (Num)
+    const orderMap = {};
+    for (const row of rows) {
+      const num = row.Num || 0;
+      if (!orderMap[num]) {
+        orderMap[num] = {
+          number: num,
+          date: row.Date || null,
+          supplierAccountCode: String(row.NR_ACC || '').trim(),
+          isConverted: row.IsMove === true || row.IsMove === 1, // هل تحولت لفاتورة
+          notes: String(row.Notes || '').trim(),
+          salesman: String(row.SalesMan || '').trim(),
+          lines: [],
+          total: 0,
+        };
+      }
+      const line = {
+        materialCode: String(row.NR_MAT || '').trim(),
+        quantity: parseFloat(row.Quant) || 0,
+        receivedQty: parseFloat(row.Quant2) || 0,
+        balance: parseFloat(row.Balance) || 0,
+        unitPrice: parseFloat(row.Price) || 0,
+        total: parseFloat(row.Total) || 0,
+        name: String(row.FreeName || '').trim(),
+        direction: row.SWay || 'I', // I = وارد (شراء)
+      };
+      orderMap[num].lines.push(line);
+      orderMap[num].total += line.total;
+    }
+
+    return Object.values(orderMap);
+  }
+
+  // ═══════════════════════════════════════════════════════
   // 12. حركات المستودع
   // ═══════════════════════════════════════════════════════
 
   getInventoryMoves() {
     const moves = this._readTable('MOVE');
-    const details = this._readTable('MoveMats');
+    const moveMats = this._readTable('MoveMats');
 
-    if (moves.length === 0) return [];
+    if (moves.length === 0 && moveMats.length === 0) return [];
 
-    const detailsByMove = {};
-    for (const d of details) {
-      const key = d.Num || d.MoveNum || 0;
-      if (!detailsByMove[key]) detailsByMove[key] = [];
-      detailsByMove[key].push(d);
+    // ── تحويل كل صف MOVE إلى كائن موحد ──
+    const allMoves = moves.map(m => {
+      const way = String(m.SWAY || m.SWay || '').trim();
+      let type = 'adjustment';
+      if (way === 'I') type = 'purchase';   // دخول شراء
+      if (way === 'O') type = 'sale';       // خروج بيع
+      if (way === 'M') type = 'transfer_out'; // خروج مناقلة
+      if (way === 'N') type = 'transfer_in';  // دخول مناقلة
+
+      return {
+        materialCode: String(m['SACC-NR'] || '').trim(),
+        quantity: parseFloat(m.SQUANT) || 0,
+        price: parseFloat(m.SPRICE) || 0,
+        priceForced: parseFloat(m.SPRFOR) || 0,
+        type,
+        way,
+        date: m.SDATE || null,
+        document: String(m.SNDOC || '').trim(),
+        notes: String(m.SREM || '').trim(),
+        accountCode: String(m.SNRACC || '').trim(),
+        warehouseNum: parseInt(m.StockNum) || 1,
+        claimNum: parseInt(m.Claim) || 0,
+        purchaseInvoiceNum: parseInt(m.SERNRI) || 0,
+        salesInvoiceNum: parseInt(m.SERNRO) || 0,
+        order: parseInt(m.Order) || 0,
+        discount: parseFloat(m.Dis) || 0,
+        id: m.ID,
+        _raw: m,
+      };
+    });
+
+    // ── دمج أزواج المناقلات (M + N) إلى حركة واحدة ──
+    // نستخدم MoveMats كمرجع أفضل للمناقلات
+    const transfers = [];
+    if (moveMats.length > 0) {
+      // تجميع المناقلات حسب رقمها
+      const transferMap = {};
+      for (const mm of moveMats) {
+        const num = mm.Num || 0;
+        if (!transferMap[num]) {
+          transferMap[num] = {
+            number: num,
+            date: mm.Date || null,
+            notes: String(mm.Rem || '').trim(),
+            type: 'transfer',
+            lines: [],
+          };
+        }
+        transferMap[num].lines.push({
+          materialCode: String(mm.MatNum || '').trim(),
+          fromWarehouse: parseInt(mm.StockF) || 1,
+          toWarehouse: parseInt(mm.StockT) || 2,
+          quantity: parseFloat(mm.Quant) || 0,
+        });
+      }
+      transfers.push(...Object.values(transferMap));
     }
 
-    return moves.map(m => ({
-      number: m.Num,
-      date: m.Date,
-      type: m.Type, // نوع الحركة
-      notes: String(m.Notes || '').trim(),
-      details: detailsByMove[m.Num] || [],
-      _raw: m,
-    }));
+    // ── الحركات المستقلة (غير مناقلة، غير بيع/شراء) ──
+    const standalone = allMoves.filter(m => 
+      m.type !== 'purchase' && m.type !== 'sale' && 
+      m.type !== 'transfer_out' && m.type !== 'transfer_in'
+    );
+
+    return { allMoves, transfers, standalone };
   }
 
   // ═══════════════════════════════════════════════════════
@@ -762,6 +853,7 @@ class RsfReader {
     const materials = this.getMaterials();
     const salesInvoices = this.getSalesInvoices();
     const purchaseInvoices = this.getPurchaseInvoices();
+    const purchaseOrders = this.getPurchaseOrders();
     const inventoryMoves = this.getInventoryMoves();
     const manufacturing = this.getManufacturing();
     const receipts = this.getReceipts();
@@ -799,7 +891,9 @@ class RsfReader {
         materials: materials.length,
         salesInvoices: salesInvoices.length,
         purchaseInvoices: purchaseInvoices.length,
-        inventoryMoves: inventoryMoves.length,
+        purchaseOrders: purchaseOrders.length,
+        inventoryMoves: inventoryMoves?.allMoves?.length || 0,
+        transfers: inventoryMoves?.transfers?.length || 0,
         manufacturingOrders: manufacturing.length,
         receipts: receipts.length,
         users: users.length,
@@ -815,7 +909,8 @@ class RsfReader {
         accounting: journalHeaders.length > 0,
         sales: salesInvoices.length > 0,
         purchases: purchaseInvoices.length > 0,
-        inventory: inventoryMoves.length > 0,
+        purchaseOrders: purchaseOrders.length > 0,
+        inventory: (inventoryMoves?.allMoves?.length || 0) > 0,
         manufacturing: manufacturing.length > 0,
         receipts: receipts.length > 0,
       },

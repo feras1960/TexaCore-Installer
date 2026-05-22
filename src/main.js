@@ -2427,6 +2427,90 @@ const httpServer = http.createServer(async (req, res) => {
           console.warn('[OpenTCDB] Could not query restored DB:', dbErr.message);
         }
 
+        // Restart GoTrue & PostgREST after pg_restore
+        // GoTrue caches auth.users — it MUST be restarted after DB restore
+        // PostgREST needs schema reload for new tables
+        try {
+          if (svcManager) {
+            // Restart GoTrue
+            if (svcManager.processes.gotrue) {
+              console.log('[OpenTCDB] Restarting GoTrue...');
+              try { svcManager.processes.gotrue.kill(); } catch {}
+              svcManager.processes.gotrue = null;
+              await new Promise(r => setTimeout(r, 1000));
+            }
+            await svcManager.startGoTrue();
+            console.log('[OpenTCDB] ✅ GoTrue restarted');
+
+            // Restart PostgREST  
+            if (svcManager.processes.postgrest) {
+              console.log('[OpenTCDB] Restarting PostgREST...');
+              try { svcManager.processes.postgrest.kill(); } catch {}
+              svcManager.processes.postgrest = null;
+              await new Promise(r => setTimeout(r, 1000));
+            }
+            await svcManager.startPostgREST();
+            console.log('[OpenTCDB] ✅ PostgREST restarted');
+
+            // Disable RLS on restored tables
+            try {
+              await svcManager.psqlExec(`
+                DO $$ DECLARE r RECORD; BEGIN
+                  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
+                    EXECUTE 'ALTER TABLE public.' || quote_ident(r.tablename) || ' DISABLE ROW LEVEL SECURITY';
+                  END LOOP;
+                END $$;
+                GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
+                GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated, service_role;
+                GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
+                GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO anon, authenticated, service_role;
+                NOTIFY pgrst, 'reload schema';
+              `);
+              console.log('[OpenTCDB] ✅ RLS disabled + grants applied');
+            } catch (rlsErr) {
+              console.warn('[OpenTCDB] RLS/grants warning:', rlsErr.message);
+            }
+            
+            // Fix auth schema ownership for GoTrue
+            // pg_restore sets owner to 'postgres', but GoTrue needs supabase_auth_admin
+            try {
+              await svcManager.psqlExec(`
+                ALTER SCHEMA auth OWNER TO supabase_auth_admin;
+                DO $$ DECLARE r RECORD; BEGIN
+                  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'auth' LOOP
+                    EXECUTE 'ALTER TABLE auth.' || quote_ident(r.tablename) || ' OWNER TO supabase_auth_admin';
+                  END LOOP;
+                END $$;
+                DO $$ DECLARE r RECORD; BEGIN
+                  FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = 'auth' LOOP
+                    EXECUTE 'ALTER SEQUENCE auth.' || quote_ident(r.sequencename) || ' OWNER TO supabase_auth_admin';
+                  END LOOP;
+                END $$;
+                GRANT ALL ON SCHEMA auth TO supabase_auth_admin;
+                GRANT ALL ON ALL TABLES IN SCHEMA auth TO supabase_auth_admin;
+                GRANT ALL ON ALL SEQUENCES IN SCHEMA auth TO supabase_auth_admin;
+                GRANT USAGE ON SCHEMA auth TO authenticator, supabase_auth_admin;
+              `);
+              console.log('[OpenTCDB] ✅ Auth schema ownership fixed');
+            } catch (authErr) {
+              console.warn('[OpenTCDB] Auth ownership warning:', authErr.message);
+            }
+          } else {
+            // Fallback: just NOTIFY if svcManager not available
+            const { Client: PgClient2 } = require('pg');
+            const pgC2 = new PgClient2({
+              host: 'localhost', port: ServiceManager.PG_PORT,
+              database: 'postgres', user: 'postgres',
+              password: ServiceManager.DB_PASSWORD,
+            });
+            await pgC2.connect();
+            await pgC2.query("NOTIFY pgrst, 'reload schema'");
+            await pgC2.end();
+          }
+        } catch (restartErr) {
+          console.warn('[OpenTCDB] Service restart warning:', restartErr.message);
+        }
+
         // Save config
         try {
           const config = loadConfig();
