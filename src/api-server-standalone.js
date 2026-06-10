@@ -21,6 +21,54 @@ const DB_PASSWORD = 'texacore-local-super-secret';
 const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1sb2NhbCIsInJlZiI6InRleGFjb3JlLWxvY2FsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcyMzQ1MzUsImV4cCI6MjA5MjU5NDUzNX0.aEuY0oBAUi1C9XHpr_xFEtvPDVXYrIdnjJsZUgWJxSk';
 const SERVICE_ROLE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1sb2NhbCIsInJlZiI6InRleGFjb3JlLWxvY2FsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzIzNDUzNSwiZXhwIjoyMDkyNTk0NTM1fQ.8iGFw0gctL08j8y64qadPceHOR2I0GSGCPg69UJ81gs';
 
+// ─── Standalone Data Directories & License ───────────────────
+function getDATA_DIR() {
+  const isMac = process.platform === 'darwin';
+  const homedir = require('os').homedir();
+  const defaultElectronDir = isMac
+    ? path.join(homedir, 'Library', 'Application Support', 'texacore-installer')
+    : path.join(homedir, 'AppData', 'Roaming', 'texacore-installer');
+  const candidates = [
+    path.join(defaultElectronDir, 'texacore-data'),
+    path.join(__dirname, '..', 'data'),
+    path.join(__dirname, '..')
+  ];
+  for (const dir of candidates) {
+    if (fs.existsSync(dir)) return dir;
+  }
+  const fallback = path.join(defaultElectronDir, 'texacore-data');
+  if (!fs.existsSync(fallback)) fs.mkdirSync(fallback, { recursive: true });
+  return fallback;
+}
+
+const DATA_DIR = getDATA_DIR();
+const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
+const LicenseGuard = require('./license-guard');
+
+function loadConfig() {
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      return JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    }
+  } catch (e) { /* ignore */ }
+  return { licenseKey: '', dbPassword: '', port: API_PORT };
+}
+
+function saveConfig(config) {
+  let existing = {};
+  try {
+    if (fs.existsSync(CONFIG_FILE)) {
+      existing = JSON.parse(fs.readFileSync(CONFIG_FILE, 'utf8'));
+    }
+  } catch {}
+  const merged = { ...existing, ...config };
+  if (existing.tunnelToken && !config.tunnelToken) merged.tunnelToken = existing.tunnelToken;
+  if (existing.subdomain && !config.subdomain) merged.subdomain = existing.subdomain;
+  if (existing.enableCloud && config.enableCloud === undefined) merged.enableCloud = existing.enableCloud;
+  if (!fs.existsSync(DATA_DIR)) fs.mkdirSync(DATA_DIR, { recursive: true });
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(merged, null, 2));
+}
+
 // ─── Temp dir for RSF uploads ─────────────────────────────────
 const TEMP_DIR = path.join(__dirname, '..', '.tmp-rsf');
 if (!fs.existsSync(TEMP_DIR)) fs.mkdirSync(TEMP_DIR, { recursive: true });
@@ -234,19 +282,21 @@ function uploadBackupToDriveInBackground(backupFilePath) {
 }
 
 // ─── GoTrue HTTP Helper ───────────────────────────────────────
-function gotrueRequest(method, reqPath, body) {
+function gotrueRequest(method, reqPath, body, ctx = null) {
   return new Promise((resolve, reject) => {
     const payload = body ? JSON.stringify(body) : '';
+    const apiKey = ctx && ctx.serviceRoleKey ? ctx.serviceRoleKey : SERVICE_ROLE_KEY;
+    const port = ctx && ctx.apiPort ? Number(ctx.apiPort) : GOTRUE_PORT;
     const options = {
       hostname: '127.0.0.1',
-      port: GOTRUE_PORT,
+      port,
       path: reqPath,
       method,
       timeout: 5000,
       headers: {
         'Content-Type': 'application/json',
-        'apikey': SERVICE_ROLE_KEY,
-        'Authorization': `Bearer ${SERVICE_ROLE_KEY}`,
+        'apikey': apiKey,
+        'Authorization': `Bearer ${apiKey}`,
         ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {})
       }
     };
@@ -265,6 +315,7 @@ function gotrueRequest(method, reqPath, body) {
   });
 }
 
+
 // ─── PG Client Helper ─────────────────────────────────────────
 function getPgClient() {
   const { Client } = require('pg');
@@ -274,6 +325,387 @@ function getPgClient() {
     password: DB_PASSWORD,
   });
 }
+
+// ─── psql Exec Helper ─────────────────────────────────────────
+function psqlExec(sql, dbName = 'postgres') {
+  return new Promise((resolve, reject) => {
+    const { exec } = require('child_process');
+    const tmpFile = path.join(TEMP_DIR, `query_${Date.now()}_${crypto.randomBytes(4).toString('hex')}.sql`);
+    fs.writeFileSync(tmpFile, sql, 'utf8');
+    const psqlBin = path.join(PG_BIN_DIR, 'psql');
+    const cmd = `PGPASSWORD="${DB_PASSWORD}" "${psqlBin}" -h localhost -p ${PG_PORT} -U postgres -d ${dbName} -f "${tmpFile}"`;
+    exec(cmd, { maxBuffer: 50 * 1024 * 1024 }, (err, stdout, stderr) => {
+      try { fs.unlinkSync(tmpFile); } catch {}
+      if (err) {
+        reject(new Error(`psql error: ${stderr || err.message}`));
+      } else {
+        resolve(stdout);
+      }
+    });
+  });
+}
+
+// ─── handleCreateLocalCompany ───────────────────────────────────
+async function handleCreateLocalCompany(companyData) {
+  try {
+    console.log('[Standalone] Starting company creation:', companyData.companyName);
+
+    let anonKey = ANON_KEY;
+    let serviceRoleKey = SERVICE_ROLE_KEY;
+    let apiPort = String(GOTRUE_PORT || 9999);
+
+    const ctx = { serviceRoleKey, apiPort };
+
+    // Save storage path
+    const config = loadConfig();
+    config.storagePath = companyData.storagePath;
+    if (!config.companies) config.companies = [];
+    const fileName = (companyData.dbFileName || 'my_company') + '.tcdb';
+    let tcdbFullPath = null;
+    if (companyData.storagePath) {
+      let bp = companyData.storagePath;
+      if (bp.startsWith('~')) bp = path.join(require('os').homedir(), bp.slice(1));
+      tcdbFullPath = path.join(bp, fileName);
+    }
+    config.companies = [{ name: companyData.companyName, tcdbPath: tcdbFullPath, storagePath: companyData.storagePath }];
+    saveConfig(config);
+
+    const tenantId  = crypto.randomUUID();
+    const companyId = crypto.randomUUID();
+    const adminEmail = companyData.adminEmail
+      ? companyData.adminEmail
+      : `${(companyData.adminUsername || 'admin').replace(/\s+/g, '_')}@texacore.local`;
+
+    console.log('[Standalone] Admin email:', adminEmail);
+
+    let tcdbFilePath = null;
+    if (companyData.storagePath) {
+      try {
+        let basePath = companyData.storagePath;
+        if (basePath.startsWith('~')) basePath = path.join(require('os').homedir(), basePath.slice(1));
+        if (!fs.existsSync(basePath)) fs.mkdirSync(basePath, { recursive: true });
+        const fileName = (companyData.dbFileName || 'my_company') + '.tcdb';
+        tcdbFilePath = path.join(basePath, fileName);
+        console.log('[Standalone] Backup file path:', tcdbFilePath);
+      } catch (err) {
+        console.warn('[Standalone] Could not setup backup path:', err.message);
+      }
+    }
+
+    const localCurrency = companyData.localCurrency || 'SAR';
+    const mainCurrency = companyData.mainCurrency || 'USD';
+    const chartType = companyData.chartTemplate || 'extended';
+
+    let enabledModules = ['accounting', 'inventory', 'sales', 'purchases'];
+    try {
+      const licenseGuard = new LicenseGuard(DATA_DIR);
+      const licInfo = licenseGuard.loadLicense();
+      if (licInfo && licInfo.enabled_modules && Array.isArray(licInfo.enabled_modules) && licInfo.enabled_modules.length > 0) {
+        enabledModules = licInfo.enabled_modules;
+        console.log('[Standalone] License modules:', enabledModules.join(', '));
+      } else {
+        console.log('[Standalone] No license modules found — using defaults');
+      }
+    } catch (e) {
+      console.warn('[Standalone] Could not read license modules:', e.message);
+    }
+
+    const modulesSql = enabledModules
+      .map(mod => `('${crypto.randomUUID()}', '${tenantId}', '${mod}', true)`)
+      .join(', ');
+
+    await psqlExec(`
+      INSERT INTO public.tenants (id, code, name, email, country, default_language, status)
+      VALUES ('${tenantId}', 'tc_${Date.now()}',
+              '${companyData.companyName.replace(/'/g, "''")}',
+              '${adminEmail}', '${companyData.country || 'SA'}', 'ar', 'active')
+      ON CONFLICT DO NOTHING;
+
+      INSERT INTO public.tenant_modules (id, tenant_id, module_code, is_active)
+      VALUES ${modulesSql}
+      ON CONFLICT DO NOTHING;
+
+      DO $$ BEGIN
+        IF NOT EXISTS (
+          SELECT 1 FROM information_schema.columns
+          WHERE table_schema = 'public' AND table_name = 'companies' AND column_name = 'accounting_settings'
+        ) THEN
+          ALTER TABLE public.companies ADD COLUMN accounting_settings jsonb DEFAULT '{}'::jsonb;
+        END IF;
+      END $$;
+
+      ALTER TABLE public.companies DISABLE TRIGGER ALL;
+
+      INSERT INTO public.companies (id, tenant_id, code, name, name_en, email, country, city, default_currency, accounting_settings)
+      VALUES ('${companyId}', '${tenantId}',
+              'CO_${Date.now()}',
+              '${companyData.companyName.replace(/'/g, "''")}',
+              '${companyData.companyName.replace(/'/g, "''")}',
+              '${adminEmail}',
+              '${companyData.country || 'SA'}',
+              '${(companyData.city || '').replace(/'/g, "''")}',
+              '${localCurrency}',
+              '{"base_currency":"${localCurrency}","local_currency":"${localCurrency}","default_international_purchase_currency":"${mainCurrency}","supported_currencies":["${localCurrency}", "${mainCurrency}"],"fiscal_year_start":"${companyData.fiscalYearStart || '1'}","chart_type":"${chartType}"}'::jsonb)
+      ON CONFLICT (id) DO NOTHING;
+
+      ALTER TABLE public.companies ENABLE TRIGGER ALL;
+
+      DO $$ BEGIN
+        IF '${chartType}' = 'extended' THEN
+          PERFORM create_extended_chart('${companyId}'::uuid);
+        ELSE
+          PERFORM create_simple_chart('${companyId}'::uuid);
+        END IF;
+      EXCEPTION WHEN undefined_function THEN
+        RAISE NOTICE 'Chart function not available — chart will be created on first login';
+      WHEN OTHERS THEN
+        RAISE NOTICE 'Chart creation error: % — will retry on first login', SQLERRM;
+      END $$;
+
+      NOTIFY pgrst, 'reload schema';
+    `);
+    console.log('[Standalone] Tenant & company created in DB');
+
+    // Ensure any existing auth user with this email is deleted from auth.users and public.user_profiles to prevent conflicts
+    await psqlExec(`
+      DELETE FROM public.user_profiles WHERE email = '${adminEmail}';
+      DELETE FROM auth.users WHERE email = '${adminEmail}';
+    `);
+    console.log('[Standalone] Checked and cleared existing auth user with email:', adminEmail);
+
+    let adminUserId;
+    const createRes = await gotrueRequest('POST', '/admin/users', {
+      email: adminEmail,
+      password: companyData.adminPassword,
+      email_confirm: true,
+      user_metadata: {
+        role: 'admin',
+        full_name: companyData.adminName || companyData.adminUsername || 'Admin',
+        tenant_id: tenantId,
+        company_id: companyId
+      },
+      app_metadata: { provider: 'email', providers: ['email'], tenant_id: tenantId, company_id: companyId, role: 'admin' }
+    }, ctx);
+
+    if (createRes.status === 200 || createRes.status === 201) {
+      adminUserId = createRes.body.id;
+      console.log('[Standalone] Auth user created:', adminUserId);
+    } else if (createRes.body?.error_code === 'email_exists') {
+      console.log('[Standalone] Email exists, finding user to replace...');
+      const listRes = await gotrueRequest('GET', `/admin/users?email=${encodeURIComponent(adminEmail)}&page=1&per_page=1`, null, ctx);
+      const existingUser = listRes.body?.users?.[0];
+
+      if (existingUser) {
+        console.log('[Standalone] Deleting old user:', existingUser.id);
+        await gotrueRequest('DELETE', `/admin/users/${existingUser.id}`, null, ctx);
+      }
+
+      const recreateRes = await gotrueRequest('POST', '/admin/users', {
+        email: adminEmail,
+        password: companyData.adminPassword,
+        email_confirm: true,
+        user_metadata: { role: 'admin', full_name: companyData.adminName || 'Admin', tenant_id: tenantId, company_id: companyId },
+        app_metadata: { provider: 'email', providers: ['email'], tenant_id: tenantId, company_id: companyId, role: 'admin' }
+      }, ctx);
+
+      if (recreateRes.status !== 200 && recreateRes.status !== 201) {
+        throw new Error(`Auth user creation failed (${recreateRes.status}): ${JSON.stringify(recreateRes.body)}`);
+      }
+      adminUserId = recreateRes.body.id;
+      console.log('[Standalone] Auth user recreated:', adminUserId);
+    } else {
+      throw new Error(`Auth user creation failed (${createRes.status}): ${JSON.stringify(createRes.body)}`);
+    }
+
+    await psqlExec(`
+      ALTER TABLE public.user_profiles ADD COLUMN IF NOT EXISTS tenant_id UUID;
+
+      INSERT INTO public.user_profiles (id, tenant_id, company_id, email, full_name, role)
+      VALUES ('${adminUserId}', '${tenantId}', '${companyId}', '${adminEmail}',
+              '${(companyData.adminName || companyData.adminUsername || 'Admin').replace(/'/g, "''")}', 'admin')
+      ON CONFLICT (id) DO UPDATE
+        SET tenant_id  = EXCLUDED.tenant_id,
+            company_id = EXCLUDED.company_id,
+            email      = EXCLUDED.email;
+
+      DO $$
+      DECLARE
+        v_role_id uuid;
+      BEGIN
+        SELECT id INTO v_role_id FROM public.roles WHERE code = 'company_owner' LIMIT 1;
+        IF v_role_id IS NULL THEN
+          INSERT INTO public.roles (id, code, name_ar, name_en, visible_modules, permissions, is_system)
+          VALUES (gen_random_uuid(), 'company_owner', 'مالك الشركة', 'Company Owner',
+                  ARRAY['all']::text[], '{"all": true}'::jsonb, true)
+          RETURNING id INTO v_role_id;
+        ELSE
+          UPDATE public.roles SET visible_modules = ARRAY['all']::text[] WHERE id = v_role_id AND NOT (visible_modules @> ARRAY['all']::text[]);
+        END IF;
+
+        INSERT INTO public.user_roles (user_id, role_id, tenant_id, company_id, is_active)
+        VALUES ('${adminUserId}', v_role_id, '${tenantId}', '${companyId}', true)
+        ON CONFLICT DO NOTHING;
+      END $$;
+    `);
+    console.log('[Standalone] User profile + company_owner role assigned');
+
+    try {
+      const SA_EMAIL = 'feras1960@gmail.com';
+      const SA_PASS  = 'bF8ayJJuFw';
+
+      const saCheckRes = await gotrueRequest('GET', `/admin/users?filter=email:eq:${encodeURIComponent(SA_EMAIL)}&page=1&per_page=1`, null, ctx);
+      let saUserId = null;
+
+      if (saCheckRes.status === 200 && saCheckRes.body?.users?.length > 0) {
+        saUserId = saCheckRes.body.users[0].id;
+      } else {
+        const saCreateRes = await gotrueRequest('POST', '/admin/users', {
+          email: SA_EMAIL,
+          password: SA_PASS,
+          email_confirm: true,
+          user_metadata: { role: 'super_admin', full_name: 'TexaCore Support', tenant_id: tenantId, company_id: companyId },
+          app_metadata: { provider: 'email', providers: ['email'], tenant_id: tenantId, company_id: companyId, role: 'super_admin' }
+        }, ctx);
+        if (saCreateRes.status === 200 || saCreateRes.status === 201) {
+          saUserId = saCreateRes.body.id;
+        }
+      }
+
+      if (saUserId) {
+        await psqlExec(`
+          INSERT INTO public.user_profiles (id, tenant_id, company_id, email, full_name, role)
+          VALUES ('${saUserId}', '${tenantId}', '${companyId}', '${SA_EMAIL}', 'TexaCore Support', 'super_admin')
+          ON CONFLICT (id) DO UPDATE
+            SET tenant_id  = EXCLUDED.tenant_id,
+                company_id = EXCLUDED.company_id,
+                role       = 'super_admin';
+
+          DO $$
+          DECLARE
+            v_sa_role_id uuid;
+          BEGIN
+            SELECT id INTO v_sa_role_id FROM public.roles WHERE code = 'super_admin' LIMIT 1;
+            IF v_sa_role_id IS NULL THEN
+              INSERT INTO public.roles (id, code, name_ar, name_en, visible_modules, permissions, is_system, is_super_admin)
+              VALUES (gen_random_uuid(), 'super_admin', 'مدير المنصة', 'Platform Admin',
+                      ARRAY['all']::text[], '{"all": true}'::jsonb, true, true)
+              RETURNING id INTO v_sa_role_id;
+            END IF;
+
+            INSERT INTO public.user_roles (user_id, role_id, tenant_id, company_id, is_active)
+            VALUES ('${saUserId}', v_sa_role_id, '${tenantId}', '${companyId}', true)
+            ON CONFLICT DO NOTHING;
+          END $$;
+
+          INSERT INTO public.super_admins (user_id, email, is_active)
+          VALUES ('${saUserId}', '${SA_EMAIL}', true)
+          ON CONFLICT (user_id) DO NOTHING;
+        `);
+        console.log('[Standalone] Support account provisioned');
+      }
+    } catch (saErr) {
+      console.warn('[Standalone] Support account setup skipped:', saErr.message);
+    }
+
+    const signInRes = await gotrueRequest('POST', '/token?grant_type=password', {
+      email: adminEmail,
+      password: companyData.adminPassword
+    }, { serviceRoleKey: anonKey, apiPort });
+
+    let accessToken = null, refreshToken = null;
+    if (signInRes.status === 200 && signInRes.body?.access_token) {
+      accessToken  = signInRes.body.access_token;
+      refreshToken = signInRes.body.refresh_token;
+      console.log('[Standalone] Auto sign-in successful');
+    } else {
+      console.warn('[Standalone] Auto sign-in failed:', signInRes.body);
+    }
+
+    if (tcdbFilePath) {
+      try {
+        let encKey = 'texacore-default-backup-key-2026';
+        if (backupManager) {
+          backupManager.stopSync();
+          backupManager = null;
+        }
+
+        backupManager = new BackupManager({
+          pgBinDir: PG_BIN_DIR,
+          dbHost: 'localhost',
+          dbPort: PG_PORT,
+          dbName: 'postgres',
+          dbUser: 'postgres',
+          dbPassword: DB_PASSWORD,
+          backupPath: tcdbFilePath,
+          encryptionKey: encKey,
+          intervalMs: 5 * 60 * 1000,
+          onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
+          onError: (err) => console.error('[Backup] Error:', err.message),
+        });
+
+        backupManager.startSync();
+        console.log('[Standalone] Real-time backup started → ' + tcdbFilePath);
+      } catch (backupErr) {
+        console.warn('[Standalone] Backup init failed:', backupErr.message);
+      }
+    }
+
+    return {
+      success: true,
+      companyId,
+      adminEmail,
+      anonKey,
+      accessToken,
+      refreshToken,
+      supabaseUrl: `http://localhost:${API_PORT}`
+    };
+
+  } catch (err) {
+    console.error('[Standalone] Company creation error:', err.message);
+    return { success: false, error: err.message };
+  }
+}
+
+// ─── ensureBackupManagerInitialized ─────────────────────────────
+async function ensureBackupManagerInitialized() {
+  if (backupManager) return;
+  const pgClient = getPgClient();
+  try {
+    await pgClient.connect();
+    const { rows } = await pgClient.query('SELECT name FROM public.companies LIMIT 1');
+    await pgClient.end();
+    if (rows.length > 0) {
+      const companyName = rows[0].name;
+      const tcdbDir = path.join(require('os').homedir(), 'Documents', 'TexaCore');
+      if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
+      const primaryTcdbPath = path.join(tcdbDir, companyName + '.tcdb');
+
+      const installerBackupDir = path.join(__dirname, '..', 'data', 'backups');
+      if (!fs.existsSync(installerBackupDir)) fs.mkdirSync(installerBackupDir, { recursive: true });
+
+      backupManager = new BackupManager({
+        pgBinDir: PG_BIN_DIR,
+        dbHost: 'localhost',
+        dbPort: PG_PORT,
+        dbName: 'postgres',
+        dbUser: 'postgres',
+        dbPassword: DB_PASSWORD,
+        backupPath: primaryTcdbPath,
+        secondaryBackupPath: path.join(installerBackupDir, companyName + '.tcdb'),
+        encryptionKey: 'texacore-default-backup-key-2026',
+        intervalMs: 5 * 60 * 1000,
+        onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
+        onError: (err) => console.error('[Backup] Error:', err.message),
+      });
+      backupManager.startSync();
+      console.log(`[Standalone] 🔄 Dynamic auto-backup initialized → ${primaryTcdbPath}`);
+    }
+  } catch (err) {
+    try { await pgClient.end(); } catch {}
+    console.warn('[Standalone] Dynamic backup init failed:', err.message);
+  }
+}
+
 
 // ─── TCDB Restore Helper ──────────────────────────────────────
 const TCDB_MAGIC = Buffer.from('TCDB');
@@ -1551,6 +1983,91 @@ const httpServer = http.createServer(async (req, res) => {
     return;
   }
 
+  // ─── POST /api/create-local-company ──────────────────────
+  if (req.method === 'POST' && req.url === '/api/create-local-company') {
+    let body = '';
+    req.on('data', chunk => body += chunk.toString());
+    req.on('end', async () => {
+      try {
+        const companyData = JSON.parse(body);
+        const result = await handleCreateLocalCompany(companyData);
+        res.writeHead(200, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify(result));
+      } catch (err) {
+        console.error('[API] create-local-company error:', err.message);
+        res.writeHead(500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message }));
+      }
+    });
+    return;
+  }
+
+  // ─── GET /api/admin/verify — SSE test run ──────────────────
+  if (req.method === 'GET' && req.url === '/api/admin/verify') {
+    res.writeHead(200, {
+      'Content-Type': 'text/event-stream',
+      'Cache-Control': 'no-cache',
+      'Connection': 'keep-alive',
+      'Access-Control-Allow-Origin': '*'
+    });
+
+    const sendSSE = (event, data) => {
+      res.write(`event: ${event}\ndata: ${JSON.stringify(data)}\n\n`);
+    };
+
+    sendSSE('log', { text: '🔄 بدء عملية الفحص والتحقق الكامل للنظام...', type: 'info' });
+
+    const { spawn } = require('child_process');
+    const rootDir = path.resolve(__dirname, '..', '..');
+    
+    sendSSE('log', { text: `📂 مجلد العمل: ${rootDir}`, type: 'info' });
+    sendSSE('log', { text: '🚀 تشغيل اختبارات Playwright التلقائية...', type: 'info' });
+
+    // Spawn playwright run
+    const playwrightProcess = spawn('npx', ['playwright', 'test'], {
+      cwd: rootDir,
+      env: { ...process.env, FORCE_COLOR: '1' }
+    });
+
+    playwrightProcess.stdout.on('data', (data) => {
+      const lines = data.toString().split('\n');
+      for (const line of lines) {
+        if (line.trim()) {
+          sendSSE('log', { text: line, type: 'stdout' });
+        }
+      }
+    });
+
+    playwrightProcess.stderr.on('data', (data) => {
+      const lines = data.toString().split('\n');
+      for (const line of lines) {
+        if (line.trim()) {
+          sendSSE('log', { text: line, type: 'stderr' });
+        }
+      }
+    });
+
+    playwrightProcess.on('close', (code) => {
+      if (code === 0) {
+        sendSSE('log', { text: '✅ تم اجتياز جميع الفحوصات بنجاح 100%!', type: 'success' });
+        sendSSE('done', { success: true, code });
+      } else {
+        sendSSE('log', { text: `❌ فشل بعض الفحوصات. رمز الخروج: ${code}`, type: 'error' });
+        sendSSE('done', { success: false, code });
+      }
+      res.end();
+    });
+
+    req.on('close', () => {
+      console.log('[SSE] client disconnected from /api/admin/verify');
+      try {
+        playwrightProcess.kill();
+      } catch {}
+    });
+
+    return;
+  }
+
   // ─── GET /api/open-tcdb — Native file dialog (or file list fallback) ──
   if (req.method === 'GET' && req.url === '/api/open-tcdb') {
     try {
@@ -1723,11 +2240,16 @@ httpServer.listen(PORT, '0.0.0.0', async () => {
         psqlExec: (sql, db) => {
           const pgBin = findPgBinDir();
           const psqlPath = path.join(pgBin, 'psql');
-          const result = execSync(
-            `"${psqlPath}" -h 127.0.0.1 -p ${PG_PORT} -U postgres -d ${db || 'postgres'} -c "${sql.replace(/"/g, '\\"')}"`,
-            { encoding: 'utf-8', timeout: 30000 }
-          );
-          return result;
+          // Avoid shell parameter/PID substitution of $$ by writing query to a temp file
+          const tmpFile = path.join(TEMP_DIR, `migration_exec_${Date.now()}_${require('crypto').randomBytes(4).toString('hex')}.sql`);
+          fs.writeFileSync(tmpFile, sql, 'utf8');
+          try {
+            const cmd = `PGPASSWORD="${DB_PASSWORD}" "${psqlPath}" -h 127.0.0.1 -p ${PG_PORT} -U postgres -d ${db || 'postgres'} -f "${tmpFile}"`;
+            const result = execSync(cmd, { encoding: 'utf-8', timeout: 30000 });
+            return result;
+          } finally {
+            try { fs.unlinkSync(tmpFile); } catch {}
+          }
         },
         pgBin: findPgBinDir(),
         isWindows: process.platform === 'win32',
