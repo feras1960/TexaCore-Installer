@@ -315,6 +315,29 @@ function httpPost(url, data) {
   });
 }
 
+// POST to a cloud PostgREST RPC (adds the anon-key headers that httpPost omits).
+// Used to tag/prune cloud backups per company after an upload.
+function httpPostRpc(rpcName, data) {
+  return new Promise((resolve, reject) => {
+    const base = LICENSING_URL.replace('/functions/v1', '/rest/v1/rpc/');
+    const urlObj = new URL(base + rpcName);
+    const payload = JSON.stringify(data);
+    const req = https.request({
+      hostname: urlObj.hostname, port: 443, path: urlObj.pathname, method: 'POST',
+      headers: {
+        'Content-Type': 'application/json',
+        'apikey': SUPABASE_ANON_KEY,
+        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
+        'Content-Length': Buffer.byteLength(payload),
+      }, timeout: 15000,
+    }, (res) => { let b = ''; res.on('data', c => b += c); res.on('end', () => resolve(b)); });
+    req.on('error', reject);
+    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
+    req.write(payload);
+    req.end();
+  });
+}
+
 // ─── HeartbeatSender ─────────────────────────────────────────
 class HeartbeatSender {
   constructor() {
@@ -675,15 +698,16 @@ class HeartbeatSender {
     try {
       if (!config.licenseKey) return;
       
-      // Find TCDB file to upload
+      // Find TCDB file to upload (+ track the active company's name)
       let tcdbPath = null;
+      let companyName = (config.companies && config.companies[0] && config.companies[0].name) || null;
       if (config.currentDbPath && fs.existsSync(config.currentDbPath)) {
         tcdbPath = config.currentDbPath;
       } else if (config.companies && config.companies.length > 0) {
         // Check company TCDB paths
         for (const co of config.companies) {
           const p = co.tcdbPath || co.storagePath;
-          if (p && fs.existsSync(p)) { tcdbPath = p; break; }
+          if (p && fs.existsSync(p)) { tcdbPath = p; companyName = co.name || companyName; break; }
         }
       }
       if (!tcdbPath) {
@@ -713,6 +737,7 @@ class HeartbeatSender {
       const fileBuffer = fs.readFileSync(tcdbPath);
       const fileBase64 = fileBuffer.toString('base64');
 
+      const fileName = path.basename(tcdbPath);
       const result = await httpPost(`${LICENSING_URL}/license-cloud-backup`, {
         license_key: config.licenseKey,
         file_base64: fileBase64,
@@ -721,12 +746,23 @@ class HeartbeatSender {
         companies_count: config.companies?.length || 1,
         invoices_count: 0,
         backup_type: 'auto',
+        company_name: companyName || 'الشركة',
+        file_name: fileName,
       });
-      
+
       if (result && result.success) {
         this._lastUploadSize = stats.size;
         this._lastUploadTime = Date.now();
-        console.log(`[CloudBackup] ✅ Uploaded ${path.basename(tcdbPath)} (${fileSizeMb}MB) via Edge Function`);
+        // Tag the just-created cloud record with company + file name and apply
+        // per-company retention (keep last 5 daily). Non-fatal if it fails.
+        try {
+          await httpPostRpc('licensing_tag_latest_backup', {
+            p_license_key: config.licenseKey,
+            p_company_name: companyName || 'الشركة',
+            p_file_name: fileName,
+          });
+        } catch (e) { console.warn('[CloudBackup] tag failed:', e.message); }
+        console.log(`[CloudBackup] ✅ Uploaded ${fileName} (${fileSizeMb}MB) for ${companyName || '?'}`);
       } else {
         console.warn('[CloudBackup] Upload response:', JSON.stringify(result));
       }

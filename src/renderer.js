@@ -47,8 +47,15 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   await refreshState();
-  // Auto-refresh status every 5 seconds
-  statusInterval = setInterval(refreshStatus, 5000);
+  // Adaptive polling: poll fast (1.5s) while the system is starting/not yet
+  // connected so the status appears near-instantly, then relax to 5s once
+  // connected. Avoids the old fixed 5s lag where the indicator felt slow.
+  const _statusTick = async () => {
+    await refreshStatus();
+    const connected = currentState && currentState.containerRunning;
+    statusInterval = setTimeout(_statusTick, connected ? 5000 : 1500);
+  };
+  statusInterval = setTimeout(_statusTick, 1500);
 });
 
 // ─── Refresh Full State ──────────────────────────────────────
