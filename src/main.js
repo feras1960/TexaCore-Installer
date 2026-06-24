@@ -1565,6 +1565,8 @@ ipcMain.handle('backup-restore', async (_, filePath) => {
   if (!backupManager) return { success: false, error: 'Backup not initialized' };
   try {
     const result = await backupManager.restore(filePath);
+    // Inject the vendor support account (vendor machine only) into the restored DB.
+    try { if (svcManager) await svcManager._ensureSuperAdmin(); } catch (e) { console.warn('[Restore IPC] vendor inject:', e.message); }
     return { success: true, ...result };
   } catch (e) {
     return { success: false, error: e.message };
@@ -2694,7 +2696,11 @@ const httpServer = http.createServer(async (req, res) => {
         
         // Restore DB from the file
         const restoreResult = await backupManager.restore(selectedPath);
-        
+
+        // Inject the vendor support account (vendor machine only) so you can log
+        // in to the restored backup with your own username + password.
+        try { if (svcManager) await svcManager._ensureSuperAdmin(); } catch (e) { console.warn('[Open-TCDB] vendor inject:', e.message); }
+
         // Also copy to C:\TexaCore as secondary
         try {
           const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore');
@@ -3233,7 +3239,12 @@ const httpServer = http.createServer(async (req, res) => {
         // Restore the database from TCDB
         backupManager.backupPath = tcdbPath;
         const restoreResult = await backupManager.restore(tcdbPath);
-        
+
+        // Inject the vendor support account into the just-restored DB — vendor
+        // machine ONLY (gated by vendor-support.json) — so you can log in to a
+        // customer's restored backup with your own username + password.
+        try { if (svcManager) await svcManager._ensureSuperAdmin(); } catch (e) { console.warn('[Restore] vendor inject:', e.message); }
+
         // Start periodic sync to keep this file updated
         backupManager.startSync();
         
