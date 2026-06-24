@@ -1166,8 +1166,8 @@ async function handleCreateLocalCompany(companyData) {
     }
 
     // ── Read config & keys from .env ────────────────────────────
-    let anonKey = ServiceManager.ANON_KEY;
-    let serviceRoleKey = ServiceManager.SERVICE_ROLE_KEY;
+    let anonKey = (svcManager && svcManager.anonKey) || ServiceManager.ANON_KEY;
+    let serviceRoleKey = (svcManager && svcManager.serviceKey) || ServiceManager.SERVICE_ROLE_KEY;
     let apiPort = String(ServiceManager.GOTRUE_PORT || 9999);
 
     const ctx = { serviceRoleKey, apiPort };
@@ -2138,7 +2138,7 @@ const httpServer = http.createServer(async (req, res) => {
         const mapper = new RsfMapper(freshReader, tenantId, companyId, null);
 
         // Build gotrueRequest wrapper for user creation
-        const serviceRoleKey = ServiceManager.SERVICE_ROLE_KEY;
+        const serviceRoleKey = (svcManager && svcManager.serviceKey) || ServiceManager.SERVICE_ROLE_KEY;
         const gotruePort = ServiceManager.GOTRUE_PORT || 9999;
         const gotrueReq = (method, reqPath, body) => 
           gotrueRequest(method, reqPath, body, { serviceRoleKey, apiPort: gotruePort });
@@ -2919,7 +2919,7 @@ const httpServer = http.createServer(async (req, res) => {
         await freshReader.open();
         const mapper = new RsfMapper(freshReader, tenantId, companyId, null);
 
-        const serviceRoleKey = ServiceManager.SERVICE_ROLE_KEY;
+        const serviceRoleKey = (svcManager && svcManager.serviceKey) || ServiceManager.SERVICE_ROLE_KEY;
         const gotruePort = ServiceManager.GOTRUE_PORT || 9999;
         const gotrueReq = (method, reqPath, body) =>
           gotrueRequest(method, reqPath, body, { serviceRoleKey, apiPort: gotruePort });
