@@ -2540,9 +2540,10 @@ const httpServer = http.createServer(async (req, res) => {
           svcManager.processes.cloudflared = null;
           await new Promise(r => setTimeout(r, 1000));
         }
-        // Restart
-        await svcManager.startCloudflared();
-        
+        // Restart — reuse the existing token (same tunnel id) for a fast,
+        // stable reconnect. Use /api/tunnel-fix when a fresh token is needed.
+        await svcManager.startCloudflared({ skipReregister: true });
+
         await new Promise(r => setTimeout(r, 2000)); // Wait for it to connect
         const isRunning = svcManager.processes.cloudflared && !svcManager.processes.cloudflared.killed;
         
@@ -2595,7 +2596,9 @@ const httpServer = http.createServer(async (req, res) => {
             svcManager.processes.cloudflared = null;
             await new Promise(r => setTimeout(r, 1000));
           }
-          await svcManager.startCloudflared();
+          // We just fetched + saved a fresh token above — reuse it (don't
+          // re-register a second time, which would mint yet another tunnel id).
+          await svcManager.startCloudflared({ skipReregister: true });
           await new Promise(r => setTimeout(r, 3000));
           
           const isRunning = svcManager.processes.cloudflared && !svcManager.processes.cloudflared.killed;

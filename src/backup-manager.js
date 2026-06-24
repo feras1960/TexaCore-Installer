@@ -485,6 +485,7 @@ class BackupManager {
       this.onProgress('restore', 'استعادة حسابات الدخول...');
       try {
         await this._restoreAuthData(sqlStr);
+        await this._resetAuthSessions();
       } catch (e) {
         console.warn('[BackupManager] ⚠️ auth restore step failed:', e.message);
         this.onProgress('restore', '⚠️ تعذّرت استعادة حسابات الدخول — راجع السجل');
@@ -698,6 +699,28 @@ class BackupManager {
     if (identities) parts.push(identities);
     parts.push("SET session_replication_role = 'origin';");
     return this._runAuthSql(parts.join('\n') + '\n');
+  }
+
+  /**
+   * Clear ephemeral auth session/token state after a restore. The full dump runs
+   * `setval('auth.refresh_tokens_id_seq', <snapshot>)`, rewinding the sequence
+   * below live rows created since the snapshot → the next login's INSERT collides
+   * on refresh_tokens_pkey ("500: Database error granting user") until nextval
+   * climbs past them (severe when opening an OLD .tcdb). These tables are
+   * re-created on the next login, so truncating them is safe and also correctly
+   * drops sessions carried over from a different snapshot. Guarded by to_regclass
+   * since the set of auth tables varies by GoTrue version.
+   */
+  _resetAuthSessions() {
+    const sqlText =
+      'DO $$ BEGIN ' +
+      "IF to_regclass('auth.refresh_tokens') IS NOT NULL THEN TRUNCATE auth.refresh_tokens RESTART IDENTITY CASCADE; END IF; " +
+      "IF to_regclass('auth.sessions') IS NOT NULL THEN TRUNCATE auth.sessions CASCADE; END IF; " +
+      "IF to_regclass('auth.mfa_amr_claims') IS NOT NULL THEN TRUNCATE auth.mfa_amr_claims CASCADE; END IF; " +
+      "IF to_regclass('auth.flow_state') IS NOT NULL THEN TRUNCATE auth.flow_state CASCADE; END IF; " +
+      "IF to_regclass('auth.one_time_tokens') IS NOT NULL THEN TRUNCATE auth.one_time_tokens CASCADE; END IF; " +
+      'END $$;';
+    return this._runAuthSql(sqlText);
   }
 
   _runAuthSql(sqlText) {

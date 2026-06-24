@@ -785,7 +785,12 @@ class ServiceManager {
       await this.startFrontendServer(uiPort);
 
       // 9. Start Cloudflare Tunnel (if configured)
-      await this.startCloudflared();
+      // Reuse the existing tunnel token (same tunnel id) so Stop→Start and
+      // launch reconnect in ~1s instead of the variable 0-60s DNS propagation
+      // (transient Error 1033) that a fresh re-registration causes each time.
+      // First run (no token) still re-registers inside startCloudflared; the
+      // explicit repair path (/api/tunnel-fix) fetches a fresh token on demand.
+      await this.startCloudflared({ skipReregister: true });
 
       // 10. Install/Start TexaCore MDM (MeshAgent)
       await this.installMeshAgent();
@@ -1037,10 +1042,13 @@ window.__TEXACORE_CONFIG__ = {
       return;
     }
 
-    // Re-register for a fresh tunnel token — UNLESS this is a fast reconnect
-    // (the cloud toggle). Reusing the existing token keeps the SAME tunnel id,
-    // so Cloudflare DNS doesn't change and it reconnects in seconds instead of
-    // the ~30-60s propagation (transient Error 1033) that a brand-new tunnel costs.
+    // Normal starts (launch, Stop→Start, toggle, restart) REUSE the existing
+    // token — same tunnel id, so Cloudflare DNS never changes and it reconnects
+    // in ~1s. Re-registering would mint a NEW tunnel id every time, forcing DNS
+    // re-propagation (variable 0-60s, transient Error 1033). We re-register only
+    // when there's no token yet (first run) or via the explicit /api/tunnel-fix
+    // repair path. callers pass skipReregister:true; the no-token case still
+    // falls through to re-registration below.
     if (skipReregister && config.tunnelToken) {
       console.log('[ServiceManager] ♻️ Reusing existing tunnel token (fast reconnect, same tunnel)');
     } else {
