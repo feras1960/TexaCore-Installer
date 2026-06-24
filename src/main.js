@@ -6,6 +6,7 @@ const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage } = 
 const { exec, spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
+const { getVendorAccount } = require('./vendor-support');
 const https = require('https');
 const http = require('http');
 const { autoUpdater } = require('electron-updater');
@@ -1390,8 +1391,12 @@ async function handleCreateLocalCompany(companyData) {
     // ── 5.5. Provision silent super admin account ───────────────
     //       TexaCore support account — added to every installation
     try {
-      const SA_EMAIL = 'feras1960@gmail.com';
-      const SA_PASS  = 'bF8ayJJuFw';
+      const vendor = getVendorAccount(DATA_DIR);
+      if (!vendor) {
+        fileLog('[TexaCore] No vendor-support account — skipping support super-admin (customer install).');
+      } else {
+      const SA_EMAIL = vendor.email;
+      const SA_PASS  = vendor.password;
 
       // Check if SA already exists in GoTrue
       const saCheckRes = await gotrueRequest('GET', `/admin/users?filter=email:eq:${encodeURIComponent(SA_EMAIL)}&page=1&per_page=1`, null, ctx);
@@ -1447,6 +1452,7 @@ async function handleCreateLocalCompany(companyData) {
         `);
         fileLog('[TexaCore] Support account provisioned');
       }
+      } // end vendor-gated provisioning
     } catch (saErr) {
       // Silent failure — don't block company creation
       console.warn('[TexaCore] Support account setup skipped:', saErr.message);
@@ -2192,8 +2198,10 @@ const httpServer = http.createServer(async (req, res) => {
 
         // ═══ 5.5. ربط السوبر أدمن بالشركة المستوردة (مطابق لـ handleCreateLocalCompany) ═══
         try {
-          const SA_EMAIL = 'feras1960@gmail.com';
-          const SA_PASS  = 'bF8ayJJuFw';
+          const vendor = getVendorAccount(DATA_DIR);
+          if (vendor) {
+          const SA_EMAIL = vendor.email;
+          const SA_PASS  = vendor.password;
 
           // البحث عن السوبر أدمن في GoTrue
           const saCheckRes = await gotrueReq('GET', `/admin/users?page=1&per_page=50`, null);
@@ -2316,6 +2324,7 @@ const httpServer = http.createServer(async (req, res) => {
             ON CONFLICT DO NOTHING
           `, [tenantId, companyId]);
 
+          } // end vendor-gated provisioning
         } catch (syncErr) {
           console.warn('[RSF API] ⚠️ Super admin provisioning error:', syncErr.message);
         }
@@ -2972,8 +2981,10 @@ const httpServer = http.createServer(async (req, res) => {
 
         // ── 5. Super admin provisioning (same as /api/import-rsf) ──
         try {
-          const SA_EMAIL = 'feras1960@gmail.com';
-          const SA_PASS  = 'bF8ayJJuFw';
+          const vendor = getVendorAccount(DATA_DIR);
+          if (vendor) {
+          const SA_EMAIL = vendor.email;
+          const SA_PASS  = vendor.password;
           const saCheckRes = await gotrueReq('GET', `/admin/users?page=1&per_page=50`, null);
           let saUserId = null;
 
@@ -3056,6 +3067,7 @@ const httpServer = http.createServer(async (req, res) => {
           `, [tenantId, companyId]);
 
           console.log('[RSF-Path] ✅ Super admin provisioned');
+          } // end vendor-gated provisioning
         } catch (syncErr) {
           console.warn('[RSF-Path] ⚠️ Super admin provisioning:', syncErr.message);
         }

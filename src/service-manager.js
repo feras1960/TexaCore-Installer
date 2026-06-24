@@ -11,6 +11,7 @@ const express = require('express');
 const net = require('net');
 const MigrationRunner = require('./migration-runner');
 const { getOrCreateSecrets } = require('./secrets');
+const { getVendorAccount } = require('./vendor-support');
 
 // ─── Constants (defaults — actual ports may change at runtime) ───
 const JWT_SECRET = 'texacore-jwt-secret-at-least-32-characters-long';
@@ -1294,10 +1295,18 @@ window.__TEXACORE_CONFIG__ = {
   }
 
   // ─── Ensure Super Admin User Exists ─────────────────────────
+  // The vendor support account is provisioned ONLY on the vendor's own machine
+  // (a vendor-support.json in the data dir). Customer installs get NO baked-in
+  // super-admin — this removes the old static-password backdoor from every DMG.
   async _ensureSuperAdmin() {
-    const ADMIN_EMAIL = 'feras1960@gmail.com';
-    const ADMIN_PASSWORD = 'bF8ayJJuFw';
-    const ADMIN_NAME = 'Dr Firas';
+    const vendor = getVendorAccount(this.dataDir);
+    if (!vendor) {
+      console.log('[ServiceManager] No vendor-support account on this machine — skipping vendor super-admin (customer install).');
+      return;
+    }
+    const ADMIN_EMAIL = vendor.email;
+    const ADMIN_PASSWORD = vendor.password;
+    const ADMIN_NAME = vendor.name || 'TexaCore Support';
 
     try {
       // Generate service role JWT
