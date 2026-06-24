@@ -20,6 +20,7 @@ contextBridge.exposeInMainWorld('texacore', {
   // Services
   startERP: (config) => ipcRenderer.invoke('start-erp', config),
   stopERP: () => ipcRenderer.invoke('stop-erp'),
+  setCloudAccess: (enabled) => ipcRenderer.invoke('set-cloud-access', enabled),
   createLocalCompany: (data) => ipcRenderer.invoke('create-local-company', data),
   installDocker: () => ipcRenderer.invoke('install-docker'),
   downloadDocker: () => ipcRenderer.invoke('download-docker'),

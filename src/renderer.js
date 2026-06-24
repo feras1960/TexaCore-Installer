@@ -456,9 +456,17 @@ function openLocalUrl() {
 }
 
 // ─── Cloud Logic ─────────────────────────────────────────────
-function toggleCloudView() {
+async function toggleCloudView() {
   const isChecked = document.getElementById('input-cloud').checked;
   document.getElementById('cloud-content').style.display = isChecked ? 'block' : 'none';
+  // Actually enable/disable cloud access — start/stop the Cloudflare tunnel NOW
+  // (not just show/hide the panel). Turning it off cuts the public subdomain.
+  try {
+    if (window.texacore && window.texacore.setCloudAccess) {
+      await window.texacore.setCloudAccess(isChecked);
+      if (currentState && currentState.config) currentState.config.enableCloud = isChecked;
+    }
+  } catch (e) { console.error('[Cloud] setCloudAccess failed:', e); }
 }
 
 let checkTimeout;

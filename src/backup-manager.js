@@ -463,7 +463,17 @@ class BackupManager {
       this.onProgress('decompress', 'فك ضغط البيانات...');
       const sql = await this._decompress(compressed);
 
-      // Step 5: Execute SQL via psql
+      // Step 5: Execute SQL via psql.
+      // Replace-not-merge: clear the existing public data BEFORE loading the
+      // snapshot. The dump has no --clean, and COPY into a populated table fails
+      // on PK conflict (skipped under ON_ERROR_STOP=off) → opening a .tcdb onto a
+      // non-empty DB would otherwise MERGE the new snapshot on top of the old
+      // company's rows (stale/corrupt data). Truncating the snapshot's own tables
+      // first makes the restore an exact swap. auth.* is owned by _restoreAuthData
+      // (step 5b) and is intentionally left out here. See [[local-hybrid-schema-sync]].
+      const sqlStr = sql.toString('utf8');
+      this.onProgress('restore', 'تهيئة الاستبدال...');
+      await this._truncatePublic(this._extractCopyTables(sqlStr));
       this.onProgress('restore', 'استعادة قاعدة البيانات...');
       await this._executeSql(sql);
 
@@ -474,7 +484,7 @@ class BackupManager {
       // restored; we warn rather than undo it if this step fails.
       this.onProgress('restore', 'استعادة حسابات الدخول...');
       try {
-        await this._restoreAuthData(sql.toString('utf8'));
+        await this._restoreAuthData(sqlStr);
       } catch (e) {
         console.warn('[BackupManager] ⚠️ auth restore step failed:', e.message);
         this.onProgress('restore', '⚠️ تعذّرت استعادة حسابات الدخول — راجع السجل');
@@ -590,6 +600,62 @@ class BackupManager {
       execFile(this.psql, args, { env, windowsHide: true }, (err, stdout, stderr) => {
         if (err) reject(new Error(stderr || err.message));
         else resolve(stdout);
+      });
+    });
+  }
+
+  /**
+   * Collect every `public.<table>` that the dump will COPY into. pg_dump emits a
+   * COPY block for EVERY table (empty ones too), so this is effectively the full
+   * public table set of the snapshot. Used to truncate-before-load so the restore
+   * replaces rather than merges. auth.* is excluded on purpose (owned by
+   * _restoreAuthData). Quoted identifiers (public."Weird Name") are preserved
+   * verbatim so to_regclass / TRUNCATE parse them correctly.
+   */
+  _extractCopyTables(sql) {
+    const tables = [];
+    const re = /^COPY (public\.(?:"[^"]+"|[^ ]+)) \(/gm;
+    let m;
+    while ((m = re.exec(sql)) !== null) tables.push(m[1]);
+    return tables;
+  }
+
+  /**
+   * Clear the snapshot's public tables in one atomic transaction before the bulk
+   * restore loads fresh rows. Runs with replica role (FK triggers off) so order
+   * doesn't matter, a 20s lock_timeout so a stray PostgREST/GoTrue lock surfaces
+   * instead of hanging, and ON_ERROR_STOP=on inside --single-transaction so a
+   * failure rolls back the whole truncate (no half-cleared DB) and aborts the
+   * restore loudly — leaving the previous company's data intact rather than
+   * corrupt. to_regclass guards tables the dump will CREATE (not yet present).
+   */
+  _truncatePublic(tables) {
+    return new Promise((resolve, reject) => {
+      if (!tables || tables.length === 0) return resolve();
+      const arr = tables.map(t => "'" + t.replace(/'/g, "''") + "'").join(',');
+      const sqlText =
+        "SET session_replication_role='replica';\n" +
+        "SET lock_timeout='20s';\n" +
+        "DO $TXR$ DECLARE t text; BEGIN\n" +
+        "  FOREACH t IN ARRAY ARRAY[" + arr + "]::text[] LOOP\n" +
+        "    IF to_regclass(t) IS NOT NULL THEN\n" +
+        "      EXECUTE 'TRUNCATE TABLE ' || t || ' RESTART IDENTITY CASCADE';\n" +
+        "    END IF;\n" +
+        "  END LOOP;\n" +
+        "END $TXR$;\n";
+      const tmpFile = this.backupPath + '.truncate.sql';
+      fs.writeFileSync(tmpFile, sqlText);
+      const env = { ...process.env, PGPASSWORD: this.dbPassword };
+      const args = [
+        '-h', this.dbHost, '-p', String(this.dbPort),
+        '-U', this.dbUser, '-d', this.dbName,
+        '-f', tmpFile, '--single-transaction',
+        '--set', 'ON_ERROR_STOP=on',
+      ];
+      execFile(this.psql, args, { env, windowsHide: true, maxBuffer: 50 * 1024 * 1024 }, (err, stdout, stderr) => {
+        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+        if (err) reject(new Error(`Pre-restore truncate failed: ${stderr || err.message}`));
+        else resolve();
       });
     });
   }

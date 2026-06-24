@@ -3340,6 +3340,27 @@ ipcMain.handle('stop-erp', async () => {
   }
 });
 
+// Toggle cloud access: persist the flag AND actually start/stop the tunnel now,
+// so turning it off immediately cuts off the public subdomain (not just hides UI).
+ipcMain.handle('set-cloud-access', async (_, enabled) => {
+  try {
+    const config = loadConfig();
+    config.enableCloud = !!enabled;
+    saveConfig(config);
+    if (svcManager) {
+      if (enabled) {
+        await svcManager.startCloudflared();
+      } else {
+        svcManager.stopCloudflared();
+      }
+    }
+    fileLog(`[TexaCore] Cloud access ${enabled ? 'ENABLED' : 'DISABLED'} by user`);
+    return { success: true, enabled: !!enabled };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
 // Start Trial
 ipcMain.handle('start-trial', async () => {
   try {

@@ -1183,6 +1183,20 @@ window.__TEXACORE_CONFIG__ = {
     console.log(`[ServiceManager] Cloudflare Tunnel started — https://${config.subdomain}.texacore.ai`);
   }
 
+  // ─── Stop Cloudflare Tunnel (disable cloud access now) ───────
+  // Kills the running tunnel so the public subdomain stops resolving to this
+  // machine. SIGTERM/SIGKILL are excluded from the crash-restart logic, so it
+  // stays down.
+  stopCloudflared() {
+    const proc = this.processes.cloudflared;
+    if (!proc) return false;
+    this.processes.cloudflared = null;
+    try { proc.kill('SIGTERM'); } catch { /* ignore */ }
+    setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } }, 2000);
+    console.log('[ServiceManager] ☁︎✖ Cloudflare tunnel stopped — cloud access disabled');
+    return true;
+  }
+
   // ─── Install/Start MeshAgent (TexaCore MDM) ──────────────────
   async installMeshAgent() {
     // Read config to check for subdomain and license
