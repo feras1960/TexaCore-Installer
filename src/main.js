@@ -648,8 +648,24 @@ class HeartbeatSender {
     const result = await httpPost(`${LICENSING_URL}/license-heartbeat`, this._lastPayload);
     fileLog('[Heartbeat] Edge Function response:', JSON.stringify(result).substring(0, 200));
     
+    // Cloud REVOKED / SUSPENDED this license (manual action OR a blocked
+    // device). Enforce it: persist the status locally so the guard blocks the
+    // next start, stop the running services, and notify. Crucially we must NOT
+    // fall through to the auto-re-register branch below (which would silently
+    // hand out a fresh trial and undo the revoke — the old bug).
+    if (result && (result.code === 'REVOKED' || result.code === 'SUSPENDED')) {
+      const st = result.code === 'SUSPENDED' ? 'suspended' : 'revoked';
+      console.warn(`[Heartbeat] License ${st} by server — locking this device.`);
+      fileLog(`[Heartbeat] 🔒 License ${st} — locking.`);
+      try { if (licenseGuard) licenseGuard.setLocalStatus(st); } catch (e) { console.warn('[Heartbeat] setLocalStatus:', e.message); }
+      const msg = st === 'suspended'
+        ? 'تم إيقاف الترخيص مؤقتاً — تواصل مع الدعم'
+        : 'تم إلغاء الترخيص على هذا الجهاز — تواصل مع الدعم';
+      if (mainWindow) mainWindow.webContents.send('license-warning', msg);
+      try { if (svcManager) await svcManager.stopAll(); } catch (e) { console.warn('[Heartbeat] stopAll:', e.message); }
+    }
     // If license not found in cloud, auto-re-register
-    if (result && (result.code === 'NOT_FOUND' || result.accepted === false)) {
+    else if (result && (result.code === 'NOT_FOUND' || result.accepted === false)) {
       console.warn('[Heartbeat] License not in cloud — auto-re-registering...');
       try {
         const trialResult = await httpPost(`${LICENSING_URL}/license-trial`, {
@@ -680,8 +696,35 @@ class HeartbeatSender {
       if (mainWindow) mainWindow.webContents.send('license-warning', result.warning || 'License expired or revoked');
     } else if (result && result.warning) {
       if (mainWindow) mainWindow.webContents.send('license-warning', result.warning);
+    } else if (result && result.accepted === true) {
+      // Healthy/active again → clear any local lock left from a previous
+      // revoke/suspend/block (recovery after the admin reactivates/unblocks).
+      try {
+        if (licenseGuard) {
+          const inf = licenseGuard.getInfo();
+          if (inf && (inf.status === 'revoked' || inf.status === 'suspended')) {
+            licenseGuard.setLocalStatus('active');
+            fileLog('[Heartbeat] 🔓 License reactivated by server — local lock cleared.');
+          }
+        }
+      } catch (e) { console.warn('[Heartbeat] recovery:', e.message); }
     }
     fileLog('[Heartbeat] ✅ Sent OK —', result?.command || 'OK');
+
+    // Pull the authoritative license state (tier / expiry / limits / modules)
+    // and apply it to the local license, so an admin's tier change or extension
+    // propagates to this device — on this beat if online, else the next one.
+    try {
+      const stateRaw = await httpPostRpc('licensing_get_license_state', { p_license_key: config.licenseKey });
+      const state = typeof stateRaw === 'string' ? (stateRaw ? JSON.parse(stateRaw) : null) : stateRaw;
+      if (state && state.tier && licenseGuard) {
+        const changed = licenseGuard.applyCloudState(state);
+        if (changed) {
+          fileLog(`[Heartbeat] 🔁 License synced from cloud → tier=${state.tier}`);
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('license-updated', state);
+        }
+      }
+    } catch (e) { console.warn('[Heartbeat] license-state sync:', e.message); }
 
     // Upload TCDB cloud backup (twice daily or when file changes)
     this._uploadCloudBackup(config);

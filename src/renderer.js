@@ -74,7 +74,9 @@ async function refreshStatus() {
     const state = await texacore.getState();
     currentState = state;
     updateStatusCards(state);
-    updateControlButtons(state);
+    // updateControlPanel also refreshes the license badge (tier + expiry), so a
+    // cloud-synced tier change / extension shows here within one poll (~5s).
+    updateControlPanel(state);
   } catch { /* silent */ }
 }
 

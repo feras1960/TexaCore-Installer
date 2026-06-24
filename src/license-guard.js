@@ -238,6 +238,45 @@ class LicenseGuard {
     };
   }
 
+  // ─── Update cached status (cloud → local sync) ────────────
+  // Called when a heartbeat reports the cloud revoked/suspended/reactivated
+  // this license, so validate() (which gates service startup) reflects it.
+  setLocalStatus(status) {
+    const license = this.loadLicense();
+    if (!license) return false;
+    if (license.status === status) return true; // no change
+    license.status = status;
+    this.saveLicense(license);
+    console.log(`[LicenseGuard] Local status updated → ${status}`);
+    return true;
+  }
+
+  // ─── Apply authoritative cloud state (tier/expiry/limits/modules) ──
+  // Called each heartbeat so an admin's tier change / extension propagates to
+  // this device. Does NOT touch `status` — the lock/recovery logic owns that.
+  // Returns true if anything changed.
+  applyCloudState(state) {
+    if (!state || typeof state !== 'object') return false;
+    const license = this.loadLicense();
+    if (!license) return false;
+    const fields = ['tier', 'expires_at', 'activated_at', 'max_users', 'max_companies',
+      'max_warehouses', 'max_storage_gb', 'enabled_modules', 'custom_branding',
+      'cloud_backup', 'api_access'];
+    let changed = false;
+    for (const f of fields) {
+      if (state[f] === undefined || state[f] === null) continue;
+      if (JSON.stringify(license[f]) !== JSON.stringify(state[f])) {
+        license[f] = state[f];
+        changed = true;
+      }
+    }
+    if (changed) {
+      this.saveLicense(license);
+      console.log(`[LicenseGuard] Cloud state synced → tier=${license.tier}, expires=${license.expires_at}`);
+    }
+    return changed;
+  }
+
   // ─── Remove license ───────────────────────────────────────
   removeLicense() {
     if (fs.existsSync(this.licensePath)) fs.unlinkSync(this.licensePath);
