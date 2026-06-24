@@ -338,6 +338,43 @@ function httpPostRpc(rpcName, data) {
   });
 }
 
+// Read real counts from the embedded local PG (companies / users / invoices /
+// db size). Used for the heartbeat + cloud-backup metadata so the management
+// dashboard shows true numbers instead of the old hard-coded zeros.
+async function getLocalDbStats() {
+  let client;
+  try {
+    const { Client } = require('pg');
+    client = new Client({
+      host: 'localhost',
+      port: (typeof ServiceManager !== 'undefined' && ServiceManager.PG_PORT) || 54322,
+      database: 'postgres',
+      user: 'postgres',
+      password: (svcManager && svcManager.dbPassword) || (typeof ServiceManager !== 'undefined' && ServiceManager.DB_PASSWORD) || 'texacore-local-super-secret',
+    });
+    await client.connect();
+    const { rows } = await client.query(`
+      SELECT
+        (SELECT count(*) FROM public.companies)                                     AS companies,
+        (SELECT count(*) FROM auth.users)                                           AS users,
+        (COALESCE((SELECT count(*) FROM public.sales_invoices), 0)
+         + COALESCE((SELECT count(*) FROM public.purchase_invoices), 0))            AS invoices,
+        (pg_database_size('postgres') / 1024 / 1024)                                AS db_mb
+    `);
+    const r = rows[0] || {};
+    return {
+      companiesCount: +r.companies || 0,
+      usersActive: +r.users || 0,
+      invoicesCount: +r.invoices || 0,
+      dbSizeMb: +r.db_mb || 0,
+    };
+  } catch (e) {
+    return null;
+  } finally {
+    if (client) { try { await client.end(); } catch {} }
+  }
+}
+
 // ─── HeartbeatSender ─────────────────────────────────────────
 class HeartbeatSender {
   constructor() {
@@ -474,6 +511,16 @@ class HeartbeatSender {
     }
 
     let dbSizeMb = 0, companiesCount = 0, invoicesCount = 0, usersActive = 0;
+    // Real counts from the local PG (companies / users / invoices / db size).
+    try {
+      const stats = await getLocalDbStats();
+      if (stats) {
+        dbSizeMb = stats.dbSizeMb;
+        companiesCount = stats.companiesCount;
+        invoicesCount = stats.invoicesCount;
+        usersActive = stats.usersActive;
+      }
+    } catch {}
 
     // Gather network info
     let localIps = [];
@@ -733,6 +780,11 @@ class HeartbeatSender {
         return; // File unchanged and not time for scheduled upload yet
       }
 
+      // Real counts from the local PG (invoices/companies) for the metadata.
+      const localStats = await getLocalDbStats();
+      const invoicesCount = localStats ? localStats.invoicesCount : 0;
+      const companiesCount = (localStats && localStats.companiesCount) || config.companies?.length || 1;
+
       // Upload file via Edge Function (it has service_role access)
       const fileBuffer = fs.readFileSync(tcdbPath);
       const fileBase64 = fileBuffer.toString('base64');
@@ -743,8 +795,8 @@ class HeartbeatSender {
         file_base64: fileBase64,
         file_size_mb: fileSizeMb,
         db_size_mb: fileSizeMb,
-        companies_count: config.companies?.length || 1,
-        invoices_count: 0,
+        companies_count: companiesCount,
+        invoices_count: invoicesCount,
         backup_type: 'auto',
         company_name: companyName || 'الشركة',
         file_name: fileName,
@@ -764,8 +816,8 @@ class HeartbeatSender {
             p_file_path: result.file_path || fileName,
             p_file_size_mb: fileSizeMb,
             p_db_size_mb: fileSizeMb,
-            p_companies_count: config.companies?.length || 1,
-            p_invoices_count: 0,
+            p_companies_count: companiesCount,
+            p_invoices_count: invoicesCount,
             p_backup_type: 'auto',
           });
         } catch (e) { console.warn('[CloudBackup] record failed:', e.message); }
@@ -775,6 +827,77 @@ class HeartbeatSender {
       }
     } catch (err) {
       console.warn('[CloudBackup] Upload failed:', err.message);
+    }
+  }
+
+  // Upload the ORIGINAL .rsf source file to the cloud (one per company) and
+  // keep a local per-company copy. The cloud record RPC replaces any previous
+  // RSF for the same company, so re-opening the same file updates it in place
+  // instead of duplicating. Called once per RSF import (not periodically).
+  async _uploadRsfBackup(config, rsfSourcePath, companyName) {
+    try {
+      if (!config || !config.licenseKey) return;
+
+      // 1) Persist a local per-company copy of the original .rsf.
+      const rsfStoreDir = path.join(DATA_DIR, 'rsf');
+      if (!fs.existsSync(rsfStoreDir)) fs.mkdirSync(rsfStoreDir, { recursive: true });
+      const safeName = (companyName || 'company').replace(/[\\/:*?"<>|]/g, '_');
+      const localRsf = path.join(rsfStoreDir, safeName + '.rsf');
+      try {
+        if (rsfSourcePath && fs.existsSync(rsfSourcePath) &&
+            path.resolve(rsfSourcePath) !== path.resolve(localRsf)) {
+          fs.copyFileSync(rsfSourcePath, localRsf);
+        }
+      } catch (cpErr) { console.warn('[CloudBackup] RSF local copy failed:', cpErr.message); }
+
+      const uploadPath = fs.existsSync(localRsf) ? localRsf
+        : (rsfSourcePath && fs.existsSync(rsfSourcePath) ? rsfSourcePath : null);
+      if (!uploadPath) return;
+
+      const fstats = fs.statSync(uploadPath);
+      const fileSizeMb = +(fstats.size / (1024 * 1024)).toFixed(2);
+      if (fileSizeMb > 100) { console.warn('[CloudBackup] RSF too large, skipping:', fileSizeMb, 'MB'); return; }
+
+      // 2) Upload via the same edge function used for TCDB (service_role side).
+      const fileName = safeName + '.rsf';
+      const fileBase64 = fs.readFileSync(uploadPath).toString('base64');
+      const localStats = await getLocalDbStats();
+      const invoicesCount = localStats ? localStats.invoicesCount : 0;
+      const companiesCount = (localStats && localStats.companiesCount) || config.companies?.length || 1;
+
+      const result = await httpPost(`${LICENSING_URL}/license-cloud-backup`, {
+        license_key: config.licenseKey,
+        file_base64: fileBase64,
+        file_size_mb: fileSizeMb,
+        db_size_mb: fileSizeMb,
+        companies_count: companiesCount,
+        invoices_count: invoicesCount,
+        backup_type: 'rsf',
+        company_name: companyName || 'الشركة',
+        file_name: fileName,
+      });
+
+      if (result && result.success) {
+        // 3) Record the metadata row (RPC replaces any prior RSF for this company).
+        try {
+          await httpPostRpc('licensing_record_cloud_backup', {
+            p_license_key: config.licenseKey,
+            p_company_name: companyName || 'الشركة',
+            p_file_name: fileName,
+            p_file_path: result.file_path || fileName,
+            p_file_size_mb: fileSizeMb,
+            p_db_size_mb: fileSizeMb,
+            p_companies_count: companiesCount,
+            p_invoices_count: invoicesCount,
+            p_backup_type: 'rsf',
+          });
+        } catch (e) { console.warn('[CloudBackup] RSF record failed:', e.message); }
+        console.log(`[CloudBackup] ✅ RSF uploaded + recorded ${fileName} (${fileSizeMb}MB) for ${companyName || '?'}`);
+      } else {
+        console.warn('[CloudBackup] RSF upload response:', JSON.stringify(result));
+      }
+    } catch (err) {
+      console.warn('[CloudBackup] RSF upload failed:', err.message);
     }
   }
 
@@ -1482,8 +1605,12 @@ ipcMain.handle('import-rsf', async (_, filePath) => {
           // Immediately upload to cloud
           const cfgForUpload = loadConfig();
           cfgForUpload.currentDbPath = tcdbPath;
-          heartbeatSender._uploadCloudBackup(cfgForUpload).catch(e => 
+          heartbeatSender._uploadCloudBackup(cfgForUpload).catch(e =>
             console.warn('[RSF Import] Cloud backup upload failed:', e.message)
+          );
+          // Also upload the ORIGINAL .rsf source file (one per company).
+          heartbeatSender._uploadRsfBackup(cfgForUpload, filePath, rsfCompanyName).catch(e =>
+            console.warn('[RSF Import] RSF cloud upload failed:', e.message)
           );
         }
 
@@ -2077,6 +2204,16 @@ const httpServer = http.createServer(async (req, res) => {
         reader.close();
         try { freshReader.close(); } catch {}
         await pgClient.end();
+
+        // Upload the ORIGINAL .rsf to the cloud (one per company). Kicked off
+        // before the temp file is removed — _uploadRsfBackup copies + reads it
+        // synchronously, so the unlink below is safe.
+        if (result.success) {
+          try {
+            heartbeatSender._uploadRsfBackup(loadConfig(), rsfPath, rsfCompanyName).catch(e =>
+              console.warn('[RSF API] RSF cloud upload failed:', e.message));
+          } catch (e) { console.warn('[RSF API] RSF cloud upload error:', e.message); }
+        }
 
         // Cleanup temp file
         try { fs.unlinkSync(rsfPath); } catch {}
@@ -2861,6 +2998,10 @@ const httpServer = http.createServer(async (req, res) => {
 
             backupManager.startSync();
             console.log('[RSF-Path] 🔄 Auto-backup started');
+
+            // Upload the ORIGINAL .rsf source file to the cloud (one per company).
+            heartbeatSender._uploadRsfBackup(loadConfig(), filePath, rsfCompanyName).catch(e =>
+              console.warn('[RSF-Path] RSF cloud upload failed:', e.message));
           } catch (backupErr) {
             console.error('[RSF-Path] ❌ TCDB failed:', backupErr.message);
           }
