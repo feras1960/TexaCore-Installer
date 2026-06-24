@@ -107,6 +107,16 @@ class RealtimePresence {
         if (msg.event === 'presence_state' || msg.event === 'presence_diff') {
           fileLog(`[Presence] Event: ${msg.event}`);
         }
+
+        // Instant push: the admin changed this license (tier / expiry / status /
+        // block) → sync NOW instead of waiting up to 3 min for the next beat.
+        if (msg.event === 'broadcast' && msg.payload?.event === 'license-sync') {
+          const key = msg.payload?.payload?.license_key;
+          if (key && key === this.licenseKey && typeof heartbeatSender !== 'undefined') {
+            fileLog('[Presence] ⚡ license-sync broadcast — syncing license state now');
+            heartbeatSender._syncLicenseState(loadConfig()).catch(e => fileLog('[Presence] instant sync error:', e.message));
+          }
+        }
       } catch {}
     });
 
@@ -712,22 +722,48 @@ class HeartbeatSender {
     fileLog('[Heartbeat] ✅ Sent OK —', result?.command || 'OK');
 
     // Pull the authoritative license state (tier / expiry / limits / modules)
-    // and apply it to the local license, so an admin's tier change or extension
-    // propagates to this device — on this beat if online, else the next one.
-    try {
-      const stateRaw = await httpPostRpc('licensing_get_license_state', { p_license_key: config.licenseKey });
-      const state = typeof stateRaw === 'string' ? (stateRaw ? JSON.parse(stateRaw) : null) : stateRaw;
-      if (state && state.tier && licenseGuard) {
-        const changed = licenseGuard.applyCloudState(state);
-        if (changed) {
-          fileLog(`[Heartbeat] 🔁 License synced from cloud → tier=${state.tier}`);
-          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('license-updated', state);
-        }
-      }
-    } catch (e) { console.warn('[Heartbeat] license-state sync:', e.message); }
+    // and apply it locally — on this beat if online, else the next one.
+    await this._syncLicenseState(config);
 
     // Upload TCDB cloud backup (twice daily or when file changes)
     this._uploadCloudBackup(config);
+  }
+
+  // Pull the authoritative license state and apply it to the local license.
+  // Shared by the periodic heartbeat AND the instant realtime push, so an
+  // admin's tier change / extension / revoke / block reaches this device fast.
+  async _syncLicenseState(config) {
+    try {
+      if (!config || !config.licenseKey || !licenseGuard) return false;
+      const stateRaw = await httpPostRpc('licensing_get_license_state', { p_license_key: config.licenseKey });
+      const state = typeof stateRaw === 'string' ? (stateRaw ? JSON.parse(stateRaw) : null) : stateRaw;
+      if (!state || !state.tier) return false;
+
+      // tier / expiry / limits / modules → license.dat (does not touch status)
+      const changed = licenseGuard.applyCloudState(state);
+      if (changed) {
+        fileLog(`[Heartbeat] 🔁 License synced from cloud → tier=${state.tier}`);
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('license-updated', state);
+      }
+
+      // Enforce status pushed instantly (revoke / suspend / block lock the
+      // device now; reactivation clears the local lock for recovery).
+      if (state.status === 'revoked' || state.status === 'suspended') {
+        licenseGuard.setLocalStatus(state.status);
+        const msg = state.status === 'suspended'
+          ? 'تم إيقاف الترخيص مؤقتاً — تواصل مع الدعم'
+          : 'تم إلغاء الترخيص على هذا الجهاز — تواصل مع الدعم';
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('license-warning', msg);
+        try { if (svcManager) await svcManager.stopAll(); } catch (e) { console.warn('[Heartbeat] stopAll:', e.message); }
+      } else if (state.status === 'active') {
+        const inf = licenseGuard.getInfo();
+        if (inf && (inf.status === 'revoked' || inf.status === 'suspended')) {
+          licenseGuard.setLocalStatus('active');
+          fileLog('[Heartbeat] 🔓 License reactivated — local lock cleared.');
+        }
+      }
+      return changed;
+    } catch (e) { console.warn('[Heartbeat] license-state sync:', e.message); return false; }
   }
 
   // Fallback: Direct REST API update to Supabase (bypasses Edge Function)
