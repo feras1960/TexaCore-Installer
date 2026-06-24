@@ -461,12 +461,24 @@ async function toggleCloudView() {
   document.getElementById('cloud-content').style.display = isChecked ? 'block' : 'none';
   // Actually enable/disable cloud access — start/stop the Cloudflare tunnel NOW
   // (not just show/hide the panel). Turning it off cuts the public subdomain.
+  const statusEl = document.getElementById('tunnel-status');
   try {
+    if (statusEl) {
+      statusEl.textContent = isChecked ? 'جاري الاتصال... ⏳' : 'جاري الفصل... ⏳';
+      statusEl.style.color = 'var(--warning)';
+    }
     if (window.texacore && window.texacore.setCloudAccess) {
       await window.texacore.setCloudAccess(isChecked);
       if (currentState && currentState.config) currentState.config.enableCloud = isChecked;
     }
-  } catch (e) { console.error('[Cloud] setCloudAccess failed:', e); }
+    if (statusEl) {
+      if (isChecked) { statusEl.textContent = 'متصل (قد يلزم ثوانٍ) 🟢'; statusEl.style.color = 'var(--accent)'; }
+      else { statusEl.textContent = 'مفصول — الوصول السحابي متوقّف 🔴'; statusEl.style.color = 'var(--danger)'; }
+    }
+  } catch (e) {
+    console.error('[Cloud] setCloudAccess failed:', e);
+    if (statusEl) { statusEl.textContent = 'تعذّر التبديل ⚠️'; statusEl.style.color = 'var(--danger)'; }
+  }
 }
 
 let checkTimeout;

@@ -1015,7 +1015,7 @@ window.__TEXACORE_CONFIG__ = {
   }
 
   // ─── Start Cloudflare Tunnel ─────────────────────────────────
-  async startCloudflared() {
+  async startCloudflared({ skipReregister = false } = {}) {
     if (this.processes.cloudflared) return;
 
     // Read config to check if cloud access is enabled
@@ -1037,8 +1037,13 @@ window.__TEXACORE_CONFIG__ = {
       return;
     }
 
-    // ALWAYS re-register to get a fresh tunnel token on every startup
-    // This prevents Error 1033 caused by stale/mismatched tunnel credentials
+    // Re-register for a fresh tunnel token — UNLESS this is a fast reconnect
+    // (the cloud toggle). Reusing the existing token keeps the SAME tunnel id,
+    // so Cloudflare DNS doesn't change and it reconnects in seconds instead of
+    // the ~30-60s propagation (transient Error 1033) that a brand-new tunnel costs.
+    if (skipReregister && config.tunnelToken) {
+      console.log('[ServiceManager] ♻️ Reusing existing tunnel token (fast reconnect, same tunnel)');
+    } else {
     console.log(`[ServiceManager] 🔄 Refreshing tunnel token for "${config.subdomain}"...`);
     try {
       const https = require('https');
@@ -1082,6 +1087,7 @@ window.__TEXACORE_CONFIG__ = {
       if (!config.tunnelToken) return;
       console.log('[ServiceManager] Falling back to existing token...');
     }
+    } // end token re-register (skipped on fast reconnect)
 
     // Find cloudflared binary (cross-platform)
     const isWin = process.platform === 'win32';

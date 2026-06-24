@@ -3349,7 +3349,9 @@ ipcMain.handle('set-cloud-access', async (_, enabled) => {
     saveConfig(config);
     if (svcManager) {
       if (enabled) {
-        await svcManager.startCloudflared();
+        // Fast reconnect: reuse the existing tunnel token (same tunnel id) so it
+        // comes back in seconds, not the ~30-60s a fresh tunnel needs to propagate.
+        await svcManager.startCloudflared({ skipReregister: true });
       } else {
         svcManager.stopCloudflared();
       }
