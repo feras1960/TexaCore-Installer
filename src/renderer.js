@@ -225,7 +225,35 @@ function updateControlPanel(state) {
     
     const daysLeft = li.expires_at ? Math.ceil((new Date(li.expires_at) - Date.now()) / 86400000) : 0;
     expiresEl.textContent = `ينتهي: ${exDate} (${daysLeft} يوم)`;
+
+    // Support code = the full license key (for fast support / activation / extension).
+    const codeEl = document.getElementById('support-code');
+    if (codeEl && li.license_key) codeEl.textContent = li.license_key;
   }
+}
+
+// Copy the support code (license key) to the clipboard, with a file:// fallback.
+function copySupportCode() {
+  const code = (document.getElementById('support-code')?.textContent || '').trim();
+  if (!code || code === '—') return;
+  const flash = () => {
+    const btn = document.getElementById('btn-copy-key');
+    if (btn) { const t = btn.textContent; btn.textContent = 'تم النسخ ✓'; setTimeout(() => { btn.textContent = t; }, 1500); }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) {
+    navigator.clipboard.writeText(code).then(flash).catch(() => fallbackCopy(code, flash));
+  } else {
+    fallbackCopy(code, flash);
+  }
+}
+function fallbackCopy(text, done) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    if (done) done();
+  } catch { /* ignore */ }
 }
 
 function updateControlButtons(state) {

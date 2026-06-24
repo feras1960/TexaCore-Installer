@@ -111,6 +111,15 @@
         </div>
       </div>
 
+      <!-- Support code = the full license key (for fast support / activation / extension) -->
+      <div id="support-code-row" style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:10px; padding:8px 12px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:8px;">
+        <div style="display:flex; flex-direction:column; gap:2px; min-width:0;">
+          <span style="font-size:11px; color:#8a93a6;">كود الدعم / رقم النسخة</span>
+          <code id="support-code" style="font-size:14px; font-weight:600; letter-spacing:1px; font-family:monospace; color:#e6e9ef; user-select:all; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">—</code>
+        </div>
+        <button class="btn btn-ghost" id="btn-copy-key" style="padding:4px 10px; font-size:12px; height:auto; min-height:auto; white-space:nowrap;" onclick="copySupportCode()">نسخ 📋</button>
+      </div>
+
       <div class="control-actions">
         <button class="btn btn-start" id="btn-start" onclick="startERP()">
           <span class="btn-icon">▶</span>
