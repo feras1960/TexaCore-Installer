@@ -3517,6 +3517,34 @@ app.whenReady().then(() => {
     }
   }, 15000);
 
+  // ── Auto-start the embedded services on launch ──
+  // The user asked not to have to click "Start" every time. We still expose the
+  // Stop button, and we skip auto-start if there's no valid license (or it's
+  // revoked/suspended/expired) or the services are already running.
+  setTimeout(async () => {
+    try {
+      const cfg = loadConfig();
+      if (!cfg.licenseKey) return;
+      if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+      const lic = licenseGuard.validate();
+      if (!lic.valid) { fileLog('[AutoStart] Skipped — license not valid:', lic.reason); return; }
+      const health = svcManager ? await svcManager.getHealth() : { running: false };
+      if (health.running) { fileLog('[AutoStart] Services already running — skip'); return; }
+      fileLog('[AutoStart] 🚀 Starting embedded services automatically...');
+      const result = await svcManager.startAll({
+        dbPassword: cfg.dbPassword || undefined,
+        port: cfg.port || APP_PORT,
+        onMigrationProgress: (step, total, name) => mainWindow?.webContents.send('migration-progress', { step, total, name }),
+      });
+      if (result && result.success) {
+        fileLog('[AutoStart] ✅ Services started on launch');
+        if (!backupManager) setTimeout(() => initBackupOnStartup(), 5000);
+      } else {
+        fileLog('[AutoStart] ❌ Failed:', result && result.error);
+      }
+    } catch (e) { fileLog('[AutoStart] error:', e.message); }
+  }, 2000);
+
   // Quick connectivity test (2s after start)
   setTimeout(async () => {
     fileLog('[Diag] Running connectivity diagnostic...');
