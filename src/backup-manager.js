@@ -205,6 +205,9 @@ class BackupManager {
         }
       }
 
+      // ─── Daily snapshot rotation (last 5 days per company) ───
+      this._rotateDailySnapshot();
+
       return stats;
     } catch (error) {
       this.onProgress('error', `❌ فشل النسخ الاحتياطي: ${error.message}`);
@@ -212,6 +215,46 @@ class BackupManager {
       return null;
     } finally {
       this._running = false;
+    }
+  }
+
+  /**
+   * Keep a rolling set of DAILY snapshots next to the live .tcdb: one dated
+   * file per day (today's is refreshed on each call), pruned to the last `keep`
+   * days. Gives "last 5 days" history per company without unbounded .bak
+   * accumulation. Per-company isolation is automatic — each company's live file
+   * has a distinct basename, and pruning filters by that basename prefix.
+   * Throttled to ~hourly so it doesn't copy on every 1-minute backup.
+   * @param {number} keep            how many daily snapshots to retain (default 5)
+   * @param {number} minIntervalMs   skip if today's snapshot was refreshed this recently (default 1h; pass 0 to force, e.g. on quit)
+   */
+  _rotateDailySnapshot(keep = 5, minIntervalMs = 60 * 60 * 1000) {
+    try {
+      const now = Date.now();
+      const today = new Date().toISOString().slice(0, 10); // YYYY-MM-DD
+      if (this._lastSnapshotDay === today && this._lastSnapshotAt &&
+          (now - this._lastSnapshotAt) < minIntervalMs) {
+        return; // already refreshed today's snapshot recently
+      }
+      const dir = path.join(path.dirname(this.backupPath), 'snapshots');
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      const base = path.basename(this.backupPath).replace(/\.tcdb$/i, '');
+      const datedPath = path.join(dir, `${base}.${today}.tcdb`);
+      fs.copyFileSync(this.backupPath, datedPath); // refresh today's snapshot
+      this._lastSnapshotDay = today;
+      this._lastSnapshotAt = now;
+      // Prune: keep the newest `keep` dated snapshots for THIS company only.
+      const prefix = `${base}.`;
+      const dated = fs.readdirSync(dir)
+        .filter(f => f.startsWith(prefix) && f.endsWith('.tcdb'))
+        .sort(); // YYYY-MM-DD sorts chronologically
+      while (dated.length > keep) {
+        const oldest = dated.shift();
+        try { fs.unlinkSync(path.join(dir, oldest)); } catch { /* ignore */ }
+      }
+      console.log(`[BackupManager] daily snapshot ${today} (keeping last ${keep})`);
+    } catch (e) {
+      console.warn(`[BackupManager] daily snapshot failed: ${e.message}`);
     }
   }
 

@@ -3331,10 +3331,10 @@ app.on('before-quit', async () => {
         if (!fs.existsSync(appBackupDir)) fs.mkdirSync(appBackupDir, { recursive: true });
         const backupName = path.basename(primaryPath);
         fs.copyFileSync(primaryPath, path.join(appBackupDir, backupName));
-        // Keep timestamped version too
-        const ts = new Date().toISOString().replace(/[:.]/g, '-').slice(0, 19);
-        fs.copyFileSync(primaryPath, path.join(appBackupDir, `${backupName}.${ts}.bak`));
-        fileLog('[TexaCore] ✅ Secondary backup saved to:', appBackupDir);
+        // End-of-day: force-fix today's daily snapshot (keeps last 5 days per
+        // company in snapshots/). Replaces the old unbounded *.bak accumulation.
+        try { backupManager._rotateDailySnapshot(5, 0); } catch (e) { /* ignore */ }
+        fileLog('[TexaCore] ✅ Secondary backup + daily snapshot saved to:', appBackupDir);
       }
     } catch (e) {
       console.warn('[TexaCore] Final backup failed:', e.message);

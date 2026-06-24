@@ -9,14 +9,11 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <!-- ═══ Title Bar ═══ -->
+  <!-- ═══ Title Bar (أزرار النافذة الأصلية من macOS فقط — أُزيلت المخصّصة لمنع الازدواج) ═══ -->
   <div class="titlebar" id="titlebar">
     <div style="flex:1"></div>
     <span class="titlebar-title">TexaCore ERP Installer</span>
-    <div style="flex:1; display:flex; justify-content:flex-end; gap:8px;" class="window-controls">
-      <button onclick="texacore.minimize()" class="win-btn win-min">_</button>
-      <button onclick="texacore.close()" class="win-btn win-close">✕</button>
-    </div>
+    <div style="flex:1"></div>
   </div>
 
   <!-- ═══ Main Content ═══ -->
@@ -26,9 +23,14 @@
       <div class="logo">
         <div class="logo-icon">
           <svg width="48" height="48" viewBox="0 0 48 48" fill="none">
-            <rect width="48" height="48" rx="12" fill="url(#grad)"/>
-            <path d="M14 18h20v2H14v-2zm0 5h20v2H14v-2zm0 5h14v2H14v-2z" fill="white" opacity="0.9"/>
-            <defs><linearGradient id="grad" x1="0" y1="0" x2="48" y2="48"><stop stop-color="#10b981"/><stop offset="1" stop-color="#059669"/></linearGradient></defs>
+            <defs>
+              <linearGradient id="hx" x1="0" y1="0" x2="48" y2="48"><stop stop-color="#0d9488"/><stop offset="1" stop-color="#047857"/></linearGradient>
+              <linearGradient id="th" x1="0" y1="0" x2="48" y2="0"><stop stop-color="#f59e0b"/><stop offset="1" stop-color="#d97706"/></linearGradient>
+            </defs>
+            <polygon points="24,4 40,14 40,34 24,44 8,34 8,14" fill="url(#hx)" stroke="url(#hx)" stroke-width="4" stroke-linejoin="round"/>
+            <path d="M10,24 Q16,17 24,24 T38,24" stroke="url(#th)" stroke-width="3.4" fill="none" stroke-linecap="round"/>
+            <circle cx="24" cy="24" r="4.6" fill="white" opacity="0.95"/>
+            <circle cx="24" cy="24" r="2.2" fill="#047857"/>
           </svg>
         </div>
         <div>
