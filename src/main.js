@@ -1901,6 +1901,11 @@ const httpServer = http.createServer(async (req, res) => {
         await pgClient.connect();
 
         try {
+          // Run the whole delete in ONE transaction. If anything fails, ROLLBACK
+          // reverts the trigger-disable DDL too (it's transactional), so triggers
+          // are never left globally disabled and no partial delete is committed.
+          await pgClient.query('BEGIN');
+
           // 1. Get tenant_id before deleting
           const { rows: compRows } = await pgClient.query(
             'SELECT tenant_id FROM public.companies WHERE id = $1', [companyId]
@@ -1998,10 +2003,14 @@ const httpServer = http.createServer(async (req, res) => {
             END $$;
           `);
 
-          // 8. Reload PostgREST schema cache
+          // 8. Commit the whole delete, then reload PostgREST schema cache.
+          await pgClient.query('COMMIT');
           await pgClient.query("NOTIFY pgrst, 'reload schema'");
 
           fileLog('[TexaCore] Company deleted successfully:', companyId);
+        } catch (txErr) {
+          try { await pgClient.query('ROLLBACK'); fileLog('[TexaCore] Delete rolled back — triggers restored'); } catch {}
+          throw txErr;
         } finally {
           await pgClient.end();
         }
@@ -3635,32 +3644,41 @@ app.on('activate', () => {
   if (BrowserWindow.getAllWindows().length === 0) createWindow();
 });
 
-app.on('before-quit', async () => {
+// Electron does NOT await an async before-quit handler — it quits immediately,
+// cutting off the final backup (data loss every quit). So we preventDefault,
+// finish the backup + clean shutdown, then app.exit() to actually quit.
+let _finalizingQuit = false;
+app.on('before-quit', (event) => {
+  if (_finalizingQuit) return; // second pass — allow the real quit
+  event.preventDefault();
+  _finalizingQuit = true;
   app.isQuitting = true;
-  heartbeatSender.stop();
-  // Final backup before quitting
-  if (backupManager) {
-    backupManager.stopSync();
-    backupManager.stopCloudSync();
+  (async () => {
     try {
-      fileLog('[TexaCore] Running final backup before quit...');
-      await backupManager.backup();
-      
-      // Copy to secondary backup location
-      const primaryPath = backupManager.backupPath;
-      if (primaryPath && fs.existsSync(primaryPath)) {
-        const appBackupDir = path.join(DATA_DIR, 'backups');
-        if (!fs.existsSync(appBackupDir)) fs.mkdirSync(appBackupDir, { recursive: true });
-        const backupName = path.basename(primaryPath);
-        fs.copyFileSync(primaryPath, path.join(appBackupDir, backupName));
-        // End-of-day: force-fix today's daily snapshot (keeps last 5 days per
-        // company in snapshots/). Replaces the old unbounded *.bak accumulation.
-        try { backupManager._rotateDailySnapshot(5, 0); } catch (e) { /* ignore */ }
-        fileLog('[TexaCore] ✅ Secondary backup + daily snapshot saved to:', appBackupDir);
+      heartbeatSender.stop();
+      if (backupManager) {
+        backupManager.stopSync();
+        backupManager.stopCloudSync();
+        try {
+          fileLog('[TexaCore] Running final backup before quit...');
+          await backupManager.backup();
+          const primaryPath = backupManager.backupPath;
+          if (primaryPath && fs.existsSync(primaryPath)) {
+            const appBackupDir = path.join(DATA_DIR, 'backups');
+            if (!fs.existsSync(appBackupDir)) fs.mkdirSync(appBackupDir, { recursive: true });
+            fs.copyFileSync(primaryPath, path.join(appBackupDir, path.basename(primaryPath)));
+            try { backupManager._rotateDailySnapshot(5, 0); } catch (e) { /* ignore */ }
+            fileLog('[TexaCore] ✅ Secondary backup + daily snapshot saved to:', appBackupDir);
+          }
+        } catch (e) {
+          console.warn('[TexaCore] Final backup failed:', e.message);
+        }
       }
+      if (svcManager) await svcManager.stopAll();
     } catch (e) {
-      console.warn('[TexaCore] Final backup failed:', e.message);
+      fileLog('[TexaCore] Quit finalize error:', e.message);
+    } finally {
+      app.exit(0);
     }
-  }
-  if (svcManager) await svcManager.stopAll();
+  })();
 });

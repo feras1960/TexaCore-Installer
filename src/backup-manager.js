@@ -480,6 +480,23 @@ class BackupManager {
         this.onProgress('restore', '⚠️ تعذّرت استعادة حسابات الدخول — راجع السجل');
       }
 
+      // Step 6: Verify the restore actually loaded data. A .tcdb is a full
+      // snapshot, so an empty result means the restore failed — fail loudly
+      // instead of silently reporting success (which would look like data loss).
+      this.onProgress('restore', 'التحقق من نجاح الاستعادة...');
+      try {
+        const out = await this._queryScalar(
+          "SELECT (SELECT count(*) FROM public.companies) + (SELECT count(*) FROM auth.users)"
+        );
+        const total = parseInt(String(out).trim(), 10);
+        if (!Number.isFinite(total) || total <= 0) {
+          throw new Error('قاعدة فارغة بعد الاستعادة — لم تُحمّل البيانات');
+        }
+      } catch (verr) {
+        this.onProgress('error', `❌ فشل التحقق بعد الاستعادة: ${verr.message}`);
+        throw verr;
+      }
+
       const duration = Date.now() - startTime;
       this.onProgress('done', `✅ تمت الاستعادة (${(sql.length / 1024 / 1024).toFixed(1)} MB) في ${(duration / 1000).toFixed(1)}s`);
 
@@ -560,6 +577,19 @@ class BackupManager {
         } else {
           resolve();
         }
+      });
+    });
+  }
+
+  // Run a single scalar query via psql (-tAc) and return stdout. Used to verify
+  // a restore actually loaded data.
+  _queryScalar(sql) {
+    return new Promise((resolve, reject) => {
+      const env = { ...process.env, PGPASSWORD: this.dbPassword };
+      const args = ['-h', this.dbHost, '-p', String(this.dbPort), '-U', this.dbUser, '-d', this.dbName, '-tAc', sql];
+      execFile(this.psql, args, { env, windowsHide: true }, (err, stdout, stderr) => {
+        if (err) reject(new Error(stderr || err.message));
+        else resolve(stdout);
       });
     });
   }
