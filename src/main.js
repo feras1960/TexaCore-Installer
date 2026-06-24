@@ -753,16 +753,23 @@ class HeartbeatSender {
       if (result && result.success) {
         this._lastUploadSize = stats.size;
         this._lastUploadTime = Date.now();
-        // Tag the just-created cloud record with company + file name and apply
-        // per-company retention (keep last 5 daily). Non-fatal if it fails.
+        // The edge function stores only the FILE (no DB row). Record the
+        // metadata row ourselves — with the company name + the storage path it
+        // returned — so the cloud table shows it. The trigger prunes to 5/day.
         try {
-          await httpPostRpc('licensing_tag_latest_backup', {
+          await httpPostRpc('licensing_record_cloud_backup', {
             p_license_key: config.licenseKey,
             p_company_name: companyName || 'الشركة',
             p_file_name: fileName,
+            p_file_path: result.file_path || fileName,
+            p_file_size_mb: fileSizeMb,
+            p_db_size_mb: fileSizeMb,
+            p_companies_count: config.companies?.length || 1,
+            p_invoices_count: 0,
+            p_backup_type: 'auto',
           });
-        } catch (e) { console.warn('[CloudBackup] tag failed:', e.message); }
-        console.log(`[CloudBackup] ✅ Uploaded ${fileName} (${fileSizeMb}MB) for ${companyName || '?'}`);
+        } catch (e) { console.warn('[CloudBackup] record failed:', e.message); }
+        console.log(`[CloudBackup] ✅ Uploaded + recorded ${fileName} (${fileSizeMb}MB) for ${companyName || '?'}`);
       } else {
         console.warn('[CloudBackup] Upload response:', JSON.stringify(result));
       }
