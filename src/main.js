@@ -1695,7 +1695,7 @@ ipcMain.handle('import-rsf', async (_, filePath) => {
 
         // Save to config for auto-resume
         const config = loadConfig();
-        config.companies = [{ name: rsfCompanyName, tcdbPath, storagePath: documentsDir }];
+        config.companies = [{ name: rsfCompanyName, tcdbPath, storagePath: path.dirname(tcdbPath) }];
         saveConfig(config);
 
         // Start periodic sync
@@ -1800,6 +1800,13 @@ function initBackupOnStartup() {
 
 
 // ─── Local API Server for Browser Access ───────────────────────
+// Admin endpoints that change/destroy data — must never be triggered by a
+// foreign website (CSRF) or remotely. Cross-checked: the cloud Express proxy
+// also blocks these over the tunnel (see service-manager startFrontendServer).
+const DESTRUCTIVE_API = new Set([
+  '/api/delete-company', '/api/restore-tcdb', '/api/import-rsf', '/api/import-rsf-path',
+  '/api/create-local-company', '/api/backup', '/api/open-tcdb', '/api/tunnel-fix', '/api/tunnel-restart',
+]);
 const httpServer = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
@@ -1809,6 +1816,23 @@ const httpServer = http.createServer(async (req, res) => {
     res.writeHead(204);
     res.end();
     return;
+  }
+
+  // CSRF / cross-origin guard: a destructive call is allowed only from a
+  // same-machine browser (Origin localhost/127.0.0.1) or a non-browser caller
+  // (no Origin — the Electron app / local tooling). Any foreign Origin (a
+  // malicious site the user visited, or a spoofed remote) is rejected.
+  {
+    const urlPath = (req.url || '').split('?')[0];
+    if (DESTRUCTIVE_API.has(urlPath)) {
+      const origin = req.headers['origin'] || '';
+      const sameMachine = !origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
+      if (!sameMachine) {
+        res.writeHead(403, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: 'forbidden: cross-origin request to a local-only endpoint' }));
+        return;
+      }
+    }
   }
 
   if (req.method === 'POST' && req.url === '/api/create-local-company') {
@@ -1857,6 +1881,13 @@ const httpServer = http.createServer(async (req, res) => {
         if (!companyId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: 'companyId is required' }));
+          return;
+        }
+        // companyId is interpolated into dynamic SQL (DO $$ … '${companyId}'::uuid)
+        // below — reject anything that isn't a strict UUID to prevent SQL injection.
+        if (!/^[0-9a-fA-F]{8}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{4}-[0-9a-fA-F]{12}$/.test(companyId)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'invalid companyId' }));
           return;
         }
 
@@ -2373,7 +2404,7 @@ const httpServer = http.createServer(async (req, res) => {
             // Save config for auto-resume
             try {
               const config = loadConfig();
-              config.companies = [{ name: rsfCompanyName, tcdbPath, storagePath: documentsDir }];
+              config.companies = [{ name: rsfCompanyName, tcdbPath, storagePath: path.dirname(tcdbPath) }];
               saveConfig(config);
             } catch (cfgErr) {
               console.warn('[RSF API] Config save error:', cfgErr.message);
@@ -3210,7 +3241,7 @@ const httpServer = http.createServer(async (req, res) => {
   }
 });
 
-httpServer.listen(1960, '0.0.0.0', () => {
+httpServer.listen(1960, '127.0.0.1', () => {
   console.log('Local API Server listening on port 1960');
 });
 

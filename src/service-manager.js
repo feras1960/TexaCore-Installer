@@ -710,6 +710,16 @@ class ServiceManager {
   // ─── Start All Services ──────────────────────────────────────
   async startAll(options = {}) {
     if (this.status === 'running') return { success: true };
+    // Guard against concurrent entry (e.g. auto-start-on-launch racing the user
+    // clicking "Start"): both would otherwise spawn a second postgres on the
+    // same data dir and run migrations twice. Return the one in-flight start.
+    if (this._startInFlight) return this._startInFlight;
+    this._startInFlight = this._startAllInner(options);
+    try { return await this._startInFlight; } finally { this._startInFlight = null; }
+  }
+
+  async _startAllInner(options = {}) {
+    if (this.status === 'running') return { success: true };
     this.status = 'starting';
     this.dbPassword = options.dbPassword || this.dbPassword;
     this.onMigrationProgress = options.onMigrationProgress || null;
@@ -896,8 +906,22 @@ window.__TEXACORE_CONFIG__ = {
       });
 
       // Admin API proxy (/api/companies, /api/delete-company, etc.)
-      // These are served by the Electron admin server on port 1960
+      // These are served by the Electron admin server on port 1960.
+      // Destructive/admin operations must NOT be reachable over the public
+      // tunnel (subdomain.texacore.ai) — only locally. The full set of
+      // destructive paths is also CSRF-guarded inside the 1960 server.
+      const ADMIN_LOCAL_ONLY = new Set([
+        '/api/delete-company', '/api/restore-tcdb', '/api/import-rsf', '/api/import-rsf-path',
+        '/api/create-local-company', '/api/backup', '/api/open-tcdb', '/api/tunnel-fix', '/api/tunnel-restart',
+      ]);
       app.all('/api/*', (req, res) => {
+        const host = req.headers.host || '';
+        const isCloudAccess = host.includes('.texacore.ai') || host.includes('.texacore.com');
+        const urlPath = (req.url || '').split('?')[0];
+        if (isCloudAccess && ADMIN_LOCAL_ONLY.has(urlPath)) {
+          res.status(403).json({ error: 'This administrative operation is local-only and cannot be performed remotely.' });
+          return;
+        }
         const proxyOptions = {
           hostname: '127.0.0.1',
           port: 1960,
