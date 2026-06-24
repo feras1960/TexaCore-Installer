@@ -1819,9 +1819,12 @@ class RsfMapper {
             WHERE id = $1
           `, [jeId, localTotal]);
 
-          // ═══ ربط القيد بفاتورة المبيعات (الاتجاه العكسي) ═══
+          // ═══ ربط فاتورة المبيعات بالقيد ═══
+          // إصلاح #P1: نحدّث sales_invoices (الموجودة الآن) لا sales_transactions
+          // (التي تُنشأ لاحقاً بالمزامنة sp_sales_sync التي تنقل si.journal_entry_id).
+          // التحديث المباشر لـsales_transactions كان لا أثر له (الصف غير موجود بعد).
           await pgClient.query(`
-            UPDATE sales_transactions 
+            UPDATE sales_invoices
             SET journal_entry_id = $1
             WHERE id = $2
           `, [jeId, invId]);

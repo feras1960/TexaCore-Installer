@@ -180,6 +180,12 @@ const realtimePresence = new RealtimePresence();
 
 // ─── Data Directory ──────────────────────────────────────────
 const DATA_DIR = path.join(app.getPath('userData'), 'texacore-data');
+// Unified backup key: NEW .tcdb files are encrypted with this stable key so the
+// work file opens on ANY install of the program and survives a license change
+// (trial→paid). Restore still tries the license key on disk (dataDir), so older
+// license-encrypted files keep opening too. Chosen by the user (portability over
+// secrecy). See [[local-hybrid-schema-sync]] #4.
+const UNIFIED_BACKUP_KEY = 'texacore-default-backup-key-2026';
 const CONFIG_FILE = path.join(DATA_DIR, 'config.json');
 // LICENSE_FILE removed — licensing now handled by LicenseGuard (encrypted)
 
@@ -1235,8 +1241,9 @@ async function handleCreateLocalCompany(companyData) {
           dbUser: 'postgres',
           dbPassword: svcManager.dbPassword,
           backupPath: tcdbFilePath,
-          encryptionKey: encKey,
-          intervalMs: 5 * 60 * 1000, // 5 minutes
+          encryptionKey: UNIFIED_BACKUP_KEY, // موحّد: يفتح على أي جهاز (#4)
+          dataDir: DATA_DIR, // lets restore also try the license key (#4)
+          intervalMs: 60 * 1000, // 5 minutes
           onProgress: (phase, detail) => {
             console.log(`[Backup] ${phase}: ${detail}`);
             if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1412,7 +1419,7 @@ ipcMain.handle('import-rsf', async (_, filePath) => {
             dbPassword: ServiceManager.DB_PASSWORD || 'texacore-local-super-secret',
             backupPath: tcdbPath,
             encryptionKey: 'texacore-default-backup-key-2026',
-            intervalMs: 5 * 60 * 1000,
+            intervalMs: 60 * 1000,
             onProgress: (phase, detail) => {
               console.log(`[Backup] ${phase}: ${detail}`);
               if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1523,8 +1530,9 @@ function initBackupOnStartup() {
       dbUser: 'postgres',
       dbPassword: svcManager.dbPassword,
       backupPath: tcdbPath,
-      encryptionKey: encKey,
-      intervalMs: 5 * 60 * 1000,
+      encryptionKey: UNIFIED_BACKUP_KEY, // موحّد: يفتح على أي جهاز (#4)
+      dataDir: DATA_DIR, // restore still tries the license key for old files
+      intervalMs: 60 * 1000,
       onProgress: (phase, detail) => {
         console.log(`[Backup] ${phase}: ${detail}`);
         if (mainWindow && !mainWindow.isDestroyed()) {
@@ -2059,7 +2067,7 @@ const httpServer = http.createServer(async (req, res) => {
                 dbPassword: dbPass,
                 backupPath: tcdbPath,
                 encryptionKey: 'texacore-default-backup-key-2026',
-                intervalMs: 5 * 60 * 1000,
+                intervalMs: 60 * 1000,
                 onProgress: (phase, detail) => {
                   console.log(`[Backup] ${phase}: ${detail}`);
                   if (mainWindow && !mainWindow.isDestroyed()) {
@@ -2361,7 +2369,8 @@ const httpServer = http.createServer(async (req, res) => {
             dbName: 'postgres', dbUser: 'postgres', dbPassword: dbPass,
             backupPath: selectedPath,
             encryptionKey: 'texacore-default-backup-key-2026',
-            intervalMs: 5 * 60 * 1000,
+            dataDir: DATA_DIR, // restore tries default + license key (#4)
+            intervalMs: 60 * 1000,
             onProgress: (phase, detail) => {
               console.log(`[Backup] ${phase}: ${detail}`);
               if (mainWindow && !mainWindow.isDestroyed()) {
@@ -2774,7 +2783,7 @@ const httpServer = http.createServer(async (req, res) => {
                 dbPassword: svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD,
                 backupPath: tcdbPath,
                 encryptionKey: 'texacore-default-backup-key-2026',
-                intervalMs: 5 * 60 * 1000,
+                intervalMs: 60 * 1000,
                 onProgress: (phase, detail) => {
                   console.log(`[Backup] ${phase}: ${detail}`);
                   if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('backup-progress', { phase, detail });
@@ -2900,7 +2909,7 @@ const httpServer = http.createServer(async (req, res) => {
             dbName: 'postgres', dbUser: 'postgres', dbPassword: dbPass,
             backupPath: tcdbPath,
             encryptionKey: 'texacore-default-backup-key-2026',
-            intervalMs: 5 * 60 * 1000,
+            intervalMs: 60 * 1000,
             onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
             onError: (err) => console.error('[Backup] Error:', err.message),
           });

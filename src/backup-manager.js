@@ -12,6 +12,13 @@ const zlib = require('zlib');
 
 // ─── Encryption Constants ────────────────────────────────────
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
+// Well-known fallback key. Backups are encrypted with the license key when a
+// license is present, else this default. Historically restore paths hardcoded
+// this default while backup paths used the license key → key mismatch made
+// backups unrestorable. _decrypt now tries every candidate key (configured +
+// license-on-disk + this default), so any .tcdb restores regardless of which
+// key encrypted it. See [[local-hybrid-schema-sync]] #4.
+const DEFAULT_BACKUP_KEY = 'texacore-default-backup-key-2026';
 const TCDB_MAGIC = Buffer.from('TCDB');      // File signature
 const TCDB_VERSION = 2;                       // Format version
 const KEY_DERIVATION_ITERATIONS = 100000;
@@ -47,6 +54,11 @@ class BackupManager {
     this.backupPath = opts.backupPath;
     this.secondaryBackupPath = opts.secondaryBackupPath || null; // Redundant copy path
     this.encryptionKey = opts.encryptionKey;
+    // Optional: dataDir lets us load the license key off disk as an extra
+    // decrypt candidate (so a license-encrypted backup restores even on an
+    // instance configured with the default key). Falls back silently.
+    this.dataDir = opts.dataDir || null;
+    this.fallbackEncryptionKeys = opts.fallbackEncryptionKeys || [];
     this.intervalMs = opts.intervalMs || 5 * 60 * 1000; // 5 minutes default
     this.onProgress = opts.onProgress || (() => {});
     this.onError = opts.onError || ((e) => console.error('[BackupManager]', e));
@@ -61,14 +73,33 @@ class BackupManager {
   // 🔑 Key Derivation
   // ═══════════════════════════════════════════════════════════════
 
-  _deriveKey(salt) {
+  _deriveKey(salt, keyOverride) {
     return crypto.pbkdf2Sync(
-      this.encryptionKey,
+      keyOverride || this.encryptionKey,
       salt,
       KEY_DERIVATION_ITERATIONS,
       32, // 256 bits
       'sha512'
     );
+  }
+
+  /**
+   * Ordered list of candidate keys to try when decrypting a .tcdb:
+   * configured key → explicit fallbacks → license key on disk → default.
+   * Deduped, falsy-filtered. The configured key stays first so the common
+   * case (key matches) succeeds on the first try with no extra work.
+   */
+  _candidateKeys() {
+    const keys = [this.encryptionKey, ...this.fallbackEncryptionKeys];
+    if (this.dataDir) {
+      try {
+        const LicenseGuard = require('./license-guard');
+        const lic = new LicenseGuard(this.dataDir).loadLicense();
+        if (lic && lic.license_key) keys.push(lic.license_key);
+      } catch { /* no license / unreadable → skip */ }
+    }
+    keys.push(DEFAULT_BACKUP_KEY);
+    return [...new Set(keys.filter(Boolean))];
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -275,11 +306,20 @@ class BackupManager {
    * Decrypt data
    */
   _decrypt(salt, iv, authTag, ciphertext) {
-    const key = this._deriveKey(salt);
-    const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
-    decipher.setAuthTag(authTag);
-
-    return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+    const candidates = this._candidateKeys();
+    let lastErr;
+    for (const candidate of candidates) {
+      try {
+        const key = this._deriveKey(salt, candidate);
+        const decipher = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, iv);
+        decipher.setAuthTag(authTag);
+        return Buffer.concat([decipher.update(ciphertext), decipher.final()]);
+      } catch (e) {
+        // GCM auth-tag mismatch on a wrong key → try the next candidate.
+        lastErr = e;
+      }
+    }
+    throw lastErr || new Error('فشل فك التشفير — لا مفتاح مطابق');
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -384,6 +424,19 @@ class BackupManager {
       this.onProgress('restore', 'استعادة قاعدة البيانات...');
       await this._executeSql(sql);
 
+      // Step 5b: Guarantee login accounts are loaded. The bulk restore above can
+      // silently drop auth.users (its single transaction aborts on GoTrue's
+      // pre-created tables) → no login after reopening, on any machine. Load them
+      // explicitly so the .tcdb works on ANY install. Non-fatal: data already
+      // restored; we warn rather than undo it if this step fails.
+      this.onProgress('restore', 'استعادة حسابات الدخول...');
+      try {
+        await this._restoreAuthData(sql.toString('utf8'));
+      } catch (e) {
+        console.warn('[BackupManager] ⚠️ auth restore step failed:', e.message);
+        this.onProgress('restore', '⚠️ تعذّرت استعادة حسابات الدخول — راجع السجل');
+      }
+
       const duration = Date.now() - startTime;
       this.onProgress('done', `✅ تمت الاستعادة (${(sql.length / 1024 / 1024).toFixed(1)} MB) في ${(duration / 1000).toFixed(1)}s`);
 
@@ -446,7 +499,12 @@ class BackupManager {
         '-U', this.dbUser,
         '-d', this.dbName,
         '-f', tmpFile,
-        '--single-transaction',
+        // NO --single-transaction: with ON_ERROR_STOP=off a single transaction
+        // enters aborted state on the first benign "already exists" error (the
+        // schema pre-exists), then EVERY following statement is skipped and the
+        // final COMMIT becomes ROLLBACK — so the reset DB stays EMPTY (no data,
+        // no login) after opening a .tcdb. Running statements independently lets
+        // "already exists" be skipped while all COPY data actually loads.
         '--set', 'ON_ERROR_STOP=off',
       ];
 
@@ -459,6 +517,65 @@ class BackupManager {
         } else {
           resolve();
         }
+      });
+    });
+  }
+
+  /**
+   * Extract one `COPY <table> (...) FROM stdin; ... \.` block verbatim from a
+   * plain-text pg_dump. Returns null if the table/data block isn't present.
+   */
+  _extractCopyBlock(sql, table) {
+    const m = new RegExp('^COPY ' + table.replace(/\./g, '\\.') + ' \\([^)]*\\) FROM stdin;$', 'm').exec(sql);
+    if (!m) return null;
+    const end = sql.indexOf('\n\\.', m.index);
+    if (end < 0) return null;
+    return sql.slice(m.index, end + 3); // include the closing "\n\."
+  }
+
+  /**
+   * Reliably restore the auth accounts (auth.users + auth.identities) from a
+   * decrypted dump. The bulk restore runs in ONE transaction that aborts on the
+   * first "already exists" error (GoTrue pre-creates its auth tables on start),
+   * so the auth rows silently never commit → login becomes impossible after a
+   * reopen, on ANY machine. Here we load them in their own atomic transaction:
+   * clear whatever GoTrue bootstrapped, then COPY the backup's users (then
+   * identities, for the FK). pg_dump lists COPY columns by name, so a 34-column
+   * dump loads fine into a newer 35-column table (extra cols take defaults).
+   * bcrypt hashes are portable across GoTrue instances and the session token is
+   * signed by the local install's secret → the original passwords work on every
+   * install regardless of license. See [[local-hybrid-schema-sync]] #6.
+   */
+  _restoreAuthData(sql) {
+    const users = this._extractCopyBlock(sql, 'auth.users');
+    if (!users) return Promise.resolve(); // very old file without auth → skip
+    const identities = this._extractCopyBlock(sql, 'auth.identities');
+    const parts = [
+      "SET session_replication_role = 'replica';",
+      'DELETE FROM auth.identities;',
+      'DELETE FROM auth.users;',
+      users,
+    ];
+    if (identities) parts.push(identities);
+    parts.push("SET session_replication_role = 'origin';");
+    return this._runAuthSql(parts.join('\n') + '\n');
+  }
+
+  _runAuthSql(sqlText) {
+    return new Promise((resolve, reject) => {
+      const tmpFile = this.backupPath + '.auth.sql';
+      fs.writeFileSync(tmpFile, sqlText);
+      const env = { ...process.env, PGPASSWORD: this.dbPassword };
+      const args = [
+        '-h', this.dbHost, '-p', String(this.dbPort),
+        '-U', this.dbUser, '-d', this.dbName,
+        '-f', tmpFile, '--single-transaction',
+        '--set', 'ON_ERROR_STOP=on', // auth must load atomically — surface failures
+      ];
+      execFile(this.psql, args, { env, windowsHide: true, maxBuffer: 50 * 1024 * 1024 }, (err, stdout, stderr) => {
+        try { fs.unlinkSync(tmpFile); } catch { /* ignore */ }
+        if (err) reject(new Error(`Auth restore failed: ${stderr || err.message}`));
+        else resolve();
       });
     });
   }

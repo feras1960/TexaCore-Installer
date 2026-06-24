@@ -638,7 +638,7 @@ async function handleCreateLocalCompany(companyData) {
           dbPassword: DB_PASSWORD,
           backupPath: tcdbFilePath,
           encryptionKey: encKey,
-          intervalMs: 5 * 60 * 1000,
+          intervalMs: 60 * 1000,
           onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
           onError: (err) => console.error('[Backup] Error:', err.message),
         });
@@ -693,7 +693,7 @@ async function ensureBackupManagerInitialized() {
         backupPath: primaryTcdbPath,
         secondaryBackupPath: path.join(installerBackupDir, companyName + '.tcdb'),
         encryptionKey: 'texacore-default-backup-key-2026',
-        intervalMs: 5 * 60 * 1000,
+        intervalMs: 60 * 1000,
         onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
         onError: (err) => console.error('[Backup] Error:', err.message),
       });
@@ -959,7 +959,7 @@ NOTIFY pgrst, 'reload config';
       backupPath: primaryTcdbPath,
       secondaryBackupPath: path.join(installerBackupDir, companyName + '.tcdb'),
       encryptionKey: 'texacore-default-backup-key-2026',
-      intervalMs: 5 * 60 * 1000, // 5 minutes
+      intervalMs: 60 * 1000, // 5 minutes
       onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
       onError: (err) => console.error('[Backup] Error:', err.message),
     });
@@ -1849,7 +1849,7 @@ const httpServer = http.createServer(async (req, res) => {
               backupPath: tcdbPath,
               secondaryBackupPath: path.join(installerBackupDir, rsfCompanyName + '.tcdb'),
               encryptionKey: 'texacore-default-backup-key-2026',
-              intervalMs: 5 * 60 * 1000,
+              intervalMs: 60 * 1000,
               onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
               onError: (err) => console.error('[Backup] Error:', err.message),
             });
@@ -2463,7 +2463,7 @@ proxyServer.listen(API_PORT, '0.0.0.0', () => {
           backupPath: tcdbPath,
           secondaryBackupPath: path.join(installerBackupDir, companyName + '.tcdb'),
           encryptionKey: 'texacore-default-backup-key-2026',
-          intervalMs: 5 * 60 * 1000,
+          intervalMs: 60 * 1000,
           onProgress: (phase, detail) => console.log(`[Backup] ${phase}: ${detail}`),
           onError: (err) => console.error('[Backup] Error:', err.message),
         });

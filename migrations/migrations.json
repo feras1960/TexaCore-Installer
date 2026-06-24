@@ -1,7 +1,7 @@
 {
   "version": "2026.05.04",
-  "generated": "2026-05-04T18:21:12.260Z",
-  "totalFiles": 174,
+  "generated": "2026-06-24T10:51:21Z",
+  "totalFiles": 175,
   "migrations": [
     {
       "order": 1,
@@ -872,6 +872,11 @@
       "order": 173,
       "file": "20260509_fix_party_balances_dual_currency.sql",
       "name": "20260509_fix_party_balances_dual_currency"
+    },
+    {
+      "order": 174,
+      "file": "20260624a_schema_catchup.sql",
+      "name": "20260624a_schema_catchup"
     }
   ]
 }
