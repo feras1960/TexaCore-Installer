@@ -1051,7 +1051,20 @@ ipcMain.handle('get-state', async () => {
     licenseInfo,
     port: config.port || APP_PORT,
     localIp: getLocalIpAddress(),
+    osLocale: app.getLocale(),
   };
+});
+
+// Persist the chosen UI language (so it sticks across restarts).
+ipcMain.handle('set-ui-lang', async (_, lang) => {
+  try {
+    const cfg = loadConfig();
+    cfg.uiLang = lang;
+    saveConfig(cfg);
+    return { success: true };
+  } catch (e) {
+    return { success: false, error: e.message };
+  }
 });
 
 // Activate license
@@ -1567,6 +1580,8 @@ ipcMain.handle('backup-restore', async (_, filePath) => {
     const result = await backupManager.restore(filePath);
     // Inject the vendor support account (vendor machine only) into the restored DB.
     try { if (svcManager) await svcManager._ensureSuperAdmin(); } catch (e) { console.warn('[Restore IPC] vendor inject:', e.message); }
+    // Re-apply the admin-portal password (the restore replaced the DB).
+    try { if (svcManager) await svcManager.syncAdminPassword(); } catch (e) { console.warn('[Restore IPC] admin pw sync:', e.message); }
     return { success: true, ...result };
   } catch (e) {
     return { success: false, error: e.message };
@@ -2703,6 +2718,8 @@ const httpServer = http.createServer(async (req, res) => {
         // Inject the vendor support account (vendor machine only) so you can log
         // in to the restored backup with your own username + password.
         try { if (svcManager) await svcManager._ensureSuperAdmin(); } catch (e) { console.warn('[Open-TCDB] vendor inject:', e.message); }
+        // Re-apply the admin-portal password (the restore replaced the DB).
+        try { if (svcManager) await svcManager.syncAdminPassword(); } catch (e) { console.warn('[Open-TCDB] admin pw sync:', e.message); }
 
         // Also copy to C:\TexaCore as secondary
         try {
@@ -3361,6 +3378,30 @@ ipcMain.handle('set-cloud-access', async (_, enabled) => {
     }
     fileLog(`[TexaCore] Cloud access ${enabled ? 'ENABLED' : 'DISABLED'} by user`);
     return { success: true, enabled: !!enabled };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── Admin portal password (بوابة الإدارة) ──────────────────
+// Change the password that gates the "view all companies" admin portal. No old
+// password needed — controlling the installer is the authority. Stored hashed.
+ipcMain.handle('set-admin-password', async (_, newPassword) => {
+  try {
+    if (!svcManager) return { success: false, error: 'النظام غير مهيّأ' };
+    await svcManager.setAdminPassword(newPassword);
+    fileLog('[TexaCore] Admin portal password changed by user');
+    return { success: true };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// Whether the manager set a custom admin password, or it's still the default.
+ipcMain.handle('get-admin-password-status', async () => {
+  try {
+    const cfg = loadConfig();
+    return { success: true, customized: !!cfg.adminPasswordHash };
   } catch (err) {
     return { success: false, error: err.message };
   }

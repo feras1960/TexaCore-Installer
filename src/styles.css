@@ -488,7 +488,9 @@ body {
   border-radius: var(--radius);
   padding: 16px;
   margin-top: 24px;
-  text-align: right;
+  /* logical: right in RTL (ar), left in LTR (en/ru/uk) — so the Cloud Access
+     header + subtitle align correctly in every language */
+  text-align: start;
 }
 
 .cloud-header {

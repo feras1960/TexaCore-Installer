@@ -780,6 +780,11 @@ class ServiceManager {
       // 7.5. Ensure super admin user exists
       await this._ensureSuperAdmin();
 
+      // 7.6. Sync the admin-portal password into the DB (default = license key,
+      // or the manager's custom value). Idempotent; keeps the gate correct even
+      // after a restore replaced the DB.
+      await this.syncAdminPassword();
+
       // 8. Start Frontend Web Server
       const uiPort = options.port || 80;
       await this.startFrontendServer(uiPort);
@@ -1392,6 +1397,100 @@ window.__TEXACORE_CONFIG__ = {
     } catch (err) {
       console.warn('[ServiceManager] Could not ensure super admin:', err.message);
       // Non-fatal — don't crash startup
+    }
+  }
+
+  // ─── Admin portal password (بوابة الإدارة) ──────────────────
+  // The gate lives server-side: a bcrypt hash in public.platform_admin, checked
+  // by verify_admin_password() (migration 20260625). The installer is the source
+  // of truth — config.adminPasswordHash if the manager set one, else the license
+  // key by default — and re-pushes it on startup + after restore so a restored
+  // .tcdb can never revert the password. All queries are parameterized (the
+  // plaintext never touches a SQL string).
+  _readConfig() {
+    try {
+      const p = path.join(this.dataDir, 'config.json');
+      if (fs.existsSync(p)) return JSON.parse(fs.readFileSync(p, 'utf8'));
+    } catch (e) { console.warn('[ServiceManager] config read failed:', e.message); }
+    return {};
+  }
+
+  _writeConfig(cfg) {
+    const p = path.join(this.dataDir, 'config.json');
+    fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
+  }
+
+  async _withPgClient(fn) {
+    const { Client } = require('pg');
+    const client = new Client({
+      host: '127.0.0.1', port: PG_PORT, database: 'postgres',
+      user: 'postgres', password: this.dbPassword,
+    });
+    await client.connect();
+    try { return await fn(client); }
+    finally { try { await client.end(); } catch { /* ignore */ } }
+  }
+
+  // Set a new admin-portal password: hash it (bcrypt via pgcrypto), store the
+  // hash in both config (source of truth, survives restore) and the DB. No old
+  // password required — physical control of the installer is the authority.
+  async setAdminPassword(plain) {
+    if (!plain || String(plain).length < 4) throw new Error('كلمة المرور قصيرة جداً (4 أحرف على الأقل)');
+    return this._withPgClient(async (client) => {
+      const r = await client.query(`SELECT crypt($1, gen_salt('bf')) AS h`, [String(plain)]);
+      const hash = r.rows[0].h;
+      await client.query(
+        `INSERT INTO public.platform_admin(id, password_hash, updated_at)
+         VALUES (1, $1, now())
+         ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`,
+        [hash]
+      );
+      const cfg = this._readConfig();
+      cfg.adminPasswordHash = hash;
+      this._writeConfig(cfg);
+      console.log('[ServiceManager] 🔑 Admin portal password updated.');
+      return true;
+    });
+  }
+
+  // Push the current admin password into the DB. Custom hash from config if set,
+  // otherwise default = the license key (unique per install, the manager has it,
+  // and not the old guessable "admin"). Runs on startup + after every restore.
+  async syncAdminPassword() {
+    const cfg = this._readConfig();
+    try {
+      await this._withPgClient(async (client) => {
+        // Make sure the table/function exist even if migrations haven't (idempotent).
+        await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
+        await client.query(
+          `CREATE TABLE IF NOT EXISTS public.platform_admin (
+             id smallint PRIMARY KEY DEFAULT 1,
+             password_hash text,
+             updated_at timestamptz NOT NULL DEFAULT now(),
+             CONSTRAINT platform_admin_singleton CHECK (id = 1))`
+        );
+        if (cfg.adminPasswordHash) {
+          await client.query(
+            `INSERT INTO public.platform_admin(id, password_hash, updated_at)
+             VALUES (1, $1, now())
+             ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`,
+            [cfg.adminPasswordHash]
+          );
+        } else {
+          const def = cfg.licenseKey || 'admin';
+          await client.query(
+            `INSERT INTO public.platform_admin(id, password_hash, updated_at)
+             VALUES (1, crypt($1, gen_salt('bf')), now())
+             ON CONFLICT (id) DO UPDATE SET password_hash = crypt($1, gen_salt('bf')), updated_at = now()`,
+            [def]
+          );
+        }
+        // Make sure PostgREST exposes verify_admin_password() (new on first install).
+        try { await client.query(`NOTIFY pgrst, 'reload schema'`); } catch { /* ignore */ }
+      });
+      console.log(`[ServiceManager] 🔐 Admin portal password synced (${cfg.adminPasswordHash ? 'custom' : 'default = license key'}).`);
+    } catch (e) {
+      console.warn('[ServiceManager] syncAdminPassword failed (non-fatal):', e.message);
     }
   }
 

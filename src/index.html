@@ -9,11 +9,21 @@
   <link rel="stylesheet" href="styles.css">
 </head>
 <body>
-  <!-- ═══ Title Bar (أزرار النافذة الأصلية من macOS فقط — أُزيلت المخصّصة لمنع الازدواج) ═══ -->
-  <div class="titlebar" id="titlebar">
+  <!-- ═══ Title Bar — macOS native traffic-lights stay top-left; the language
+       switcher is pinned to the PHYSICAL right (CSS `right` ignores RTL) so the
+       two never overlap, in any language. ═══ -->
+  <div class="titlebar" id="titlebar" style="position:relative;">
     <div style="flex:1"></div>
     <span class="titlebar-title">TexaCore ERP Installer</span>
     <div style="flex:1"></div>
+    <div style="position:absolute; right:14px; top:50%; transform:translateY(-50%); display:flex; align-items:center; -webkit-app-region:no-drag;">
+      <select id="lang-select" onchange="onLangChange()" style="background:transparent; color:var(--text-muted); border:1px solid var(--border); border-radius:6px; font-size:12px; padding:2px 6px; cursor:pointer; outline:none; -webkit-app-region:no-drag;">
+        <option value="ar">العربية</option>
+        <option value="en">English</option>
+        <option value="ru">Русский</option>
+        <option value="uk">Українська</option>
+      </select>
+    </div>
   </div>
 
   <!-- ═══ Main Content ═══ -->
@@ -35,7 +45,7 @@
         </div>
         <div>
           <h1 class="logo-text">TexaCore ERP</h1>
-          <p class="logo-sub">نظام إدارة الأعمال المتكامل</p>
+          <p class="logo-sub" data-i18n="app.subtitle">نظام إدارة الأعمال المتكامل</p>
         </div>
       </div>
     </div>
@@ -45,24 +55,24 @@
       <div class="status-card" id="card-database">
         <div class="status-icon" id="icon-database">🗄️</div>
         <div class="status-info">
-          <span class="status-label">قاعدة البيانات</span>
-          <span class="status-value" id="status-database">جاري الفحص...</span>
+          <span class="status-label" data-i18n="card.database">قاعدة البيانات</span>
+          <span class="status-value" id="status-database" data-i18n="status.checking">جاري الفحص...</span>
         </div>
         <div class="status-indicator" id="indicator-database"></div>
       </div>
       <div class="status-card" id="card-license">
         <div class="status-icon">🔑</div>
         <div class="status-info">
-          <span class="status-label">الترخيص</span>
-          <span class="status-value" id="status-license">غير مفعّل</span>
+          <span class="status-label" data-i18n="card.license">الترخيص</span>
+          <span class="status-value" id="status-license" data-i18n="status.inactive">غير مفعّل</span>
         </div>
         <div class="status-indicator" id="indicator-license"></div>
       </div>
       <div class="status-card" id="card-erp">
         <div class="status-icon">🏭</div>
         <div class="status-info">
-          <span class="status-label">النظام</span>
-          <span class="status-value" id="status-erp">متوقف</span>
+          <span class="status-label" data-i18n="card.system">النظام</span>
+          <span class="status-value" id="status-erp" data-i18n="status.stopped">متوقف</span>
         </div>
         <div class="status-indicator" id="indicator-erp"></div>
       </div>
@@ -73,27 +83,27 @@
 
     <!-- ═══ Step 2: License Activation ═══ -->
     <div class="panel" id="panel-license" style="display:none;">
-      <h2>🔐 تفعيل الترخيص</h2>
-      <p>أدخل مفتاح الترخيص الذي حصلت عليه:</p>
+      <h2 data-i18n="license.activateTitle">🔐 تفعيل الترخيص</h2>
+      <p data-i18n="license.enterKey">أدخل مفتاح الترخيص الذي حصلت عليه:</p>
       <div class="input-group">
         <input type="text" id="input-license" placeholder="LIC-2026-XXXXX-XXXXX" 
                class="input" dir="ltr" spellcheck="false" autocomplete="off">
       </div>
-      <button class="btn btn-primary" id="btn-activate" onclick="activateLicense()">
+      <button class="btn btn-primary" id="btn-activate" onclick="activateLicense()" data-i18n="license.activateBtn">
         ⚡ تفعيل الترخيص
       </button>
 
       <div class="separator">
-        <span>أو</span>
+        <span data-i18n="common.or">أو</span>
       </div>
 
-      <button class="btn btn-trial" id="btn-trial" onclick="startTrial()">
+      <button class="btn btn-trial" id="btn-trial" onclick="startTrial()" data-i18n="license.trialBtn">
         🎁 ابدأ تجربة مجانية — 30 يوم
       </button>
-      <p class="trial-note">نسخة تجريبية بكامل الميزات الأساسية بدون مفتاح</p>
+      <p class="trial-note" data-i18n="license.trialNote">نسخة تجريبية بكامل الميزات الأساسية بدون مفتاح</p>
 
       <div class="feedback" id="feedback-license"></div>
-      <button class="btn btn-ghost" id="btn-cancel-license" onclick="refreshState()" style="display:none; margin-top:12px; width:100%;">
+      <button class="btn btn-ghost" id="btn-cancel-license" onclick="refreshState()" style="display:none; margin-top:12px; width:100%;" data-i18n="common.back">
         العودة 🔙
       </button>
     </div>
@@ -106,32 +116,32 @@
           <span class="badge-expires" id="badge-expires">ينتهي: --</span>
         </div>
         <div style="display:flex; gap:8px;">
-          <button class="btn btn-ghost" style="padding:4px 8px; font-size:12px; height:auto; min-height:auto; color:var(--accent); border-color:var(--accent);" onclick="texacore.openBrowser('https://texacore.ai/pricing')">شراء/ترقية الترخيص 🛒</button>
-          <button class="btn btn-ghost" style="padding:4px 8px; font-size:12px; height:auto; min-height:auto;" onclick="showLicensePanel()">تغيير المفتاح 🔑</button>
+          <button class="btn btn-ghost" style="padding:4px 8px; font-size:12px; height:auto; min-height:auto; color:var(--accent); border-color:var(--accent);" onclick="texacore.openBrowser('https://texacore.ai/pricing')" data-i18n="license.upgrade">شراء/ترقية الترخيص 🛒</button>
+          <button class="btn btn-ghost" style="padding:4px 8px; font-size:12px; height:auto; min-height:auto;" onclick="showLicensePanel()" data-i18n="license.changeKey">تغيير المفتاح 🔑</button>
         </div>
       </div>
 
       <!-- Support code = the full license key (for fast support / activation / extension) -->
       <div id="support-code-row" style="display:flex; align-items:center; justify-content:space-between; gap:8px; margin-top:10px; padding:8px 12px; background:rgba(255,255,255,0.04); border:1px solid rgba(255,255,255,0.08); border-radius:8px;">
         <div style="display:flex; flex-direction:column; gap:2px; min-width:0;">
-          <span style="font-size:11px; color:#8a93a6;">كود الدعم / رقم النسخة</span>
+          <span style="font-size:11px; color:#8a93a6;" data-i18n="support.label">كود الدعم / رقم النسخة</span>
           <code id="support-code" style="font-size:14px; font-weight:600; letter-spacing:1px; font-family:monospace; color:#e6e9ef; user-select:all; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">—</code>
         </div>
-        <button class="btn btn-ghost" id="btn-copy-key" style="padding:4px 10px; font-size:12px; height:auto; min-height:auto; white-space:nowrap;" onclick="copySupportCode()">نسخ 📋</button>
+        <button class="btn btn-ghost" id="btn-copy-key" style="padding:4px 10px; font-size:12px; height:auto; min-height:auto; white-space:nowrap;" onclick="copySupportCode()" data-i18n="common.copy">نسخ 📋</button>
       </div>
 
       <div class="control-actions">
         <button class="btn btn-start" id="btn-start" onclick="startERP()">
           <span class="btn-icon">▶</span>
-          <span>تشغيل النظام</span>
+          <span data-i18n="btn.start">تشغيل النظام</span>
         </button>
         <button class="btn btn-stop" id="btn-stop" onclick="stopERP()" style="display:none;">
           <span class="btn-icon">⏹</span>
-          <span>إيقاف النظام</span>
+          <span data-i18n="btn.stop">إيقاف النظام</span>
         </button>
         <button class="btn btn-open" id="btn-open" onclick="openERP()" style="display:none;">
           <span class="btn-icon">🌐</span>
-          <span>فتح في المتصفح</span>
+          <span data-i18n="btn.open">فتح في المتصفح</span>
         </button>
       </div>
 
@@ -140,18 +150,18 @@
       <!-- Migration Progress (shown during first-run schema setup) -->
       <div id="migration-progress-box" style="display:none; margin-top:12px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-          <span style="font-size:12px; color:var(--text-muted); font-weight:600;">⚙️ إعداد قاعدة البيانات...</span>
+          <span style="font-size:12px; color:var(--text-muted); font-weight:600;" data-i18n="migration.setup">⚙️ إعداد قاعدة البيانات...</span>
           <span style="font-size:11px; color:var(--accent); font-weight:700;" id="migration-counter">0/0</span>
         </div>
         <div class="progress-bar-container">
           <div class="progress-bar-fill" id="migration-progress-bar" style="width:0%; transition: width 0.3s ease;"></div>
         </div>
-        <p class="progress-text" id="migration-progress-text" style="font-size:11px; margin-top:4px; color:var(--text-muted); direction:ltr; text-align:left;">جاري تطبيق المايقريشنز...</p>
+        <p class="progress-text" id="migration-progress-text" style="font-size:11px; margin-top:4px; color:var(--text-muted); direction:ltr; text-align:left;" data-i18n="migration.applying">جاري تطبيق المايقريشنز...</p>
       </div>
 
       <!-- Port config -->
       <div class="config-row">
-        <label>المنفذ (Port):</label>
+        <label data-i18n="port.label">المنفذ (Port):</label>
         <input type="number" id="input-port" value="80" class="input input-small" dir="ltr" min="1" max="65535">
       </div>
 
@@ -159,13 +169,30 @@
       <div class="cloud-box" id="cloud-box">
         <div class="cloud-header">
           <div>
-            <h3>🌐 الوصول السحابي (Cloud Access)</h3>
-            <p>اربط الخادم بالإنترنت للوصول من أي مكان</p>
+            <h3 data-i18n="cloud.title">🌐 الوصول السحابي (Cloud Access)</h3>
+            <p data-i18n="cloud.subtitle">اربط الخادم بالإنترنت للوصول من أي مكان</p>
           </div>
           <label class="toggle-switch">
             <input type="checkbox" id="input-cloud" onchange="toggleCloudView()">
             <span class="slider"></span>
           </label>
+        </div>
+
+        <!-- Admin portal password (بوابة الإدارة) — collapsible: a button reveals the change box, which hides again after saving -->
+        <div style="margin-top:14px;">
+          <button type="button" id="btn-toggle-admin-password" onclick="toggleAdminPasswordPanel()"
+            style="width:100%; display:flex; align-items:center; justify-content:space-between; gap:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px 14px; color:var(--text); font-size:13px; font-weight:600; cursor:pointer;">
+            <span data-i18n="admin.title">🔑 كلمة مرور بوابة الإدارة</span>
+            <span id="admin-password-chevron" style="color:var(--text-muted); font-size:12px; font-weight:500;" data-i18n="admin.toggleChange">تغيير ▾</span>
+          </button>
+          <div id="admin-password-panel" style="display:none; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px; margin-top:8px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:10px;" data-i18n="admin.desc">تحمي صفحة «عرض كافة الشركات» عند الدخول من الرابط السحابي. الافتراضية = مفتاح الترخيص (لا حاجة للقديمة).</div>
+            <div style="display:flex; gap:8px;">
+              <input type="password" id="input-admin-password" placeholder="كلمة مرور جديدة (4 أحرف+)" data-i18n-ph="admin.placeholder" class="input input-small" style="flex:1; height:40px;" autocomplete="new-password">
+              <button class="btn btn-primary" id="btn-save-admin-password" style="padding:0 20px; font-size:13px; white-space:nowrap; height:40px;" onclick="saveAdminPassword()" data-i18n="common.save">حفظ</button>
+            </div>
+            <div id="admin-password-status" style="font-size:11px; color:var(--text-muted); margin-top:8px; line-height:1.6;"></div>
+          </div>
         </div>
 
         <div id="cloud-content" style="display:none; margin-top: 16px;">
@@ -177,8 +204,8 @@
             </div>
             
             <div style="display:flex; justify-content:space-between; align-items:center; margin-top:12px;">
-              <span id="domain-status" style="font-size:12px; font-weight:600; color:var(--text-muted);">يرجى كتابة نطاق للتحقق...</span>
-              <button class="btn btn-primary" id="btn-register-domain" style="padding:8px 16px; font-size:13px;" onclick="registerSubdomain()" disabled>
+              <span id="domain-status" style="font-size:12px; font-weight:600; color:var(--text-muted);" data-i18n="subdomain.prompt">يرجى كتابة نطاق للتحقق...</span>
+              <button class="btn btn-primary" id="btn-register-domain" style="padding:8px 16px; font-size:13px;" onclick="registerSubdomain()" disabled data-i18n="subdomain.registerBtn">
                 حجز النطاق
               </button>
             </div>
@@ -187,16 +214,16 @@
           <!-- Active View (Registered) -->
           <div id="cloud-active" style="display:none; text-align:center;">
             <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
-              <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;">الرابط السحابي (من أي مكان):</div>
+              <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;" data-i18n="cloud.urlRemote">الرابط السحابي (من أي مكان):</div>
               <a href="#" id="cloud-url" style="color:var(--accent); font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openCloudUrl()">https://sub.texacore.ai</a>
             </div>
             <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
-              <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;">الرابط المحلي (داخل شبكتك):</div>
+              <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;" data-i18n="cloud.urlLocal">الرابط المحلي (داخل شبكتك):</div>
               <a href="#" id="local-url" style="color:#3b82f6; font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openLocalUrl()">http://127.0.0.1:80</a>
             </div>
             <div style="display:flex; justify-content:center; gap:16px;">
-              <span style="font-size:12px; color:var(--text-muted);">حالة الاتصال: <strong id="tunnel-status" style="color:var(--danger);">غير متصل 🔴</strong></span>
-              <span style="font-size:12px; color:var(--text-muted);"><strong style="color:var(--accent);">✓</strong> تم الحجز للترخيص</span>
+              <span style="font-size:12px; color:var(--text-muted);"><span data-i18n="cloud.connStatus">حالة الاتصال:</span> <strong id="tunnel-status" style="color:var(--danger);" data-i18n="cloud.disconnected">غير متصل 🔴</strong></span>
+              <span style="font-size:12px; color:var(--text-muted);"><strong style="color:var(--accent);">✓</strong> <span data-i18n="cloud.reserved">تم الحجز للترخيص</span></span>
             </div>
           </div>
         </div>
@@ -211,10 +238,11 @@
       <span class="build-date" id="build-date" style="font-size:10px; color:#64748b; margin-right:8px;"></span>
     </div>
     <div class="footer-right">
-      <span>© 2026 TexaCore — جميع الحقوق محفوظة</span>
+      <span data-i18n="footer.rights">© 2026 TexaCore — جميع الحقوق محفوظة</span>
     </div>
   </div>
 
+  <script src="i18n.js"></script>
   <script src="renderer.js"></script>
 </body>
 </html>

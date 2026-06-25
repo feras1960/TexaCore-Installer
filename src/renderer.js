@@ -6,6 +6,20 @@
 let currentState = {};
 let statusInterval = null;
 
+// ─── Language switch (titlebar <select>) ─────────────────────
+// Top-level so the inline onchange="onLangChange()" can reach it.
+async function onLangChange() {
+  const sel = document.getElementById('lang-select');
+  const lang = sel ? sel.value : 'en';
+  applyI18n(lang);
+  // Re-render JS-set strings (license date, status cards) so they switch instantly
+  // too, not only on the next poll.
+  try { if (currentState) { updateStatusCards(currentState); updateControlPanel(currentState); } } catch (e) { /* ignore */ }
+  if (window.texacore && window.texacore.setUiLang) {
+    try { await window.texacore.setUiLang(lang); } catch (e) { /* ignore */ }
+  }
+}
+
 // ─── Initialize ──────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
   // Display version + build date from package.json
@@ -47,6 +61,17 @@ document.addEventListener('DOMContentLoaded', async () => {
   }
 
   await refreshState();
+
+  // Determine + apply UI language: saved choice wins, else auto-detect from the
+  // OS locale (provided by main) or the browser language. t() reads CURRENT_LANG
+  // live, so any text set before this still resolves correctly once applied.
+  const saved = (currentState && currentState.config && currentState.config.uiLang) || null;
+  const lang = saved || detectLang((currentState && currentState.osLocale) || (navigator.language));
+  const sel = document.getElementById('lang-select');
+  if (sel) sel.value = lang;
+  applyI18n(lang);
+
+  refreshAdminPasswordStatus();
   // Adaptive polling: poll fast (1.5s) while the system is starting/not yet
   // connected so the status appears near-instantly, then relax to 5s once
   // connected. Avoids the old fixed 5s lag where the indicator felt slow.
@@ -142,14 +167,14 @@ function updateStatusCards(state) {
   if (dbStatus && dbIndicator) {
     if (state.containerRunning) {
       if (state.containerHealth === 'healthy') {
-        dbStatus.textContent = 'يعمل ✓';
+        dbStatus.textContent = t('status.running');
         dbIndicator.className = 'status-indicator green';
       } else {
-        dbStatus.textContent = 'جاري التشغيل...';
+        dbStatus.textContent = t('status.starting');
         dbIndicator.className = 'status-indicator blue';
       }
     } else {
-      dbStatus.textContent = 'متوقف';
+      dbStatus.textContent = t('status.stopped');
       dbIndicator.className = 'status-indicator yellow';
     }
   }
@@ -159,10 +184,10 @@ function updateStatusCards(state) {
   const licenseIndicator = document.getElementById('indicator-license');
   if (licenseStatus && licenseIndicator) {
     if (state.hasLicense) {
-      licenseStatus.textContent = 'مفعّل ✓';
+      licenseStatus.textContent = t('status.active');
       licenseIndicator.className = 'status-indicator green';
     } else {
-      licenseStatus.textContent = 'غير مفعّل';
+      licenseStatus.textContent = t('status.inactive');
       licenseIndicator.className = 'status-indicator red';
     }
   }
@@ -173,14 +198,14 @@ function updateStatusCards(state) {
   if (erpStatus && erpIndicator) {
     if (state.containerRunning) {
       if (state.containerHealth === 'healthy') {
-        erpStatus.textContent = 'يعمل ✓';
+        erpStatus.textContent = t('status.running');
         erpIndicator.className = 'status-indicator green';
       } else {
-        erpStatus.textContent = 'جاري التشغيل...';
+        erpStatus.textContent = t('status.starting');
         erpIndicator.className = 'status-indicator blue';
       }
     } else {
-      erpStatus.textContent = 'متوقف';
+      erpStatus.textContent = t('status.stopped');
       erpIndicator.className = 'status-indicator red';
     }
   }
@@ -189,10 +214,10 @@ function updateStatusCards(state) {
   const tunnelStatusEl = document.getElementById('tunnel-status');
   if (tunnelStatusEl) {
     if (state.containerRunning) {
-      tunnelStatusEl.textContent = 'متصل 🟢';
+      tunnelStatusEl.textContent = t('cloud.connected');
       tunnelStatusEl.style.color = 'var(--accent)';
     } else {
-      tunnelStatusEl.textContent = 'غير متصل 🔴';
+      tunnelStatusEl.textContent = t('cloud.disconnected');
       tunnelStatusEl.style.color = 'var(--danger)';
     }
   }
@@ -214,7 +239,8 @@ function updateControlPanel(state) {
     let exDate = '--';
     if (li.expires_at) {
       const d = new Date(li.expires_at);
-      exDate = new Intl.DateTimeFormat('ar-EG', {
+      const _dl = ({ ar: 'ar-EG', en: 'en-US', ru: 'ru-RU', uk: 'uk-UA' })[document.documentElement.lang] || 'en-US';
+      exDate = new Intl.DateTimeFormat(_dl, {
         calendar: 'gregory',
         numberingSystem: 'latn',
         day: 'numeric',
@@ -224,7 +250,7 @@ function updateControlPanel(state) {
     }
     
     const daysLeft = li.expires_at ? Math.ceil((new Date(li.expires_at) - Date.now()) / 86400000) : 0;
-    expiresEl.textContent = `ينتهي: ${exDate} (${daysLeft} يوم)`;
+    expiresEl.textContent = `${t('license.expiresPrefix')} ${exDate} (${daysLeft} ${t('common.daysUnit')})`;
 
     // Support code = the full license key (for fast support / activation / extension).
     const codeEl = document.getElementById('support-code');
@@ -238,7 +264,7 @@ function copySupportCode() {
   if (!code || code === '—') return;
   const flash = () => {
     const btn = document.getElementById('btn-copy-key');
-    if (btn) { const t = btn.textContent; btn.textContent = 'تم النسخ ✓'; setTimeout(() => { btn.textContent = t; }, 1500); }
+    if (btn) { const prev = btn.textContent; btn.textContent = t('common.copied'); setTimeout(() => { btn.textContent = prev; }, 1500); }
   };
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(code).then(flash).catch(() => fallbackCopy(code, flash));
@@ -281,36 +307,36 @@ async function activateLicense() {
 
   if (!key) {
     feedback.className = 'feedback error';
-    feedback.textContent = '❌ الرجاء إدخال مفتاح الترخيص';
+    feedback.textContent = t('license.errNoKey');
     input.focus();
     return;
   }
 
   btn.disabled = true;
-  btn.textContent = '⏳ جاري التفعيل...';
+  btn.textContent = t('license.activating');
   feedback.className = 'feedback loading';
-  feedback.textContent = 'جاري الاتصال بسيرفر التراخيص...';
+  feedback.textContent = t('license.connectingLicense');
 
   try {
     const result = await texacore.activateLicense(key);
 
     if (result.success) {
       feedback.className = 'feedback success';
-      feedback.textContent = `✅ تم التفعيل! الباقة: ${result.license.tier} — ينتهي: ${new Date(result.license.expires_at).toLocaleDateString('ar')}`;
+      feedback.textContent = `${t('license.activatedOk')} ${result.license.tier} — ${t('license.expiresPrefix')} ${new Date(result.license.expires_at).toLocaleDateString()}`;
       
       // Refresh after 1 second
       setTimeout(refreshState, 1000);
     } else {
       feedback.className = 'feedback error';
-      feedback.textContent = `❌ فشل التفعيل: ${result.error}`;
+      feedback.textContent = `${t('license.activateFailed')} ${result.error}`;
     }
   } catch (err) {
     feedback.className = 'feedback error';
-    feedback.textContent = `❌ خطأ: ${err.message}`;
+    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
   }
 
   btn.disabled = false;
-  btn.textContent = '⚡ تفعيل الترخيص';
+  btn.textContent = t('license.activateBtn');
 }
 
 function showLicensePanel() {
@@ -325,9 +351,9 @@ async function startTrial() {
   const feedback = document.getElementById('feedback-license');
 
   btn.disabled = true;
-  btn.textContent = '⏳ جاري إنشاء النسخة التجريبية...';
+  btn.textContent = t('trial.creating');
   feedback.className = 'feedback loading';
-  feedback.textContent = 'جاري الاتصال بالسيرفر...';
+  feedback.textContent = t('trial.connecting');
 
   try {
     const result = await texacore.startTrial();
@@ -335,8 +361,8 @@ async function startTrial() {
     if (result.success) {
       feedback.className = 'feedback success';
       const msg = result.existing
-        ? '✅ لديك نسخة تجريبية بالفعل! يتم التفعيل...'
-        : '🎉 تم تفعيل النسخة التجريبية — 30 يوم مجاناً!';
+        ? t('trial.alreadyHave')
+        : t('trial.activated');
       feedback.textContent = msg;
       setTimeout(refreshState, 1000);
     } else {
@@ -345,11 +371,11 @@ async function startTrial() {
     }
   } catch (err) {
     feedback.className = 'feedback error';
-    feedback.textContent = `❌ خطأ: ${err.message}`;
+    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
   }
 
   btn.disabled = false;
-  btn.textContent = '🎁 ابدأ تجربة مجانية — 30 يوم';
+  btn.textContent = t('license.trialBtn');
 }
 
 // ─── Start ERP ───────────────────────────────────────────────
@@ -362,14 +388,14 @@ async function startERP() {
 
   if (enableCloud && !subdomain) {
     feedback.className = 'feedback error';
-    feedback.textContent = '❌ يرجى حجز النطاق المخصص أولاً';
+    feedback.textContent = t('cloud.errReserveFirst');
     return;
   }
 
   btn.disabled = true;
-  btn.innerHTML = '<span class="btn-icon">⏳</span><span>جاري التشغيل...</span>';
+  btn.innerHTML = `<span class="btn-icon">⏳</span><span>${t('status.starting')}</span>`;
   feedback.className = 'feedback loading';
-  feedback.textContent = 'جاري بدء تشغيل الخدمات...';
+  feedback.textContent = t('system.startingServices');
 
   try {
     const result = await texacore.startERP({
@@ -386,12 +412,12 @@ async function startERP() {
       // Show migration summary if available
       let migInfo = '';
       if (result.migrations && result.migrations.applied > 0) {
-        migInfo = ` (${result.migrations.applied} مايقريشن مطبّق)`;
+        migInfo = ` (${result.migrations.applied} ${t('migration.migrationsApplied')})`;
       }
 
       feedback.textContent = result.ready
-        ? `✅ النظام يعمل!${migInfo} → http://localhost:${result.port}`
-        : '⏳ النظام يُحمّل... انتظر قليلاً ثم افتح المتصفح';
+        ? `${t('system.works')}${migInfo} → http://localhost:${result.port}`
+        : t('system.loadingWait');
 
       // Hide migration progress box
       const migBox = document.getElementById('migration-progress-box');
@@ -404,11 +430,11 @@ async function startERP() {
     }
   } catch (err) {
     feedback.className = 'feedback error';
-    feedback.textContent = `❌ خطأ: ${err.message}`;
+    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
   }
 
   btn.disabled = false;
-  btn.innerHTML = '<span class="btn-icon">▶</span><span>تشغيل النظام</span>';
+  btn.innerHTML = `<span class="btn-icon">▶</span><span>${t('btn.start')}</span>`;
 }
 
 // ─── Stop ERP ────────────────────────────────────────────────
@@ -418,13 +444,13 @@ async function stopERP() {
 
   btn.disabled = true;
   feedback.className = 'feedback loading';
-  feedback.textContent = 'جاري إيقاف النظام...';
+  feedback.textContent = t('system.stopping');
 
   try {
     const result = await texacore.stopERP();
     if (result.success) {
       feedback.className = 'feedback info';
-      feedback.textContent = '⏹ تم إيقاف النظام';
+      feedback.textContent = t('system.stopped');
       await refreshState();
     } else {
       feedback.className = 'feedback error';
@@ -432,7 +458,7 @@ async function stopERP() {
     }
   } catch (err) {
     feedback.className = 'feedback error';
-    feedback.textContent = `❌ خطأ: ${err.message}`;
+    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
   }
 
   btn.disabled = false;
@@ -464,7 +490,7 @@ async function toggleCloudView() {
   const statusEl = document.getElementById('tunnel-status');
   try {
     if (statusEl) {
-      statusEl.textContent = isChecked ? 'جاري الاتصال... ⏳' : 'جاري الفصل... ⏳';
+      statusEl.textContent = isChecked ? t('cloud.connecting') : t('cloud.disconnecting');
       statusEl.style.color = 'var(--warning)';
     }
     if (window.texacore && window.texacore.setCloudAccess) {
@@ -472,12 +498,75 @@ async function toggleCloudView() {
       if (currentState && currentState.config) currentState.config.enableCloud = isChecked;
     }
     if (statusEl) {
-      if (isChecked) { statusEl.textContent = 'متصل (قد يلزم ثوانٍ) 🟢'; statusEl.style.color = 'var(--accent)'; }
-      else { statusEl.textContent = 'مفصول — الوصول السحابي متوقّف 🔴'; statusEl.style.color = 'var(--danger)'; }
+      if (isChecked) { statusEl.textContent = t('cloud.connectedMaybe'); statusEl.style.color = 'var(--accent)'; }
+      else { statusEl.textContent = t('cloud.disconnectedFull'); statusEl.style.color = 'var(--danger)'; }
     }
   } catch (e) {
     console.error('[Cloud] setCloudAccess failed:', e);
-    if (statusEl) { statusEl.textContent = 'تعذّر التبديل ⚠️'; statusEl.style.color = 'var(--danger)'; }
+    if (statusEl) { statusEl.textContent = t('cloud.toggleFailed'); statusEl.style.color = 'var(--danger)'; }
+  }
+}
+
+// ─── Admin portal password (بوابة الإدارة) ──────────────────
+async function saveAdminPassword() {
+  const input = document.getElementById('input-admin-password');
+  const statusEl = document.getElementById('admin-password-status');
+  const btn = document.getElementById('btn-save-admin-password');
+  const val = (input?.value || '').trim();
+  if (val.length < 4) {
+    if (statusEl) { statusEl.textContent = t('admin.tooShort'); statusEl.style.color = 'var(--danger)'; }
+    return;
+  }
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    const res = await window.texacore.setAdminPassword(val);
+    if (res && res.success) {
+      if (input) input.value = '';
+      if (statusEl) { statusEl.textContent = t('admin.savedOk'); statusEl.style.color = 'var(--accent)'; }
+      // Collapse the box shortly after a successful change.
+      setTimeout(() => {
+        const panel = document.getElementById('admin-password-panel');
+        const chevron = document.getElementById('admin-password-chevron');
+        if (panel) panel.style.display = 'none';
+        if (chevron) chevron.textContent = t('admin.toggleChange');
+      }, 1600);
+    } else {
+      if (statusEl) { statusEl.textContent = '⚠️ ' + ((res && res.error) || t('admin.saveFailed')); statusEl.style.color = 'var(--danger)'; }
+    }
+  } catch (e) {
+    if (statusEl) { statusEl.textContent = '⚠️ ' + e.message; statusEl.style.color = 'var(--danger)'; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = t('common.save'); }
+  }
+}
+
+// Reflect whether a custom admin password is set (vs the license-key default).
+async function refreshAdminPasswordStatus() {
+  const statusEl = document.getElementById('admin-password-status');
+  if (!statusEl || !window.texacore?.getAdminPasswordStatus) return;
+  try {
+    const s = await window.texacore.getAdminPasswordStatus();
+    if (s && s.success) {
+      statusEl.textContent = s.customized
+        ? t('admin.statusCustom')
+        : t('admin.statusDefault');
+      statusEl.style.color = 'var(--text-muted)';
+    }
+  } catch { /* ignore */ }
+}
+
+// Collapsible: the button reveals the change-password box; it hides again
+// after a successful save (or when toggled off).
+function toggleAdminPasswordPanel() {
+  const panel = document.getElementById('admin-password-panel');
+  const chevron = document.getElementById('admin-password-chevron');
+  if (!panel) return;
+  const show = !panel.style.display || panel.style.display === 'none';
+  panel.style.display = show ? 'block' : 'none';
+  if (chevron) chevron.textContent = show ? t('admin.toggleClose') : t('admin.toggleChange');
+  if (show) {
+    refreshAdminPasswordStatus();
+    setTimeout(() => document.getElementById('input-admin-password')?.focus(), 50);
   }
 }
 
@@ -487,7 +576,7 @@ function checkSubdomain(value) {
   const btn = document.getElementById('btn-register-domain');
   
   if (!value) {
-    statusEl.textContent = 'يرجى كتابة نطاق للتحقق...';
+    statusEl.textContent = t('subdomain.prompt');
     statusEl.style.color = 'var(--text-muted)';
     btn.disabled = true;
     return;
@@ -496,13 +585,13 @@ function checkSubdomain(value) {
   // Basic format validation
   const cleaned = value.toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (cleaned !== value || !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(value)) {
-    statusEl.textContent = '❌ يُسمح فقط بأحرف إنجليزية صغيرة وأرقام وشرطات';
+    statusEl.textContent = t('subdomain.onlyLatin');
     statusEl.style.color = 'var(--danger)';
     btn.disabled = true;
     return;
   }
 
-  statusEl.textContent = 'جاري التحقق ⏳...';
+  statusEl.textContent = t('subdomain.checking');
   statusEl.style.color = 'var(--warning)';
   btn.disabled = true;
 
@@ -517,20 +606,20 @@ function checkSubdomain(value) {
       const data = await res.json();
 
       if (data.available) {
-        statusEl.textContent = '✅ النطاق متاح!';
+        statusEl.textContent = t('subdomain.available');
         statusEl.style.color = 'var(--accent)';
         btn.disabled = false;
       } else {
-        const reason = data.reason === 'reserved' ? 'اسم محجوز' : 
-                       data.reason === 'taken' ? 'محجوز مسبقاً' : 
-                       data.reason === 'invalid_format' ? 'صيغة غير صحيحة' : 'غير متاح';
-        statusEl.textContent = `❌ النطاق غير متاح — ${reason}`;
+        const reason = data.reason === 'reserved' ? t('subdomain.reservedName') :
+                       data.reason === 'taken' ? t('subdomain.taken') :
+                       data.reason === 'invalid_format' ? t('subdomain.badFormat') : t('subdomain.unavailable');
+        statusEl.textContent = `❌ ${reason}`;
         statusEl.style.color = 'var(--danger)';
         btn.disabled = true;
       }
     } catch (err) {
       // Offline fallback — allow registration (server will validate)
-      statusEl.textContent = '⚠️ تعذر التحقق — جرّب التسجيل';
+      statusEl.textContent = t('subdomain.checkFailed');
       statusEl.style.color = 'var(--warning)';
       btn.disabled = false;
     }
@@ -545,8 +634,8 @@ async function registerSubdomain() {
   if (!input.value) return;
 
   btn.disabled = true;
-  btn.textContent = '⏳ جاري الحجز...';
-  
+  btn.textContent = t('subdomain.reserving');
+
   try {
     const result = await window.texacore.registerSubdomain(input.value);
     
@@ -559,17 +648,17 @@ async function registerSubdomain() {
       document.getElementById('cloud-active').style.display = 'block';
       document.getElementById('cloud-url').textContent = result.url || `https://${input.value}.texacore.ai`;
       
-      alert('🎉 تم حجز النطاق بنجاح! سيتم تفعيله عند تشغيل النظام.');
+      alert(t('subdomain.reserved'));
     } else {
-      statusEl.textContent = `❌ فشل الحجز: ${result.error}`;
+      statusEl.textContent = `❌ ${result.error}`;
       statusEl.style.color = 'var(--danger)';
-      btn.textContent = 'التسجيل الآن';
+      btn.textContent = t('subdomain.registerNow');
       btn.disabled = false;
     }
   } catch (err) {
-    statusEl.textContent = `❌ خطأ غير متوقع: ${err.message}`;
+    statusEl.textContent = `❌ ${err.message}`;
     statusEl.style.color = 'var(--danger)';
-    btn.textContent = 'التسجيل الآن';
+    btn.textContent = t('subdomain.registerNow');
     btn.disabled = false;
   }
 }

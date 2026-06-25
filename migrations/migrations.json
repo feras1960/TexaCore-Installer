@@ -1,7 +1,7 @@
 {
   "version": "2026.05.04",
   "generated": "2026-06-24T10:51:21Z",
-  "totalFiles": 175,
+  "totalFiles": 176,
   "migrations": [
     {
       "order": 1,
@@ -877,6 +877,11 @@
       "order": 174,
       "file": "20260624a_schema_catchup.sql",
       "name": "20260624a_schema_catchup"
+    },
+    {
+      "order": 175,
+      "file": "20260625_platform_admin_password.sql",
+      "name": "20260625_platform_admin_password"
     }
   ]
 }
