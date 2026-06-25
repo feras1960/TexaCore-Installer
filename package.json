@@ -148,14 +148,17 @@
       "deleteAppDataOnUninstall": false
     },
     "dmg": {
+      "background": "build/dmg-background.png",
+      "iconSize": 110,
+      "iconTextSize": 13,
       "contents": [
         {
           "x": 130,
-          "y": 220
+          "y": 218
         },
         {
           "x": 410,
-          "y": 220,
+          "y": 218,
           "type": "link",
           "path": "/Applications"
         }
