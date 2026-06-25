@@ -583,10 +583,29 @@ class BackupManager {
         // Clean up temp file
         try { fs.unlinkSync(tmpFile); } catch (e) { /* ignore */ }
 
+        // ON_ERROR_STOP=off swallows per-statement failures, so a COPY that hits
+        // a column mismatch / CHECK / unique error is skipped and that whole table
+        // stays empty — silently. Surface these: write the ERROR lines (which row/
+        // table didn't load and why) to a log next to the .tcdb so the cause is
+        // visible instead of guessed. (Triggers + FK are already off via replica
+        // role, so anything here is a real schema/data mismatch.)
+        const errorLines = (stderr || '').split('\n')
+          .filter(l => /ERROR:/.test(l) && !/already exists|does not exist, skipping/i.test(l));
+        if (errorLines.length) {
+          try {
+            const logPath = this.backupPath + '.restore-errors.log';
+            fs.writeFileSync(logPath,
+              `Restore of ${path.basename(this.backupPath)} — ${errorLines.length} statement error(s) ` +
+              `(these tables/rows did NOT load):\n\n` + errorLines.join('\n') + '\n');
+            console.warn(`[BackupManager] ⚠️ ${errorLines.length} restore COPY errors — logged to ${logPath}`);
+            errorLines.slice(0, 25).forEach(l => console.warn('  ' + l));
+          } catch (e) { /* logging is best-effort */ }
+        }
+
         if (err && stderr && stderr.includes('FATAL')) {
           reject(new Error(`Restore failed: ${stderr}`));
         } else {
-          resolve();
+          resolve({ copyErrors: errorLines });
         }
       });
     });
