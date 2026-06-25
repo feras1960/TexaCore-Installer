@@ -1,7 +1,7 @@
 {
   "version": "2026.05.04",
   "generated": "2026-06-25T20:16:50Z",
-  "totalFiles": 181,
+  "totalFiles": 182,
   "migrations": [
     {
       "order": 1,
@@ -907,6 +907,11 @@
       "order": 180,
       "file": "20260626d_relax_legacy_notnull.sql",
       "name": "20260626d_relax_legacy_notnull"
+    },
+    {
+      "order": 181,
+      "file": "20260626e_align_notnull_to_cloud.sql",
+      "name": "20260626e_align_notnull_to_cloud"
     }
   ]
 }
