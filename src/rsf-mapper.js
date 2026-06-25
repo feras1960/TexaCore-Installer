@@ -1514,10 +1514,10 @@ class RsfMapper {
 
       await pgClient.query(`
         INSERT INTO warehouses
-        (id, company_id, tenant_id, branch_id, name_ar, name_en, code, is_active, warehouse_type)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,true,'regular')
+        (id, company_id, tenant_id, branch_id, name, name_ar, name_en, code, is_active, warehouse_type)
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,true,'regular')
         ON CONFLICT DO NOTHING
-      `, [whId, this.companyId, this.tenantId, defaultBranchId, realName, nameEn, code]);
+      `, [whId, this.companyId, this.tenantId, defaultBranchId, realName, realName, nameEn, code]);
 
       this.warehouseMap[String(num)] = whId;
       if (num === 1) this.warehouseMap['main'] = whId;
