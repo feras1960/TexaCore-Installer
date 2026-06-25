@@ -1025,7 +1025,7 @@ window.__TEXACORE_CONFIG__ = {
   }
 
   // ─── Start Cloudflare Tunnel ─────────────────────────────────
-  async startCloudflared({ skipReregister = false } = {}) {
+  async startCloudflared({ skipReregister = false, skipVerify = false } = {}) {
     if (this.processes.cloudflared) return;
 
     // Read config to check if cloud access is enabled
@@ -1052,12 +1052,17 @@ window.__TEXACORE_CONFIG__ = {
     // exists first; if it's gone, skip the tunnel — the app prompts the user to
     // create a new subdomain. (Only a definitive NXDOMAIN counts as "deleted";
     // a transient network/DNS error falls through and still attempts the tunnel.)
-    try {
-      await require('dns').promises.resolve4(`${config.subdomain}.texacore.ai`);
-    } catch (dnsErr) {
-      if (dnsErr && (dnsErr.code === 'ENOTFOUND' || dnsErr.code === 'ENODATA')) {
-        console.warn(`[ServiceManager] ⚠️ Subdomain "${config.subdomain}.texacore.ai" no longer resolves — it was deleted. Skipping tunnel; create a new subdomain from the app.`);
-        return;
+    // skipVerify is passed right after a fresh registration: the record was just
+    // created and may not have propagated to public DNS yet, but cloudflared
+    // still connects to the edge via the token regardless.
+    if (!skipVerify) {
+      try {
+        await require('dns').promises.resolve4(`${config.subdomain}.texacore.ai`);
+      } catch (dnsErr) {
+        if (dnsErr && (dnsErr.code === 'ENOTFOUND' || dnsErr.code === 'ENODATA')) {
+          console.warn(`[ServiceManager] ⚠️ Subdomain "${config.subdomain}.texacore.ai" no longer resolves — it was deleted. Skipping tunnel; create a new subdomain from the app.`);
+          return;
+        }
       }
     }
 

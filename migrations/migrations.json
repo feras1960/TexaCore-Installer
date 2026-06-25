@@ -1,7 +1,7 @@
 {
   "version": "2026.05.04",
   "generated": "2026-06-25T20:16:50Z",
-  "totalFiles": 178,
+  "totalFiles": 179,
   "migrations": [
     {
       "order": 1,
@@ -892,6 +892,11 @@
       "order": 177,
       "file": "20260626a_local_schema_catchup.sql",
       "name": "20260626a_local_schema_catchup"
+    },
+    {
+      "order": 178,
+      "file": "20260626b_full_schema_sync.sql",
+      "name": "20260626b_full_schema_sync"
     }
   ]
 }

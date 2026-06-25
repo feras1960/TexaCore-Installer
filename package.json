@@ -1,7 +1,7 @@
 {
   "name": "texacore-installer",
-  "version": "1.5.21",
-  "buildDate": "2026-06-25T20:42:17Z",
+  "version": "1.5.22",
+  "buildDate": "2026-06-25T21:27:16Z",
   "description": "TexaCore ERP — Self-Hosted Installer",
   "main": "src/main.js",
   "author": "TexaCore <info@texacore.com>",

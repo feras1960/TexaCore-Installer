@@ -1145,6 +1145,16 @@ ipcMain.handle('register-subdomain', async (_, subdomain) => {
       config.enableCloud = true;
       config.tunnelToken = result.tunnel_token;
       saveConfig(config);
+      // Bring the tunnel up with the freshly-minted token. Stop any running
+      // cloudflared first (it may still hold the OLD/deleted token), then start
+      // with the new one. skipVerify: the just-created DNS record may not have
+      // propagated to public DNS yet, but cloudflared connects to the Cloudflare
+      // edge via the token regardless — so the tunnel comes up right away.
+      if (svcManager) {
+        try { await svcManager.stopCloudflared(); } catch { /* wasn't running */ }
+        svcManager.startCloudflared({ skipReregister: true, skipVerify: true })
+          .catch(e => console.warn('[register-subdomain] tunnel start failed:', e.message));
+      }
       return { success: true, url: result.url };
     }
 
