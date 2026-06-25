@@ -1587,7 +1587,11 @@ ${subscriptionSql}
       anonKey,
       accessToken,
       refreshToken,
-      supabaseUrl: `http://localhost:${apiPort}`
+      // The SPA must talk to the unified API gateway (routes /auth + /rest +
+      // adds CORS), NOT GoTrue (9999) directly — otherwise the desktop login &
+      // REST calls are CORS-blocked / 404. (apiPort above stays GoTrue only for
+      // the server-side admin-user call.)
+      supabaseUrl: `http://localhost:${(svcManager && svcManager.activeApiPort) || ServiceManager.API_PORT || 54321}`
     };
 
   } catch (err) {
