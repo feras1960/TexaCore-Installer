@@ -102,6 +102,13 @@ async function refreshStatus() {
     // updateControlPanel also refreshes the license badge (tier + expiry), so a
     // cloud-synced tier change / extension shows here within one poll (~5s).
     updateControlPanel(state);
+    // The employee link's company-id fetch can miss on first paint (before the DB
+    // is up). While the cloud box is shown and the link is still the bare fallback
+    // (no ?c=), re-resolve it each poll until the short code lands, then stop.
+    const empEl = document.getElementById('employee-url');
+    if (state.config && state.config.subdomain && empEl && !String(empEl.dataset.url || '').includes('?c=')) {
+      setEmployeeLink(state.config.subdomain);
+    }
   } catch { /* silent */ }
 }
 
@@ -155,18 +162,9 @@ function updateUI(state) {
     document.getElementById('local-url').textContent = `http://${localIp}${portStr}`;
 
     // Set Employee direct-login link (manager shares this with the company's staff).
-    // The `?c=<name>` param is read by LocalLauncher and pre-selects the company.
-    const empBox = document.getElementById('employee-link-box');
-    const empEl = document.getElementById('employee-url');
-    const empCompany = state.config.companies?.[0]?.name;
-    if (empBox && empEl && empCompany) {
-      const empUrl = `https://${state.config.subdomain}.texacore.ai/login?c=${encodeURIComponent(empCompany)}`;
-      empEl.textContent = empUrl;
-      empEl.dataset.url = empUrl;
-      empBox.style.display = 'block';
-    } else if (empBox) {
-      empBox.style.display = 'none';
-    }
+    // Uses a SHORT, clean company code (the company UUID's first segment, e.g. 6b6e4674)
+    // instead of the URL-encoded Arabic name. LocalLauncher resolves the code → company.
+    setEmployeeLink(state.config.subdomain);
   } else {
     document.getElementById('cloud-setup').style.display = 'block';
     document.getElementById('cloud-active').style.display = 'none';
@@ -523,6 +521,32 @@ function openCloudUrl() {
 
 function openLocalUrl() {
   openERP(); // Always open localhost to prevent Vite strict MIME issues locally
+}
+
+// Build the employee direct-login link with a SHORT, clean company code (the
+// company UUID's first segment) so it carries no URL-encoded Arabic. Fetches the
+// id from the local admin API; falls back to the bare /login URL when the system
+// isn't running (still valid — the employee just picks the company once).
+async function setEmployeeLink(subdomain) {
+  const empBox = document.getElementById('employee-link-box');
+  const empEl = document.getElementById('employee-url');
+  if (!empBox || !empEl) return;
+  if (!subdomain) { empBox.style.display = 'none'; return; }
+  let code = '';
+  try {
+    const r = await fetch('http://127.0.0.1:1960/api/companies');
+    if (r.ok) {
+      const j = await r.json();
+      const companies = j.companies || [];
+      code = String(companies[0] && companies[0].id || '').split('-')[0];  // e.g. 6b6e4674
+    }
+  } catch (e) { /* services may be down — fall back to the base link */ }
+  const url = code
+    ? `https://${subdomain}.texacore.ai/login?c=${code}`
+    : `https://${subdomain}.texacore.ai/login`;
+  empEl.textContent = url;
+  empEl.dataset.url = url;
+  empBox.style.display = 'block';
 }
 
 function openEmployeeUrl() {
