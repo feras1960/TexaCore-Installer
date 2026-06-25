@@ -1,0 +1,53 @@
+name: Build Windows Installer
+
+# Builds the Windows (.exe / NSIS) installer on every version tag (vX.Y.Z) and
+# publishes it to that tag's GitHub release, so the landing page's "Windows"
+# button (which reads the latest release's assets) appears automatically.
+# macOS is still built manually for now (ad-hoc signing — see release docs);
+# a mac job can be added here later.
+#
+# Flow: bump package.json version → git tag vX.Y.Z → push the tag.
+# The .exe + latest.yml land on the release for that tag (as a draft if the
+# release doesn't exist yet — review and publish it).
+# Also uploaded as a workflow artifact as a backup on every run.
+
+on:
+  push:
+    tags:
+      - 'v*'
+  workflow_dispatch: {}
+
+permissions:
+  contents: write
+
+jobs:
+  windows:
+    runs-on: windows-latest
+    timeout-minutes: 40
+    steps:
+      - name: Checkout (incl. bundled bin/windows-x64 binaries)
+        uses: actions/checkout@v4
+
+      - name: Setup Node
+        uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Install dependencies
+        run: npm install --no-audit --no-fund
+
+      - name: Build & publish Windows installer
+        run: npm run build:win -- --publish always
+        env:
+          GH_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+      - name: Upload installer as workflow artifact (backup)
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-installer
+          path: |
+            dist/*.exe
+            dist/*.exe.blockmap
+            dist/latest.yml
+          if-no-files-found: ignore
