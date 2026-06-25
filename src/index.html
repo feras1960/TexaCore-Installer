@@ -102,6 +102,11 @@
       </button>
       <p class="trial-note" data-i18n="license.trialNote">نسخة تجريبية بكامل الميزات الأساسية بدون مفتاح</p>
 
+      <button class="btn btn-trial" id="btn-free" onclick="startFree()" style="background:#0d9488; border-color:#0d9488; margin-top:12px;" data-i18n="license.freeBtn">
+        🆓 ابدأ مجاناً — للأبد (بدون إنترنت)
+      </button>
+      <p class="trial-note" data-i18n="license.freeNote">باقة مجانية دائمة بحدود ذكية — تعمل بدون إنترنت ولا تحتاج مفتاحاً</p>
+
       <div class="feedback" id="feedback-license"></div>
       <button class="btn btn-ghost" id="btn-cancel-license" onclick="refreshState()" style="display:none; margin-top:12px; width:100%;" data-i18n="common.back">
         العودة 🔙
@@ -220,6 +225,14 @@
             <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
               <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;" data-i18n="cloud.urlLocal">الرابط المحلي (داخل شبكتك):</div>
               <a href="#" id="local-url" style="color:#3b82f6; font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openLocalUrl()">http://127.0.0.1:80</a>
+            </div>
+            <div id="employee-link-box" style="display:none; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
+              <div style="font-size:11px; color:var(--text-muted); margin-bottom:6px; font-weight:600;" data-i18n="cloud.urlEmployee">رابط الموظفين (دخول مباشر للشركة):</div>
+              <div style="display:flex; align-items:center; gap:8px; justify-content:center; flex-wrap:wrap;">
+                <a href="#" id="employee-url" style="color:#16a34a; font-family:monospace; font-size:13px; font-weight:bold; text-decoration:none; word-break:break-all;" onclick="openEmployeeUrl(); return false;">—</a>
+                <button id="copy-employee-url" onclick="copyEmployeeUrl()" style="flex-shrink:0; background:var(--accent); color:#fff; border:none; border-radius:6px; padding:5px 12px; font-size:11px; font-weight:600; cursor:pointer;" data-i18n="cloud.copyLink">نسخ</button>
+              </div>
+              <div style="font-size:10px; color:var(--text-muted); margin-top:6px;" data-i18n="cloud.employeeHint">أرسل هذا الرابط لموظفي هذه الشركة ليدخلوا مباشرةً.</div>
             </div>
             <div style="display:flex; justify-content:center; gap:16px;">
               <span style="font-size:12px; color:var(--text-muted);"><span data-i18n="cloud.connStatus">حالة الاتصال:</span> <strong id="tunnel-status" style="color:var(--danger);" data-i18n="cloud.disconnected">غير متصل 🔴</strong></span>

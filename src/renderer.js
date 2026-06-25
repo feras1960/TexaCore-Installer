@@ -153,6 +153,20 @@ function updateUI(state) {
     const port = state.config.port || 80;
     const portStr = port === 80 ? '' : `:${port}`;
     document.getElementById('local-url').textContent = `http://${localIp}${portStr}`;
+
+    // Set Employee direct-login link (manager shares this with the company's staff).
+    // The `?c=<name>` param is read by LocalLauncher and pre-selects the company.
+    const empBox = document.getElementById('employee-link-box');
+    const empEl = document.getElementById('employee-url');
+    const empCompany = state.config.companies?.[0]?.name;
+    if (empBox && empEl && empCompany) {
+      const empUrl = `https://${state.config.subdomain}.texacore.ai/login?c=${encodeURIComponent(empCompany)}`;
+      empEl.textContent = empUrl;
+      empEl.dataset.url = empUrl;
+      empBox.style.display = 'block';
+    } else if (empBox) {
+      empBox.style.display = 'none';
+    }
   } else {
     document.getElementById('cloud-setup').style.display = 'block';
     document.getElementById('cloud-active').style.display = 'none';
@@ -378,6 +392,36 @@ async function startTrial() {
   btn.textContent = t('license.trialBtn');
 }
 
+// ─── Start Free (offline) ────────────────────────────────────
+async function startFree() {
+  const btn = document.getElementById('btn-free');
+  const feedback = document.getElementById('feedback-license');
+
+  btn.disabled = true;
+  btn.textContent = t('free.creating');
+  feedback.className = 'feedback loading';
+  feedback.textContent = t('free.activating');
+
+  try {
+    const result = await texacore.startFree();
+
+    if (result.success) {
+      feedback.className = 'feedback success';
+      feedback.textContent = t('free.activated');
+      setTimeout(refreshState, 1000);
+    } else {
+      feedback.className = 'feedback error';
+      feedback.textContent = `❌ ${result.error}`;
+    }
+  } catch (err) {
+    feedback.className = 'feedback error';
+    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
+  }
+
+  btn.disabled = false;
+  btn.textContent = t('license.freeBtn');
+}
+
 // ─── Start ERP ───────────────────────────────────────────────
 async function startERP() {
   const btn = document.getElementById('btn-start');
@@ -479,6 +523,32 @@ function openCloudUrl() {
 
 function openLocalUrl() {
   openERP(); // Always open localhost to prevent Vite strict MIME issues locally
+}
+
+function openEmployeeUrl() {
+  const url = document.getElementById('employee-url')?.dataset.url;
+  if (url) texacore.openBrowser(url);
+}
+
+async function copyEmployeeUrl() {
+  const url = document.getElementById('employee-url')?.dataset.url;
+  if (!url) return;
+  try {
+    await navigator.clipboard.writeText(url);
+  } catch {
+    // Fallback for environments without the async clipboard API
+    const ta = document.createElement('textarea');
+    ta.value = url;
+    document.body.appendChild(ta);
+    ta.select();
+    document.execCommand('copy');
+    document.body.removeChild(ta);
+  }
+  const btn = document.getElementById('copy-employee-url');
+  if (btn) {
+    btn.textContent = t('cloud.copied');
+    setTimeout(() => { btn.textContent = t('cloud.copyLink'); }, 1500);
+  }
 }
 
 // ─── Cloud Logic ─────────────────────────────────────────────

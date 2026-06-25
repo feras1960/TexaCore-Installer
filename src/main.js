@@ -655,6 +655,37 @@ class HeartbeatSender {
       geo_country_code: geoCountryCode,
     };
 
+    // FREE installs: register/refresh the stable cloud number (binds the local
+    // placeholder → FREE-2026 on the first online beat), track last-seen, honor a
+    // remote revoke/suspend, sync the smart limits, and back up to our cloud.
+    if (config.isFree === true || (licenseGuard && licenseGuard.getInfo()?.tier === 'free')) {
+      const reg = await registerFreeOnline();   // null when offline
+      if (reg && reg.license_key) {
+        if (reg.license_key !== config.licenseKey) {
+          config.licenseKey = reg.license_key;
+          saveConfig(config);
+          try { const l = licenseGuard.loadLicense(); if (l) { l.license_key = reg.license_key; licenseGuard.saveLicense(l); } } catch (e) {}
+          this._lastPayload.license_key = reg.license_key;
+          fileLog('[Heartbeat] 🆓→🔗 Free bound to stable cloud number:', reg.license_key);
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('license-updated', { tier: 'free', license_key: reg.license_key, status: reg.status });
+        }
+        if (reg.status === 'revoked' || reg.status === 'suspended') {
+          try { licenseGuard.setLocalStatus(reg.status); } catch (e) {}
+          const msg = reg.status === 'suspended' ? 'تم إيقاف النسخة مؤقتاً — تواصل مع الدعم' : 'تم إلغاء النسخة — تواصل مع الدعم';
+          if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('license-warning', msg);
+          try { if (svcManager) await svcManager.stopAll(); } catch (e) {}
+        } else if (reg.status === 'active') {
+          try { const inf = licenseGuard.getInfo(); if (inf && (inf.status === 'revoked' || inf.status === 'suspended')) licenseGuard.setLocalStatus('active'); } catch (e) {}
+        }
+      }
+      await syncFreePlanLimits();
+      if (String(config.licenseKey || '').startsWith('FREE-2026')) {
+        this._uploadCloudBackup(config);
+      }
+      fileLog('[Heartbeat] 🆓 Free beat done (key=' + (config.licenseKey || '') + ').');
+      return;
+    }
+
     fileLog('[Heartbeat] Calling Edge Function: license-heartbeat...');
     const result = await httpPost(`${LICENSING_URL}/license-heartbeat`, this._lastPayload);
     fileLog('[Heartbeat] Edge Function response:', JSON.stringify(result).substring(0, 200));
@@ -675,32 +706,19 @@ class HeartbeatSender {
       if (mainWindow) mainWindow.webContents.send('license-warning', msg);
       try { if (svcManager) await svcManager.stopAll(); } catch (e) { console.warn('[Heartbeat] stopAll:', e.message); }
     }
-    // If license not found in cloud, auto-re-register
+    // If the license is not found in cloud:
+    //  • TRIAL → land on Free (offline) instead of silently minting a fresh
+    //    trial. This closes the old infinite-trial loophole (delete the cloud
+    //    row and you'd get an endless new trial).
+    //  • Paid/Free → leave untouched (never auto-downgrade; may be transient).
     else if (result && (result.code === 'NOT_FOUND' || result.accepted === false)) {
-      console.warn('[Heartbeat] License not in cloud — auto-re-registering...');
-      try {
-        const trialResult = await httpPost(`${LICENSING_URL}/license-trial`, {
-          hardware_id: hardwareId,
-          hostname: os.hostname(),
-          os_info: `${process.platform} ${process.arch}`,
-        });
-        if (trialResult && trialResult.success && trialResult.license) {
-          const config2 = loadConfig();
-          config2.licenseKey = trialResult.license.license_key;
-          saveConfig(config2);
-          fileLog('[Heartbeat] ✅ Re-registered as:', trialResult.license.license_key);
-          this._lastPayload.license_key = trialResult.license.license_key;
-          await httpPost(`${LICENSING_URL}/license-heartbeat`, this._lastPayload);
-        } else if (trialResult && trialResult.error === 'trial_already_exists' && trialResult.license) {
-          const config2 = loadConfig();
-          config2.licenseKey = trialResult.license.license_key;
-          saveConfig(config2);
-          fileLog('[Heartbeat] ✅ Synced cloud key:', trialResult.license.license_key);
-          this._lastPayload.license_key = trialResult.license.license_key;
-          await httpPost(`${LICENSING_URL}/license-heartbeat`, this._lastPayload);
-        }
-      } catch (regErr) {
-        console.warn('[Heartbeat] Re-register failed:', regErr.message);
+      const cfg = loadConfig();
+      if (cfg.isTrial === true) {
+        console.warn('[Heartbeat] Trial not in cloud — landing on Free (offline).');
+        fileLog('[Heartbeat] Trial license missing from cloud → landing on Free.');
+        landTrialToFree();
+      } else {
+        fileLog('[Heartbeat] License not in cloud — leaving license untouched.');
       }
     } else if (result && result.command === 'STOP') {
       console.warn('[Heartbeat] Server says STOP — license issue');
@@ -1035,7 +1053,11 @@ ipcMain.handle('get-state', async () => {
 
   // Use LicenseGuard for encrypted license validation
   if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
-  const licenseResult = licenseGuard.validate();
+  let licenseResult = licenseGuard.validate();
+  // Expired trial → land on Free so the UI shows an active free plan (not "expired").
+  if (!licenseResult.valid && licenseResult.reason === 'expired' && landTrialToFree()) {
+    licenseResult = licenseGuard.validate();
+  }
   const hasLicense = licenseResult.valid;
   const licenseInfo = licenseGuard.getInfo();
 
@@ -1087,6 +1109,8 @@ ipcMain.handle('activate-license', async (_, licenseKey) => {
       licenseGuard.saveLicense(result.license);
       const config = loadConfig();
       config.licenseKey = licenseKey;
+      config.isFree = false;   // activating a real key clears the free flag
+      config.isTrial = false;
       saveConfig(config);
       // Start heartbeat monitoring
       heartbeatSender.start();
@@ -1233,9 +1257,11 @@ async function handleCreateLocalCompany(companyData) {
 
     // Read enabled modules from license — falls back to defaults for trial
     let enabledModules = ['accounting', 'inventory', 'sales', 'purchases'];
+    let isFreeInstall = false;
     try {
       if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
       const licInfo = licenseGuard.loadLicense();
+      isFreeInstall = !!(licInfo && licInfo.tier === 'free');
       if (licInfo && licInfo.enabled_modules && Array.isArray(licInfo.enabled_modules) && licInfo.enabled_modules.length > 0) {
         enabledModules = licInfo.enabled_modules;
         fileLog('[TexaCore] License modules:', enabledModules.join(', '));
@@ -1245,6 +1271,18 @@ async function handleCreateLocalCompany(companyData) {
     } catch (e) {
       console.warn('[TexaCore] Could not read license modules:', e.message);
     }
+
+    // Free install → seed an ACTIVE free subscription so the local enforcement
+    // triggers (which only act on plan_type='free') apply the 200/200/1 limits.
+    // Paid/trial installs get NO subscription row on purpose: they stay
+    // unlimited locally and are never enforced (seeding free for them would
+    // wrongly cap a paid user). end_date is a far date = "free forever".
+    const subscriptionSql = isFreeInstall ? `
+      INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
+      SELECT '${tenantId}', sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
+      FROM public.subscription_plans sp WHERE sp.code = 'free' LIMIT 1
+      ON CONFLICT DO NOTHING;
+` : '';
 
     const modulesSql = enabledModules
       .map(mod => `('${require('crypto').randomUUID()}', '${tenantId}', '${mod}', true)`)
@@ -1260,7 +1298,7 @@ async function handleCreateLocalCompany(companyData) {
       INSERT INTO public.tenant_modules (id, tenant_id, module_code, is_active)
       VALUES ${modulesSql}
       ON CONFLICT DO NOTHING;
-
+${subscriptionSql}
       -- Ensure accounting_settings column exists (may be missing on older schemas)
       DO $$ BEGIN
         IF NOT EXISTS (
@@ -3302,7 +3340,12 @@ ipcMain.handle('start-erp', async (_, { licenseKey, dbPassword, port, enableClou
   try {
     // ── License validation before starting services ──
     if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
-    const licCheck = licenseGuard.validate();
+    let licCheck = licenseGuard.validate();
+    // A TRIAL that just expired lands on Free (offline) instead of locking the
+    // app — re-validate as free afterwards so startup proceeds.
+    if (!licCheck.valid && licCheck.reason === 'expired' && landTrialToFree()) {
+      licCheck = licenseGuard.validate();
+    }
     if (!licCheck.valid) {
       const reasons = {
         no_license: 'لا يوجد ترخيص — يرجى تفعيل الترخيص أولاً',
@@ -3327,6 +3370,28 @@ ipcMain.handle('start-erp', async (_, { licenseKey, dbPassword, port, enableClou
     });
     if (!result.success) {
       return { success: false, error: result.error };
+    }
+
+    // If running on the Free plan, make sure every existing tenant has an active
+    // free subscription so the limit triggers actually apply — covers tenants
+    // created during a trial that has since landed on Free.
+    try {
+      if (licenseGuard.getInfo()?.tier === 'free') {
+        await psqlExec(`
+          INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
+          SELECT t.id, fp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
+          FROM public.tenants t
+          CROSS JOIN (SELECT id FROM public.subscription_plans WHERE code = 'free' LIMIT 1) fp
+          WHERE NOT EXISTS (
+            SELECT 1 FROM public.tenant_subscriptions ts
+            WHERE ts.tenant_id = t.id AND ts.status IN ('trial','active','grace')
+          )
+          ON CONFLICT DO NOTHING;
+        `);
+        fileLog('[TexaCore] Ensured free subscriptions for existing tenants.');
+      }
+    } catch (e) {
+      fileLog('[TexaCore] ensureFreeSubscriptions skipped:', e.message);
     }
 
     return { success: true, ready: true, port: port || APP_PORT, migrations: result.migrations };
@@ -3427,6 +3492,7 @@ ipcMain.handle('start-trial', async () => {
       const config = loadConfig();
       config.licenseKey = result.license.license_key;
       config.isTrial = true;
+      config.isFree = false;   // a trial is not free — clear the free flag
       saveConfig(config);
       return { success: true, license: result.license };
     }
@@ -3443,6 +3509,171 @@ ipcMain.handle('start-trial', async () => {
     return { success: false, error: err.message };
   }
 });
+
+// Start Free — fully OFFLINE. No cloud licensing call: we mint a local,
+// hardware-bound free license (no expires_at → never expires). The 200/200/1
+// smart limits are enforced by local DB triggers reading subscription_plans(free),
+// and refreshed from the cloud opportunistically on heartbeat when online.
+const FREE_MODULES = ['dashboard', 'accounting', 'inventory', 'sales', 'purchases', 'crm', 'ai_analytics', 'workflows', 'system_config', 'activity_log'];
+
+// Register/refresh this device's FREE license in the cloud (anon RPC). Returns the
+// license {license_key, status, ...} — a STABLE FREE-2026 number, 1 per device — or
+// null when offline. Idempotent: re-calling for the same hardware returns the same
+// number and updates last_heartbeat_at, so every free copy is tracked & controllable.
+async function registerFreeOnline() {
+  try {
+    if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+    const raw = await httpPostRpc('licensing_register_free', {
+      p_hardware_id: licenseGuard.getHardwareId(),
+      p_hostname: require('os').hostname(),
+      p_os_info: `${process.platform} ${process.arch}`,
+      p_app_version: app.getVersion(),
+    });
+    const res = typeof raw === 'string' ? (raw ? JSON.parse(raw) : null) : raw;
+    if (res && res.success && res.license && res.license.license_key) return res.license;
+    return null;
+  } catch (e) {
+    fileLog('[Free] registerFreeOnline failed (offline?):', e.message);
+    return null;
+  }
+}
+
+// Start Free — registers a STABLE cloud number online (FREE-2026-XXXXX, 1/device), or
+// falls back to a local placeholder offline that binds to the real number on the first
+// online heartbeat. Limits are enforced by local DB triggers and refreshed each beat.
+ipcMain.handle('start-free', async () => {
+  try {
+    if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+    ensureDataDir();
+
+    const config = loadConfig();
+    // Keep the previous (real) key so the user can restore it later — never wipe it.
+    if (config.licenseKey && !String(config.licenseKey).startsWith('FREE')) {
+      config.previousLicenseKey = config.licenseKey;
+    }
+
+    const cloud = await registerFreeOnline();            // null when offline
+    const licenseKey = (cloud && cloud.license_key) ? cloud.license_key : 'FREE-LOCAL';
+
+    const freeLicense = {
+      tier: 'free',
+      status: (cloud && cloud.status) || 'active',
+      license_key: licenseKey,
+      plan_type: 'free',
+      max_users: 1,
+      max_companies: 1,
+      max_warehouses: 1,
+      max_storage_gb: -1,           // unlimited disk locally
+      enabled_modules: FREE_MODULES,
+      custom_branding: false,
+      cloud_backup: true,           // free copies back up to our cloud (1 GB)
+      api_access: false,
+      features: {},
+      // NB: no expires_at → validate() never marks it expired.
+    };
+    licenseGuard.saveLicense(freeLicense);
+
+    config.licenseKey = licenseKey;
+    config.isTrial = false;
+    config.isFree = true;
+    saveConfig(config);
+
+    fileLog(`[TexaCore] 🆓 Free activated — ${cloud ? 'cloud #' + licenseKey : 'offline (local), will bind on first online beat'}`);
+    return { success: true, license: freeLicense, online: !!cloud };
+  } catch (err) {
+    return { success: false, error: err.message };
+  }
+});
+
+// ─── Trial → Free landing ────────────────────────────────────
+// When a TRIAL ends (expired locally, or its cloud license vanished), we do NOT
+// lock the app — we land it on the Free plan (offline, forever) by rewriting the
+// local license. Guarded by config.isTrial so a PAID license is never auto-
+// downgraded (it keeps the lock/renew flow). Returns true if it landed.
+function landTrialToFree() {
+  try {
+    if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+    const cfg = loadConfig();
+    if (cfg.isTrial !== true) return false;          // only trials land — never downgrade paid
+    const lic = licenseGuard.loadLicense();
+    if (!lic || lic.tier === 'free') return false;   // nothing to do
+    const freeLicense = {
+      ...lic,
+      tier: 'free',
+      status: 'active',
+      plan_type: 'free',
+      max_users: 1,
+      max_companies: 1,
+      max_warehouses: 1,
+      max_storage_gb: -1,
+      enabled_modules: FREE_MODULES,
+      custom_branding: false,
+      cloud_backup: false,
+      api_access: false,
+    };
+    delete freeLicense.expires_at;                   // free never expires
+    licenseGuard.saveLicense(freeLicense);
+    cfg.isTrial = false;
+    cfg.isFree = true;
+    saveConfig(cfg);
+    fileLog('[TexaCore] 🆓 Trial ended → landed on Free plan (offline, forever).');
+    if (mainWindow && !mainWindow.isDestroyed()) {
+      mainWindow.webContents.send('license-updated', { tier: 'free', status: 'active' });
+    }
+    return true;
+  } catch (e) {
+    fileLog('[TexaCore] landTrialToFree error:', e.message);
+    return false;
+  }
+}
+
+// ─── Free plan limit sync (heartbeat, online) ────────────────
+// Free is offline-first with BAKED limits. When online we opportunistically pull
+// the Free plan's current limits from the cloud (anon REST read of the public
+// subscription_plans row, code='free') and update the LOCAL row — the enforcement
+// triggers read that row, so an admin's change in /saas/platforms propagates to
+// every free copy on its next online heartbeat. Best-effort: silently no-ops
+// offline or when services aren't running.
+// NB: storage_gb is intentionally NOT synced — cloud free caps storage at 1 GB,
+// but the LOCAL free install has unlimited disk (the local plan keeps storage_gb=-1).
+const FREE_LIMIT_COLS = ['max_users', 'max_companies', 'max_branches', 'max_warehouses', 'max_products', 'max_invoices_monthly', 'max_customers', 'max_documents'];
+async function syncFreePlanLimits() {
+  try {
+    const cloud = await new Promise((resolve) => {
+      const req = https.request({
+        hostname: SUPABASE_URL, port: 443, method: 'GET',
+        path: `/rest/v1/subscription_plans?code=eq.free&is_active=eq.true&select=${FREE_LIMIT_COLS.join(',')}&limit=1`,
+        headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+        timeout: 10000,
+      }, (res) => {
+        let b = '';
+        res.on('data', c => b += c);
+        res.on('end', () => { try { const a = JSON.parse(b); resolve(Array.isArray(a) && a[0] ? a[0] : null); } catch { resolve(null); } });
+      });
+      req.on('error', () => resolve(null));
+      req.on('timeout', () => { req.destroy(); resolve(null); });
+      req.end();
+    });
+    if (!cloud) return false; // offline / no row
+
+    // Whitelisted columns + integer-coerced values → injection-proof UPDATE.
+    const allowed = new Set(FREE_LIMIT_COLS);
+    const sets = [];
+    for (const [k, v] of Object.entries(cloud)) {
+      if (!allowed.has(k) || v === null || v === undefined) continue;
+      const n = parseInt(v, 10);
+      if (Number.isNaN(n)) continue;
+      sets.push(`${k} = ${n}`);
+    }
+    if (!sets.length) return false;
+    await psqlExec(`UPDATE public.subscription_plans SET ${sets.join(', ')} WHERE code = 'free';`);
+    fileLog('[Heartbeat] 🔁 Free plan limits synced from cloud:', sets.join(', '));
+    return true;
+  } catch (e) {
+    fileLog('[Heartbeat] syncFreePlanLimits skipped:', e.message);
+    return false;
+  }
+}
 
 // Open browser
 ipcMain.handle('open-browser', (_, portOrUrl) => {

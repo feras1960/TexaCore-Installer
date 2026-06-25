@@ -13,6 +13,7 @@ contextBridge.exposeInMainWorld('texacore', {
   // License
   activateLicense: (key) => ipcRenderer.invoke('activate-license', key),
   startTrial: () => ipcRenderer.invoke('start-trial'),
+  startFree: () => ipcRenderer.invoke('start-free'),
 
   // Cloud
   registerSubdomain: (subdomain) => ipcRenderer.invoke('register-subdomain', subdomain),

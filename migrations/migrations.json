@@ -1,7 +1,7 @@
 {
   "version": "2026.05.04",
   "generated": "2026-06-24T10:51:21Z",
-  "totalFiles": 176,
+  "totalFiles": 177,
   "migrations": [
     {
       "order": 1,
@@ -882,6 +882,11 @@
       "order": 175,
       "file": "20260625_platform_admin_password.sql",
       "name": "20260625_platform_admin_password"
+    },
+    {
+      "order": 176,
+      "file": "20260625d_free_plan_local.sql",
+      "name": "20260625d_free_plan_local"
     }
   ]
 }
