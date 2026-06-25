@@ -1,7 +1,7 @@
 {
   "version": "2026.05.04",
-  "generated": "2026-06-24T10:51:21Z",
-  "totalFiles": 177,
+  "generated": "2026-06-25T20:16:50Z",
+  "totalFiles": 178,
   "migrations": [
     {
       "order": 1,
@@ -887,6 +887,11 @@
       "order": 176,
       "file": "20260625d_free_plan_local.sql",
       "name": "20260625d_free_plan_local"
+    },
+    {
+      "order": 177,
+      "file": "20260626a_local_schema_catchup.sql",
+      "name": "20260626a_local_schema_catchup"
     }
   ]
 }

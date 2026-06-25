@@ -249,7 +249,10 @@ function createWindow() {
     minWidth: 800,
     minHeight: 650,
     resizable: true,
-    frame: false,
+    // macOS: frameless + native traffic lights (positioned below).
+    // Windows/Linux: native frame so minimize/maximize/close controls exist —
+    // a frameless window there shipped with NO window controls at all.
+    frame: !isMac,
     titleBarStyle: isMac ? 'hidden' : 'default',
     ...(isMac ? { trafficLightPosition: { x: 16, y: 16 } } : {}),
     backgroundColor: '#0a1628',
