@@ -1047,6 +1047,20 @@ window.__TEXACORE_CONFIG__ = {
       return;
     }
 
+    // The user may have deleted this subdomain from Cloudflare. Reconnecting the
+    // saved tunnel would just serve a dead/blank URL. Verify the DNS record still
+    // exists first; if it's gone, skip the tunnel — the app prompts the user to
+    // create a new subdomain. (Only a definitive NXDOMAIN counts as "deleted";
+    // a transient network/DNS error falls through and still attempts the tunnel.)
+    try {
+      await require('dns').promises.resolve4(`${config.subdomain}.texacore.ai`);
+    } catch (dnsErr) {
+      if (dnsErr && (dnsErr.code === 'ENOTFOUND' || dnsErr.code === 'ENODATA')) {
+        console.warn(`[ServiceManager] ⚠️ Subdomain "${config.subdomain}.texacore.ai" no longer resolves — it was deleted. Skipping tunnel; create a new subdomain from the app.`);
+        return;
+      }
+    }
+
     // Normal starts (launch, Stop→Start, toggle, restart) REUSE the existing
     // token — same tunnel id, so Cloudflare DNS never changes and it reconnects
     // in ~1s. Re-registering would mint a NEW tunnel id every time, forcing DNS

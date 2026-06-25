@@ -17,6 +17,7 @@ contextBridge.exposeInMainWorld('texacore', {
 
   // Cloud
   registerSubdomain: (subdomain) => ipcRenderer.invoke('register-subdomain', subdomain),
+  verifySubdomain: () => ipcRenderer.invoke('verify-subdomain'),
 
   // Services
   startERP: (config) => ipcRenderer.invoke('start-erp', config),

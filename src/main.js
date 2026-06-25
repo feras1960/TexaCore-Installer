@@ -1154,6 +1154,27 @@ ipcMain.handle('register-subdomain', async (_, subdomain) => {
   }
 });
 
+// Verify the saved subdomain still exists in DNS. The user may have deleted it
+// from Cloudflare / the cloud dashboard, leaving the installer holding a dead
+// subdomain from a previous setup (it would just serve a blank/error page).
+// Returns { valid, reason }. The renderer uses 'deleted' to prompt the user to
+// create a new subdomain instead of showing a broken cloud URL.
+ipcMain.handle('verify-subdomain', async () => {
+  const config = loadConfig();
+  if (!config.subdomain) return { valid: false, reason: 'none' };
+  try {
+    const ips = await require('dns').promises.resolve4(`${config.subdomain}.texacore.ai`);
+    return { valid: Array.isArray(ips) && ips.length > 0, reason: 'resolved', subdomain: config.subdomain };
+  } catch (e) {
+    // ENOTFOUND / ENODATA = no such DNS record = the subdomain was deleted.
+    // Any other error (network/timeout) → assume alive so we never falsely prompt.
+    if (e && (e.code === 'ENOTFOUND' || e.code === 'ENODATA')) {
+      return { valid: false, reason: 'deleted', subdomain: config.subdomain };
+    }
+    return { valid: true, reason: 'dns_error', subdomain: config.subdomain };
+  }
+});
+
 // ── Helpers ────────────────────────────────────────────────────────────────
 
 /** Run a psql command via embedded binary */

@@ -203,6 +203,7 @@
         <div id="cloud-content" style="display:none; margin-top: 16px;">
           <!-- Setup View (Not registered) -->
           <div id="cloud-setup">
+            <div id="subdomain-deleted-warning" style="display:none; margin-bottom:12px; padding:9px 12px; border-radius:8px; background:rgba(245,158,11,0.12); border:1px solid var(--warning); color:var(--warning); font-size:12.5px; font-weight:600; line-height:1.5;" data-i18n="subdomain.deleted"></div>
             <div style="display:flex; flex:1;" dir="ltr">
               <input type="text" id="input-subdomain" placeholder="my-server" class="input input-small" style="flex:1; border-top-right-radius:0; border-bottom-right-radius:0; height:38px;" oninput="this.value = this.value.replace(/[^a-z0-9-]/g, '').toLowerCase(); checkSubdomain(this.value);">
               <div style="background:#1e293b; color:#94a3b8; padding:0 12px; border-radius:0 8px 8px 0; font-size:13px; display:flex; align-items:center; border:2px solid var(--border); border-left:none;">.texacore.ai</div>

@@ -148,8 +148,8 @@ function updateUI(state) {
     document.getElementById('cloud-content').style.display = 'none';
   }
   
-  // If registered, show active view. Otherwise setup view.
-  if (state.config?.subdomain) {
+  // If registered (and not known-deleted), show active view. Otherwise setup view.
+  if (state.config?.subdomain && _deletedSubdomain !== state.config.subdomain) {
     document.getElementById('input-subdomain').value = state.config.subdomain;
     document.getElementById('cloud-setup').style.display = 'none';
     document.getElementById('cloud-active').style.display = 'block';
@@ -165,10 +165,49 @@ function updateUI(state) {
     // Uses a SHORT, clean company code (the company UUID's first segment, e.g. 6b6e4674)
     // instead of the URL-encoded Arabic name. LocalLauncher resolves the code → company.
     setEmployeeLink(state.config.subdomain);
+
+    // The saved subdomain may have been deleted from the cloud (Cloudflare).
+    // Verify it still resolves; if not, flip to the setup view and prompt the
+    // user to register a new one instead of showing a dead cloud URL.
+    verifyCloudSubdomain(state.config.subdomain);
   } else {
     document.getElementById('cloud-setup').style.display = 'block';
     document.getElementById('cloud-active').style.display = 'none';
+    // A saved subdomain that no longer resolves (deleted from the cloud): stay on
+    // setup with a warning + the old name pre-filled so the user re-registers it.
+    if (state.config?.subdomain && _deletedSubdomain === state.config.subdomain) {
+      const warn = document.getElementById('subdomain-deleted-warning');
+      if (warn) { warn.textContent = t('subdomain.deleted'); warn.style.display = 'block'; }
+      const inp = document.getElementById('input-subdomain');
+      if (inp && !inp.value) { inp.value = state.config.subdomain; checkSubdomain(state.config.subdomain); }
+    }
   }
+}
+
+// Verify the configured subdomain still exists. On a definitive "deleted"
+// result, switch from the active view to setup, surface a warning, and pre-fill
+// the old name so the user can re-register it (now free) or pick a new one.
+let _verifiedAliveSubdomain = null;  // cache: skip re-checking a subdomain we already confirmed alive
+let _deletedSubdomain = null;        // a saved subdomain confirmed deleted — keeps updateUI on the setup view
+async function verifyCloudSubdomain(subdomain) {
+  if (!subdomain || !window.texacore?.verifySubdomain) return;
+  if (_verifiedAliveSubdomain === subdomain) return;  // already confirmed — avoid a DNS lookup every poll
+  try {
+    const r = await texacore.verifySubdomain();
+    if (r && r.valid === false && r.reason === 'deleted') {
+      _verifiedAliveSubdomain = null;
+      _deletedSubdomain = subdomain;  // updateUI now routes straight to setup (no active⇄setup flicker)
+      document.getElementById('cloud-active').style.display = 'none';
+      document.getElementById('cloud-setup').style.display = 'block';
+      const warn = document.getElementById('subdomain-deleted-warning');
+      if (warn) { warn.textContent = t('subdomain.deleted'); warn.style.display = 'block'; }
+      const inp = document.getElementById('input-subdomain');
+      if (inp) { inp.value = subdomain; checkSubdomain(subdomain); }
+    } else if (r && r.valid === true) {
+      _verifiedAliveSubdomain = subdomain;  // confirmed alive — don't re-check (retry on deleted/error)
+      if (_deletedSubdomain === subdomain) _deletedSubdomain = null;  // recovered / re-registered
+    }
+  } catch { /* network/verify error — keep the active view, retry next refresh */ }
 }
 
 // ─── Update Status Cards ─────────────────────────────────────
@@ -737,11 +776,19 @@ async function registerSubdomain() {
       if (!currentState.config) currentState.config = {};
       currentState.config.subdomain = input.value;
       currentState.config.enableCloud = true;
-      
+
+      // Just registered → clear any "deleted" state and trust it as alive
+      // (the new DNS record may take a moment to propagate; don't re-verify and
+      // bounce back to setup). Hide the deletion warning if it was showing.
+      _deletedSubdomain = null;
+      _verifiedAliveSubdomain = input.value;
+      const delWarn = document.getElementById('subdomain-deleted-warning');
+      if (delWarn) delWarn.style.display = 'none';
+
       document.getElementById('cloud-setup').style.display = 'none';
       document.getElementById('cloud-active').style.display = 'block';
       document.getElementById('cloud-url').textContent = result.url || `https://${input.value}.texacore.ai`;
-      
+
       alert(t('subdomain.reserved'));
     } else {
       statusEl.textContent = `❌ ${result.error}`;
