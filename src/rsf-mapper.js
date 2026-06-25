@@ -1125,15 +1125,15 @@ class RsfMapper {
       // إدخال في products
       const productId = uuidv4();
       await pgClient.query(`
-        INSERT INTO products 
-        (id, tenant_id, company_id, sku, name_ar, name_en, 
+        INSERT INTO products
+        (id, tenant_id, company_id, sku, name, name_ar, name_en,
          base_unit_id, default_cost, default_price,
          min_stock, max_stock, product_type, status)
-        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,'stockable','active')
+        VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,'stockable','active')
         ON CONFLICT DO NOTHING
       `, [
         productId, this.tenantId, this.companyId,
-        sku, nameAr, nameEn,
+        sku, (nameAr || nameEn || sku), nameAr, nameEn,
         defaultUnitId, mat.buyPrice || 0,
         mat.wholesalePrice || mat.sellPrice || 0,
         mat.minimumPr || 0, mat.smax || 0
