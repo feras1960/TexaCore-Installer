@@ -1,7 +1,7 @@
 {
   "version": "2026.05.04",
   "generated": "2026-06-25T20:16:50Z",
-  "totalFiles": 180,
+  "totalFiles": 181,
   "migrations": [
     {
       "order": 1,
@@ -902,6 +902,11 @@
       "order": 179,
       "file": "20260626c_views_repass.sql",
       "name": "20260626c_views_repass"
+    },
+    {
+      "order": 180,
+      "file": "20260626d_relax_legacy_notnull.sql",
+      "name": "20260626d_relax_legacy_notnull"
     }
   ]
 }
