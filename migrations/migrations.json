@@ -1,7 +1,7 @@
 {
   "version": "2026.05.04",
   "generated": "2026-06-25T20:16:50Z",
-  "totalFiles": 179,
+  "totalFiles": 180,
   "migrations": [
     {
       "order": 1,
@@ -897,6 +897,11 @@
       "order": 178,
       "file": "20260626b_full_schema_sync.sql",
       "name": "20260626b_full_schema_sync"
+    },
+    {
+      "order": 179,
+      "file": "20260626c_views_repass.sql",
+      "name": "20260626c_views_repass"
     }
   ]
 }
