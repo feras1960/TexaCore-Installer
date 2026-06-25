@@ -44,4 +44,21 @@ exports.default = async function afterPack(context) {
       fs.cpSync(src, dest, { recursive: true });
     }
   }
+
+  // macOS: ad-hoc sign the whole bundle so the *downloaded* app opens with
+  // "unidentified developer" (right-click → Open) instead of "damaged" on Apple
+  // Silicon (no Apple Developer cert). Runs here — before the dmg is built — so
+  // the dmg ships the signed app. No-op on Windows/Linux.
+  if (context.electronPlatformName === 'darwin') {
+    const appPath = path.join(context.appOutDir, context.packager.appInfo.productFilename + '.app');
+    try {
+      const { execFileSync } = require('child_process');
+      console.log(`  • afterPack: ad-hoc signing ${appPath}`);
+      execFileSync('codesign', ['--force', '--deep', '--sign', '-', appPath], { stdio: 'inherit' });
+      execFileSync('codesign', ['--verify', '--deep', appPath], { stdio: 'inherit' });
+      console.log('  • afterPack: ad-hoc signature valid ✅');
+    } catch (e) {
+      console.warn(`  • afterPack: ad-hoc sign failed: ${e.message}`);
+    }
+  }
 };

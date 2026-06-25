@@ -1,6 +1,6 @@
 {
   "name": "texacore-installer",
-  "version": "1.5.17",
+  "version": "1.5.18",
   "buildDate": "2026-06-25T16:55:35Z",
   "description": "TexaCore ERP — Self-Hosted Installer",
   "main": "src/main.js",
@@ -148,6 +148,7 @@
       "deleteAppDataOnUninstall": false
     },
     "dmg": {
+      "artifactName": "TexaCore-ERP-${version}-${arch}.${ext}",
       "background": "build/dmg-background.png",
       "iconSize": 110,
       "iconTextSize": 13,
