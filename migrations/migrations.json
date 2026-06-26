@@ -947,6 +947,11 @@
       "order": 188,
       "file": "20260626l_reseed_missing_subscriptions.sql",
       "name": "20260626l_reseed_missing_subscriptions"
+    },
+    {
+      "order": 189,
+      "file": "20260626m_plan_limits_unlimited_when_no_subscription.sql",
+      "name": "20260626m_plan_limits_unlimited_when_no_subscription"
     }
   ]
 }

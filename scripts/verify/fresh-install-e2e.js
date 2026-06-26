@@ -106,11 +106,10 @@ async function run() {
   await c.query(`INSERT INTO companies (id, tenant_id, name, name_ar, code, default_currency) VALUES ($1,$2,'FIT','تجريبي','FIT','UAH')`, [CID, TID]);
   await c.query(`INSERT INTO fiscal_years (id, company_id, tenant_id, name, code, start_date, end_date, is_current)
     VALUES (gen_random_uuid(),$1,$2,'2023','FY','2023-01-01','2023-12-31',true)`, [CID, TID]);
-  // the IMPORT handler (main.js) now seeds a local-unlimited subscription so plan
-  // limits resolve — mirror that here so the harness validates the same flow.
-  await c.query(`INSERT INTO tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
-    SELECT $1, sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
-    FROM subscription_plans sp WHERE sp.code='local-unlimited' LIMIT 1 ON CONFLICT DO NOTHING`, [TID]);
+  // Deliberately DO NOT seed a subscription — this mirrors a trial/imported
+  // install (no tenant_subscriptions row), which is exactly what showed "0/0".
+  // 20260626m must report the limits as unlimited (self-hosted owner) anyway so
+  // invoice creation isn't blocked.
   await c.query('COMMIT');
 
   console.log('[3/4] Running the REAL RSF import …');
