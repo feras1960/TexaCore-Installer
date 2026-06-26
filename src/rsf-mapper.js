@@ -199,6 +199,16 @@ class RsfMapper {
       this._emit('إعادة حساب الأرصدة', 0, 1);
       results.counts.recalculatedBalances = (await runPhase('إعادة حساب الأرصدة', () => this._recalculateBalances(pgClient))) ?? 0;
 
+      // عدّاد دقيق لحركات المخزون: عدّاد المرحلة أعلاه يحصي مستندات المناقلة فقط،
+      // بينما حركات المخزون الفعلية تأتي أيضاً من فواتير البيع/الشراء. نعرض الإجمالي
+      // الحقيقي من inventory_movements حتى لا يبدو الاستيراد ناقصاً في التقرير.
+      try {
+        const _imc = await pgClient.query('SELECT count(*)::int AS n FROM inventory_movements WHERE company_id = $1', [this.companyId]);
+        if (_imc.rows[0] && _imc.rows[0].n > (results.counts.inventoryMoves || 0)) {
+          results.counts.inventoryMoves = _imc.rows[0].n;
+        }
+      } catch (e) { /* عدّاد تجميلي فقط */ }
+
       // إعادة تفعيل الـ triggers قبل COMMIT
       for (const t of importTables) {
         try {
@@ -2002,13 +2012,13 @@ class RsfMapper {
           await pgClient.query(`
             INSERT INTO purchase_receipt_items
             (id, tenant_id, receipt_id, material_id, product_id,
-             quantity, received_qty, unit, unit_price, total, warehouse_id)
-            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)
+             quantity, received_qty, quantity_received, unit, unit_price, total, warehouse_id)
+            VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12)
             ON CONFLICT DO NOTHING
           `, [
             uuidv4(), this.tenantId, receiptId,
             rMaterialId, rProductId,
-            rQty, rQty, rLine.Unit || 'unit', rPrice, rTotal,
+            rQty, rQty, rQty, rLine.Unit || 'unit', rPrice, rTotal,
             rLineWarehouseId
           ]);
         }

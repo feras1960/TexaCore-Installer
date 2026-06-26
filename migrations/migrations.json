@@ -932,6 +932,11 @@
       "order": 185,
       "file": "20260626i_repair_existing_companies.sql",
       "name": "20260626i_repair_existing_companies"
+    },
+    {
+      "order": 186,
+      "file": "20260626j_relax_stock_transfers_created_by.sql",
+      "name": "20260626j_relax_stock_transfers_created_by"
     }
   ]
 }
