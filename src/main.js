@@ -3248,6 +3248,7 @@ const httpServer = http.createServer(async (req, res) => {
           users: result.users,
           tcdbPath: result.tcdbPath,
           errors: result.errors,
+          logFile: result.logFile,
         }));
       } catch (err) {
         console.error('[RSF-Path] ❌ Error:', err.message);

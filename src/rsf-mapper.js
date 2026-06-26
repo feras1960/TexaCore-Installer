@@ -57,7 +57,18 @@ class RsfMapper {
     try {
       await pgClient.query('BEGIN');
 
-      // تعطيل الـ triggers أثناء الاستيراد بالكامل
+      // تعطيل كل المُحفّزات (user + FK) بشكل موثوق طوال الاستيراد عبر replica role.
+      // أمتن بكثير من DISABLE TRIGGER ALL لكل جدول (الذي قد يفشل بصمت — مثلاً إن
+      // اختلفت ملكية الجدول أو لم يكن superuser — فيُبقي مُحفّزاً مُفعّلاً يُفشِل
+      // إدراج الفواتير/الحركات، وهو الأرجح في فقدان الفواتير على بعض الأجهزة).
+      // SET LOCAL يُعاد ضبطه تلقائياً مع نهاية المعاملة (COMMIT/ROLLBACK).
+      try {
+        await pgClient.query("SET LOCAL session_replication_role = replica");
+      } catch (e) {
+        console.warn('[RSF] ⚠️ تعذّر ضبط replica role (سيُعتمد على DISABLE TRIGGER):', e.message);
+      }
+
+      // تعطيل الـ triggers أثناء الاستيراد بالكامل (احتياطي فوق replica role)
       const importTables = [
         'sales_transaction_items', 'sales_invoice_items', 'sales_transactions', 'sales_invoices',
         'purchase_transaction_items', 'purchase_transactions',
@@ -82,124 +93,111 @@ class RsfMapper {
         }
       }
 
+      // ── مُشغّل المراحل المُحصّن: كل مرحلة داخل savepoint خاص بها، فإن فشلت
+      // مرحلة لا تُجهض المعاملة كلها (كان فشل مرحلة مبكرة يُجهض المعاملة فيتسلسل
+      // الخطأ إلى "savepoint sp_inv does not exist" ويُفشِل الاستيراد بالكامل).
+      // RELEASE عند النجاح يُبقي مكدّس الـsavepoints ضحلاً؛ ROLLBACK عند الفشل
+      // يُعافي المعاملة؛ والسبب يُجمَع في results.errors لإظهاره/تسجيله لاحقاً.
+      let _spSeq = 0;
+      const runPhase = async (label, fn) => {
+        const spn = 'sp_ph_' + (_spSeq++);
+        try {
+          await pgClient.query('SAVEPOINT ' + spn);
+          const r = await fn();
+          await pgClient.query('RELEASE SAVEPOINT ' + spn);
+          return r;
+        } catch (e) {
+          const msg = (e && e.message) ? e.message : String(e);
+          console.warn('[RSF] ⚠️ ' + label + ':', msg);
+          results.errors.push({ phase: label, error: msg, detail: (e && e.detail) || null });
+          try { await pgClient.query('ROLLBACK TO SAVEPOINT ' + spn); } catch (re) { /* savepoint lost — tx already recovered by a later phase's rollback */ }
+          return null;
+        }
+      };
+
       // 1. حذف الشجرة الافتراضية الفارغة
       this._emit('حذف البيانات الافتراضية', 0, 1);
-      await this._clearDefaults(pgClient);
+      await runPhase('حذف الافتراضي', () => this._clearDefaults(pgClient));
 
       // 2. جلب أنواع الحسابات
       this._emit('تحضير أنواع الحسابات', 0, 1);
-      await this._loadAccountTypes(pgClient);
+      await runPhase('أنواع الحسابات', () => this._loadAccountTypes(pgClient));
 
       // 2.5 مزامنة أسعار صرف العملات من الرشيد → currencies table
       this._emit('مزامنة أسعار العملات', 0, 1);
-      await this._syncCurrenciesToDB(pgClient);
+      await runPhase('أسعار العملات', () => this._syncCurrenciesToDB(pgClient));
 
       // 3. شجرة الحسابات
       this._emit('استيراد شجرة الحسابات', 0, summary.counts.accounts);
-      results.counts.accounts = await this._insertAccounts(pgClient);
+      results.counts.accounts = (await runPhase('شجرة الحسابات', () => this._insertAccounts(pgClient))) ?? 0;
 
       // 4. العملاء
       this._emit('استيراد العملاء', 0, summary.counts.customers);
-      results.counts.customers = await this._insertCustomers(pgClient);
+      results.counts.customers = (await runPhase('العملاء', () => this._insertCustomers(pgClient))) ?? 0;
 
       // 5. الموردين
       this._emit('استيراد الموردين', 0, summary.counts.suppliers);
-      results.counts.suppliers = await this._insertSuppliers(pgClient);
+      results.counts.suppliers = (await runPhase('الموردين', () => this._insertSuppliers(pgClient))) ?? 0;
 
       // 6. مراكز التكلفة
       this._emit('استيراد مراكز التكلفة', 0, summary.counts.costCenters);
-      results.counts.costCenters = await this._insertCostCenters(pgClient);
+      results.counts.costCenters = (await runPhase('مراكز التكلفة', () => this._insertCostCenters(pgClient))) ?? 0;
 
       // 7. المستودعات
       this._emit('استيراد المستودعات', 0, 1);
-      results.counts.warehouses = await this._insertWarehouses(pgClient);
+      results.counts.warehouses = (await runPhase('المستودعات', () => this._insertWarehouses(pgClient))) ?? 0;
 
       // 8. المواد → products + fabric_materials
       this._emit('استيراد المواد', 0, summary.counts.materials);
-      results.counts.materials = await this._insertMaterials(pgClient);
+      results.counts.materials = (await runPhase('المواد', () => this._insertMaterials(pgClient))) ?? 0;
 
       // 8.5. قوائم الأسعار (جملة، مفرد، نصف جملة، خاص...)
       this._emit('إنشاء قوائم الأسعار', 0, 1);
-      results.counts.priceLists = await this._createPriceLists(pgClient);
+      results.counts.priceLists = (await runPhase('قوائم الأسعار', () => this._createPriceLists(pgClient))) ?? 0;
 
       // 9. السنة المالية
       this._emit('إنشاء السنة المالية', 0, 1);
-      results.counts.fiscalYear = await this._insertFiscalYear(pgClient);
+      results.counts.fiscalYear = (await runPhase('السنة المالية', () => this._insertFiscalYear(pgClient))) ?? 0;
 
       // 10. القيود المحاسبية
       this._emit('استيراد القيود', 0, summary.counts.journalEntries);
-      results.counts.journalEntries = await this._insertJournalEntries(pgClient);
+      results.counts.journalEntries = (await runPhase('القيود المحاسبية', () => this._insertJournalEntries(pgClient))) ?? 0;
 
       // 11. فواتير المبيعات
       this._emit('استيراد فواتير المبيعات', 0, summary.counts.salesInvoices);
-      try {
-        await pgClient.query('SAVEPOINT sp_sales');
-        results.counts.salesInvoices = await this._insertSalesInvoices(pgClient);
-      } catch (e) {
-        console.warn('[RSF] ⚠️ Sales invoices skipped:', e.message.substring(0, 100));
-        await pgClient.query('ROLLBACK TO SAVEPOINT sp_sales');
-        results.counts.salesInvoices = 0;
-      }
+      results.counts.salesInvoices = (await runPhase('فواتير المبيعات', () => this._insertSalesInvoices(pgClient))) ?? 0;
 
       // 12. فواتير المشتريات
       this._emit('استيراد فواتير المشتريات', 0, summary.counts.purchaseInvoices);
-      try {
-        await pgClient.query('SAVEPOINT sp_purchase');
-        results.counts.purchaseInvoices = await this._insertPurchaseInvoices(pgClient);
-      } catch (e) {
-        console.warn('[RSF] ⚠️ Purchase invoices skipped:', e.message.substring(0, 100));
-        await pgClient.query('ROLLBACK TO SAVEPOINT sp_purchase');
-        results.counts.purchaseInvoices = 0;
-      }
+      results.counts.purchaseInvoices = (await runPhase('فواتير المشتريات', () => this._insertPurchaseInvoices(pgClient))) ?? 0;
 
       // 12b. طلبيات الشراء
       this._emit('استيراد طلبيات الشراء', 0, summary.counts.purchaseOrders || 0);
-      try {
-        await pgClient.query('SAVEPOINT sp_purchase_orders');
-        results.counts.purchaseOrders = await this._insertPurchaseOrders(pgClient);
-      } catch (e) {
-        console.warn('[RSF] ⚠️ Purchase orders skipped:', e.message.substring(0, 100));
-        await pgClient.query('ROLLBACK TO SAVEPOINT sp_purchase_orders');
-        results.counts.purchaseOrders = 0;
-      }
+      results.counts.purchaseOrders = (await runPhase('طلبيات الشراء', () => this._insertPurchaseOrders(pgClient))) ?? 0;
 
       // 13. حركات المستودع
       this._emit('استيراد حركات المستودع', 0, summary.counts.inventoryMoves);
-      try {
-        await pgClient.query('SAVEPOINT sp_inv');
-        results.counts.inventoryMoves = await this._insertInventoryMoves(pgClient);
-      } catch (e) {
-        console.warn('[RSF] ⚠️ Inventory moves skipped:', e.message.substring(0, 100));
-        await pgClient.query('ROLLBACK TO SAVEPOINT sp_inv');
-        results.counts.inventoryMoves = 0;
-      }
+      results.counts.inventoryMoves = (await runPhase('حركات المستودع', () => this._insertInventoryMoves(pgClient))) ?? 0;
 
       // 14. سندات القبض والدفع
       this._emit('استيراد سندات القبض/الدفع', 0, summary.counts.receipts);
-      try {
-        await pgClient.query('SAVEPOINT sp_receipts');
-        results.counts.receipts = await this._insertReceipts(pgClient);
-      } catch (e) {
-        console.warn('[RSF] ⚠️ Receipts skipped:', e.message.substring(0, 100));
-        await pgClient.query('ROLLBACK TO SAVEPOINT sp_receipts');
-        results.counts.receipts = 0;
-      }
+      results.counts.receipts = (await runPhase('سندات القبض/الدفع', () => this._insertReceipts(pgClient))) ?? 0;
 
       // 15. الأرصدة الختامية
       this._emit('تحديث الأرصدة الختامية', 0, 1);
-      try { await pgClient.query('SAVEPOINT sp_endbal'); results.counts.endBalances = await this._updateEndBalances(pgClient); } catch (e) { console.warn('[RSF] ⚠️ endBalances:', e.message.substring(0,80)); try { await pgClient.query('ROLLBACK TO SAVEPOINT sp_endbal'); } catch {} }
+      results.counts.endBalances = (await runPhase('الأرصدة الختامية', () => this._updateEndBalances(pgClient))) ?? 0;
 
       // 16. إعدادات المحاسبة
       this._emit('تعيين الإعدادات', 0, 1);
-      try { await pgClient.query('SAVEPOINT sp_settings'); await this._fillAccountingSettings(pgClient); } catch (e) { console.warn('[RSF] ⚠️ settings:', e.message.substring(0,80)); try { await pgClient.query('ROLLBACK TO SAVEPOINT sp_settings'); } catch {} }
+      await runPhase('إعدادات المحاسبة', () => this._fillAccountingSettings(pgClient));
 
       // 17. ملء جدول مخزون المستودعات (الكميات الافتتاحية)
       this._emit('ربط الكميات بالمستودعات', 0, 1);
-      try { await pgClient.query('SAVEPOINT sp_invstock'); results.counts.inventoryStock = await this._populateInventoryStock(pgClient); } catch (e) { console.warn('[RSF] ⚠️ inventory:', e.message.substring(0,80)); try { await pgClient.query('ROLLBACK TO SAVEPOINT sp_invstock'); } catch {} }
+      results.counts.inventoryStock = (await runPhase('مخزون المستودعات', () => this._populateInventoryStock(pgClient))) ?? 0;
 
       // 18. إعادة حساب الأرصدة الحالية من القيود المحاسبية
       this._emit('إعادة حساب الأرصدة', 0, 1);
-      try { await pgClient.query('SAVEPOINT sp_recalc'); results.counts.recalculatedBalances = await this._recalculateBalances(pgClient); } catch (e) { console.warn('[RSF] ⚠️ recalc:', e.message.substring(0,80)); try { await pgClient.query('ROLLBACK TO SAVEPOINT sp_recalc'); } catch {} }
+      results.counts.recalculatedBalances = (await runPhase('إعادة حساب الأرصدة', () => this._recalculateBalances(pgClient))) ?? 0;
 
       // إعادة تفعيل الـ triggers قبل COMMIT
       for (const t of importTables) {
@@ -446,6 +444,40 @@ class RsfMapper {
       results.success = false;
       results.errors.push(err.message || String(err));
       console.error('[RSF Mapper] خطأ:', err);
+    }
+
+    // ── كتابة سجلّ الاستيراد (العدّات + أسباب التخطّي) في ملف يسهل على المستخدم
+    // مشاركته — يكشف بالضبط لماذا تخطّى قسمٌ ما (فواتير/حركات...) على جهازه دون
+    // الحاجة لإعادة إنتاج محلية. يُكتب في userData للمثبّت + نسخة بمسار ثابت.
+    try {
+      const fs = require('fs');
+      const path = require('path');
+      let base;
+      try { base = require('electron').app.getPath('userData'); } catch { base = require('os').tmpdir(); }
+      const now = new Date();
+      const stamp = now.toISOString().replace(/[:.]/g, '-');
+      const lines = [];
+      lines.push('=== TexaCore Import Log — ' + now.toISOString() + ' ===');
+      lines.push('company: ' + this.companyId + '   tenant: ' + this.tenantId);
+      lines.push('success: ' + results.success);
+      lines.push('counts: ' + JSON.stringify(results.counts));
+      lines.push('skipped / errors (' + results.errors.length + '):');
+      if (results.errors.length === 0) {
+        lines.push('  (لا أخطاء — اكتمل كل شيء)');
+      } else {
+        for (const e of results.errors) {
+          if (typeof e === 'string') lines.push('  • ' + e);
+          else lines.push('  • [' + (e.phase || '?') + '] ' + (e.error || '') + (e.detail ? '  | ' + e.detail : ''));
+        }
+      }
+      const body = lines.join('\n') + '\n';
+      const file = path.join(base, 'import-errors-' + stamp + '.log');
+      fs.writeFileSync(file, body, 'utf8');
+      try { fs.writeFileSync(path.join(base, 'last-import-errors.log'), body, 'utf8'); } catch {}
+      results.logFile = file;
+      console.log('[RSF] 📝 سجلّ الاستيراد:', file);
+    } catch (logErr) {
+      console.warn('[RSF] could not write import log:', logErr.message);
     }
 
     return results;
