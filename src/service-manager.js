@@ -955,11 +955,32 @@ window.__TEXACORE_CONFIG__ = {
         req.pipe(proxyReq);
       });
 
+      // ⛔ Never cache the SPA shell + service worker. Content-hashed assets are
+      // immutable, but index.html / sw.js MUST always be revalidated — otherwise a
+      // subdomain origin (textile001.texacore.ai, served via Cloudflare which has its
+      // own edge cache + a separate PWA cache from localhost) keeps serving a STALE
+      // frontend after an update, so the same user sees a different (older) module
+      // list than on localhost. no-store forces the fresh shell → SW updates → match.
+      const NO_STORE = (req, res, next) => {
+        const p = req.path;
+        if (p === '/' || p === '/index.html' || p === '/sw.js' || p === '/registerSW.js'
+            || p.endsWith('.webmanifest') || p === '/manifest.json' || p === '/workbox-config.js') {
+          res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.set('Pragma', 'no-cache');
+          res.set('Expires', '0');
+        }
+        next();
+      };
+      app.use(NO_STORE);
+
       // Serve static files
       app.use(express.static(frontendPath));
 
-      // Handle SPA routing (fallback to index.html)
+      // Handle SPA routing (fallback to index.html) — shell is never cached
       app.use((req, res) => {
+        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        res.set('Pragma', 'no-cache');
+        res.set('Expires', '0');
         res.sendFile(path.join(frontendPath, 'index.html'));
       });
 
