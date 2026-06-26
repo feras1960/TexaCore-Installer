@@ -244,10 +244,12 @@ class RsfMapper {
           SELECT
             pi.id, pi.tenant_id, pi.company_id, pi.branch_id,
             CASE
-              WHEN pi.receipt_status = 'received' THEN 'paid'
+              -- purchase_transactions_stage_check يسمح فقط بـ:
+              -- request/quotation/draft/confirmed/received/posted/cancelled
+              WHEN pi.receipt_status = 'received' THEN 'received'
               WHEN pi.status IN ('posted','completed') THEN 'posted'
-              WHEN pi.status = 'paid' THEN 'paid'
-              WHEN pi.document_stage IN ('draft','quotation','order','approved','receipt','invoice','posted','cancelled') THEN pi.document_stage
+              WHEN pi.status = 'paid' THEN 'posted'
+              WHEN pi.document_stage IN ('draft','quotation','request','confirmed','received','posted','cancelled') THEN pi.document_stage
               ELSE 'draft'
             END,
             pi.invoice_number,
@@ -2161,8 +2163,9 @@ class RsfMapper {
       // المستودع الافتراضي
       const defaultWarehouseId = this.warehouseMap[1] || null;
 
-      // تحديد الحالة: طلبية شراء = 'order' (من القيم المسموحة في CHECK constraint)
-      const stage = 'order';
+      // طلبية شراء = 'confirmed': قيد purchase_transactions_stage_check يسمح فقط بـ
+      // request/quotation/draft/confirmed/received/posted/cancelled — وليس 'order'.
+      const stage = 'confirmed';
       const orderDate = order.date ? new Date(order.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
 
       try {

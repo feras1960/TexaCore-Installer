@@ -937,6 +937,11 @@
       "order": 186,
       "file": "20260626j_relax_stock_transfers_created_by.sql",
       "name": "20260626j_relax_stock_transfers_created_by"
+    },
+    {
+      "order": 187,
+      "file": "20260626k_unify_transaction_stage_checks.sql",
+      "name": "20260626k_unify_transaction_stage_checks"
     }
   ]
 }

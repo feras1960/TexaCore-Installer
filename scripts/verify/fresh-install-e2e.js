@@ -47,9 +47,26 @@ async function provision() {
   console.log('[1/4] Provisioning a CLEAN database from migrations.json …');
   psql(['-d', 'postgres', '-c', `DROP DATABASE IF EXISTS ${DB} WITH (FORCE)`]);
   psql(['-d', 'postgres', '-c', `CREATE DATABASE ${DB}`]);
-  // base extensions a fresh install's bundled postgres provides
-  psql(['-d', DB, '-v', 'ON_ERROR_STOP=0', '-c',
-    'CREATE EXTENSION IF NOT EXISTS pgcrypto; CREATE EXTENSION IF NOT EXISTS "uuid-ossp"; CREATE SCHEMA IF NOT EXISTS auth;']);
+  // Base objects a real install's bundled postgres + GoTrue provide BEFORE
+  // migrations run. Critically auth.users must exist so the big schema-sync
+  // migration applies FULLY (its FKs/constraints reference auth.users) — without
+  // it the sync half-applies and leaves looser constraints, so the harness would
+  // miss constraint bugs (e.g. purchase_transactions_stage_check) that only bite
+  // on a real install. auth.uid()/role()/jwt() mirror Supabase's.
+  psql(['-d', DB, '-v', 'ON_ERROR_STOP=0', '-c', `
+    CREATE EXTENSION IF NOT EXISTS pgcrypto;
+    CREATE EXTENSION IF NOT EXISTS "uuid-ossp";
+    CREATE SCHEMA IF NOT EXISTS auth;
+    CREATE TABLE IF NOT EXISTS auth.users (
+      id uuid PRIMARY KEY DEFAULT gen_random_uuid(),
+      email varchar(255), encrypted_password varchar(255),
+      raw_user_meta_data jsonb, raw_app_meta_data jsonb,
+      created_at timestamptz DEFAULT now(), updated_at timestamptz DEFAULT now()
+    );
+    CREATE OR REPLACE FUNCTION auth.uid() RETURNS uuid LANGUAGE sql STABLE AS $f$ SELECT (nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'sub')::uuid $f$;
+    CREATE OR REPLACE FUNCTION auth.role() RETURNS text LANGUAGE sql STABLE AS $f$ SELECT nullif(current_setting('request.jwt.claims', true), '')::jsonb ->> 'role' $f$;
+    CREATE OR REPLACE FUNCTION auth.jwt() RETURNS jsonb LANGUAGE sql STABLE AS $f$ SELECT coalesce(nullif(current_setting('request.jwt.claims', true), '')::jsonb, '{}'::jsonb) $f$;
+  `]);
 
   const manifest = JSON.parse(fs.readFileSync(path.join(MIGRATIONS_DIR, 'migrations.json'), 'utf8')).migrations;
   let ok = 0, failed = [];
@@ -107,7 +124,7 @@ async function run() {
 
   console.log('[4/4] Asserting …');
   // import errors must be empty
-  assert(r.errors.length === 0, `import errors = ${r.errors.length} ${JSON.stringify(r.errors.map(e => e.phase || e))}`);
+  assert(r.errors.length === 0, `import errors = ${r.errors.length}: ${JSON.stringify(r.errors.map(e => (e.phase || '') + ' → ' + (e.error || e)))}`);
   // every entity in the file is imported (legit skips accounted for)
   assert(r.counts.purchaseInvoices >= file.purchaseInvoices, `purchaseInvoices ${r.counts.purchaseInvoices}/${file.purchaseInvoices}`);
   assert(r.counts.inventoryMoves >= file.inventoryMoves, `inventoryMoves ${r.counts.inventoryMoves}/${file.inventoryMoves}`);
