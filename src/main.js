@@ -2296,12 +2296,22 @@ const httpServer = http.createServer(async (req, res) => {
             fiscal_year_start: 'January'
           };
           await pgClient.query(`
-            UPDATE public.companies 
+            UPDATE public.companies
             SET accounting_settings = $1::jsonb
             WHERE id = $2
           `, [JSON.stringify(accountingSettings), companyId]);
+
+          // Seed a local subscription so plan limits resolve (no subscription →
+          // get_all_plan_limits returns no_active_subscription → "0/0" → blocks
+          // invoice creation). Imported installs are local-unlimited (own server).
+          await pgClient.query(`
+            INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
+            SELECT $1, sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
+            FROM public.subscription_plans sp WHERE sp.code = 'local-unlimited' LIMIT 1
+            ON CONFLICT DO NOTHING
+          `, [tenantId]);
         }
-        
+
         // تنظيف كاش الملفات لضمان استخدام أحدث نسخة عند كل استيراد
         delete require.cache[require.resolve('./rsf-reader')];
         delete require.cache[require.resolve('./rsf-mapper')];
@@ -3098,6 +3108,17 @@ const httpServer = http.createServer(async (req, res) => {
             base_currency: baseCurrCode, local_currency: baseCurrCode,
             supported_currencies: supportedCurrencies, fiscal_year_start: 'January'
           }), companyId]);
+
+          // Seed a local subscription so plan limits resolve. Without one,
+          // get_all_plan_limits returns {error:'no_active_subscription'} → the UI
+          // shows "0/0" and blocks invoice creation. Imported installs are treated
+          // as local-unlimited (the owner's own server, never capped).
+          await pgClient.query(`
+            INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
+            SELECT $1, sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
+            FROM public.subscription_plans sp WHERE sp.code = 'local-unlimited' LIMIT 1
+            ON CONFLICT DO NOTHING
+          `, [tenantId]);
 
           console.log(`[RSF-Path] ✅ Created tenant=${tenantId}, company=${companyId}, currency=${baseCurrCode}`);
         }

@@ -50,6 +50,7 @@ class RsfMapper {
   async importAll(pgClient, options = {}) {
     const summary = this.reader.getSummary();
     const results = { success: true, errors: [], counts: {}, users: [] };
+    this._skipped = []; // أخطاء عناصر معزولة داخل حلقات المراحل (مثل طلبيات الشراء)
 
     // تحميل العملات من ملف الرشيد
     this._loadCurrencies();
@@ -454,6 +455,11 @@ class RsfMapper {
       results.success = false;
       results.errors.push(err.message || String(err));
       console.error('[RSF Mapper] خطأ:', err);
+    }
+
+    // ضمّ أخطاء العناصر المعزولة (طلبيات الشراء الفاشلة فردياً…) إلى أخطاء النتيجة
+    if (Array.isArray(this._skipped) && this._skipped.length) {
+      results.errors.push(...this._skipped);
     }
 
     // ── كتابة سجلّ الاستيراد (العدّات + أسباب التخطّي) في ملف يسهل على المستخدم
@@ -2160,6 +2166,7 @@ class RsfMapper {
       const orderDate = order.date ? new Date(order.date).toISOString().split('T')[0] : new Date().toISOString().split('T')[0];
 
       try {
+        await pgClient.query('SAVEPOINT sp_po');
         // إدخال رأس الطلبية في purchase_transactions
         await pgClient.query(`
           INSERT INTO purchase_transactions (
@@ -2229,11 +2236,19 @@ class RsfMapper {
           ]);
         }
 
+        await pgClient.query('RELEASE SAVEPOINT sp_po');
         inserted++;
         console.log(`[RSF] ✅ طلبية شراء: ${orderNumber} (${order.lines.length} بند، المجموع: ${order.total})`);
         this._emit('استيراد طلبيات الشراء', inserted, orders.length);
       } catch (e) {
-        console.warn(`[RSF] ⚠️ طلبية شراء ${order.number}:`, e.message.substring(0, 100));
+        // عزل فشل الطلبية الواحدة حتى لا تُجهض المعاملة وتتسلسل لـ"transaction aborted"
+        // على بقية الطلبيات؛ ونجمع السبب الحقيقي ليظهر في سجلّ/تقرير الاستيراد.
+        try { await pgClient.query('ROLLBACK TO SAVEPOINT sp_po'); await pgClient.query('RELEASE SAVEPOINT sp_po'); } catch {}
+        const msg = (e && e.message) ? e.message : String(e);
+        console.warn(`[RSF] ⚠️ طلبية شراء ${order.number}:`, msg);
+        if (Array.isArray(this._skipped)) {
+          this._skipped.push({ phase: 'طلبية شراء ' + order.number, error: msg, detail: (e && e.detail) || null });
+        }
       }
     }
 
