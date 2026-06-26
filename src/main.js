@@ -2300,17 +2300,17 @@ const httpServer = http.createServer(async (req, res) => {
             SET accounting_settings = $1::jsonb
             WHERE id = $2
           `, [JSON.stringify(accountingSettings), companyId]);
-
-          // Seed a local subscription so plan limits resolve (no subscription →
-          // get_all_plan_limits returns no_active_subscription → "0/0" → blocks
-          // invoice creation). Imported installs are local-unlimited (own server).
-          await pgClient.query(`
-            INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
-            SELECT $1, sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
-            FROM public.subscription_plans sp WHERE sp.code = 'local-unlimited' LIMIT 1
-            ON CONFLICT DO NOTHING
-          `, [tenantId]);
         }
+
+        // Ensure a local subscription exists for BOTH new AND reused companies so
+        // plan limits resolve. Re-importing reuses the existing company and skipped
+        // the create-branch seed → persistent "0/0". local-unlimited = own server.
+        await pgClient.query(`
+          INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
+          SELECT $1, sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
+          FROM public.subscription_plans sp WHERE sp.code = 'local-unlimited' LIMIT 1
+          ON CONFLICT DO NOTHING
+        `, [tenantId]);
 
         // تنظيف كاش الملفات لضمان استخدام أحدث نسخة عند كل استيراد
         delete require.cache[require.resolve('./rsf-reader')];
@@ -3109,19 +3109,20 @@ const httpServer = http.createServer(async (req, res) => {
             supported_currencies: supportedCurrencies, fiscal_year_start: 'January'
           }), companyId]);
 
-          // Seed a local subscription so plan limits resolve. Without one,
-          // get_all_plan_limits returns {error:'no_active_subscription'} → the UI
-          // shows "0/0" and blocks invoice creation. Imported installs are treated
-          // as local-unlimited (the owner's own server, never capped).
-          await pgClient.query(`
-            INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
-            SELECT $1, sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
-            FROM public.subscription_plans sp WHERE sp.code = 'local-unlimited' LIMIT 1
-            ON CONFLICT DO NOTHING
-          `, [tenantId]);
-
           console.log(`[RSF-Path] ✅ Created tenant=${tenantId}, company=${companyId}, currency=${baseCurrCode}`);
         }
+
+        // Ensure a local subscription exists for BOTH new AND reused companies, so
+        // plan limits resolve. Without one, get_all_plan_limits returns
+        // no_active_subscription → the UI shows "0/0" and blocks invoice creation.
+        // (Re-importing reuses the existing company, which skipped the create-branch
+        // seed — that was the real cause of the persistent "0/0".)
+        await pgClient.query(`
+          INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
+          SELECT $1, sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
+          FROM public.subscription_plans sp WHERE sp.code = 'local-unlimited' LIMIT 1
+          ON CONFLICT DO NOTHING
+        `, [tenantId]);
 
         // ── 4. Import RSF data (same as /api/import-rsf) ─────────
         const freshReader = new RSF(filePath);

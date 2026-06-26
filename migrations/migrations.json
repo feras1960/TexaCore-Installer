@@ -942,6 +942,11 @@
       "order": 187,
       "file": "20260626k_unify_transaction_stage_checks.sql",
       "name": "20260626k_unify_transaction_stage_checks"
+    },
+    {
+      "order": 188,
+      "file": "20260626l_reseed_missing_subscriptions.sql",
+      "name": "20260626l_reseed_missing_subscriptions"
     }
   ]
 }
