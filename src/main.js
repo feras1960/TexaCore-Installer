@@ -768,6 +768,13 @@ class HeartbeatSender {
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('license-updated', state);
       }
 
+      // Keep the sidebar's module gating in lock-step with the (now-updated)
+      // license, so an admin's package-module change propagates on this heartbeat.
+      const modsChanged = await syncTenantModulesFromLicense();
+      if (modsChanged && mainWindow && !mainWindow.isDestroyed()) {
+        mainWindow.webContents.send('modules-updated'); // let the UI refetch plan limits
+      }
+
       // Enforce status pushed instantly (revoke / suspend / block lock the
       // device now; reactivation clears the local lock for recovery).
       if (state.status === 'revoked' || state.status === 'suspended') {
@@ -2312,6 +2319,9 @@ const httpServer = http.createServer(async (req, res) => {
           ON CONFLICT DO NOTHING
         `, [tenantId]);
 
+        // Gate the sidebar by the license's modules immediately.
+        await syncTenantModulesFromLicense();
+
         // تنظيف كاش الملفات لضمان استخدام أحدث نسخة عند كل استيراد
         delete require.cache[require.resolve('./rsf-reader')];
         delete require.cache[require.resolve('./rsf-mapper')];
@@ -3124,6 +3134,10 @@ const httpServer = http.createServer(async (req, res) => {
           ON CONFLICT DO NOTHING
         `, [tenantId]);
 
+        // Gate the sidebar by the license's modules immediately (don't wait for
+        // the next heartbeat) so an imported company respects its package.
+        await syncTenantModulesFromLicense();
+
         // ── 4. Import RSF data (same as /api/import-rsf) ─────────
         const freshReader = new RSF(filePath);
         await freshReader.open();
@@ -3769,6 +3783,40 @@ async function syncFreePlanLimits() {
     return true;
   } catch (e) {
     fileLog('[Heartbeat] syncFreePlanLimits skipped:', e.message);
+    return false;
+  }
+}
+
+// ─── Module gating sync (heartbeat + on import/boot) ─────────
+// The sidebar gates by tenant_modules. Keep it in lock-step with the license's
+// enabled_modules (which applyCloudState refreshes from the cloud each heartbeat),
+// so each package shows only its modules and an admin's change in /saas/platforms
+// propagates to every install on its next heartbeat. CORE stays always-on so the
+// system can never lock itself out. No-op when the license doesn't define modules.
+const CORE_MODULES = ['core', 'dashboard', 'settings', 'users', 'companies', 'system_config', 'activity_log', 'workflows'];
+async function syncTenantModulesFromLicense() {
+  try {
+    const lic = (licenseGuard && licenseGuard.loadLicense) ? licenseGuard.loadLicense() : null;
+    const enabled = (lic && Array.isArray(lic.enabled_modules)) ? lic.enabled_modules : [];
+    if (!enabled.length) return false; // license doesn't define modules → leave gating untouched
+    const mods = [...new Set([...enabled, ...CORE_MODULES])]
+      .filter(m => typeof m === 'string' && m.trim())
+      .map(m => m.trim().replace(/[^a-zA-Z0-9_]/g, '')) // injection-proof (codes are [a-z0-9_])
+      .filter(Boolean);
+    if (!mods.length) return false;
+    const vals = mods.map(m => `('${m}')`).join(',');
+    const inList = mods.map(m => `'${m}'`).join(',');
+    await psqlExec(`
+      INSERT INTO public.tenant_modules (id, tenant_id, module_code, is_active)
+      SELECT gen_random_uuid(), t.id, v.m, true
+      FROM public.tenants t, (VALUES ${vals}) AS v(m)
+      ON CONFLICT (tenant_id, module_code) DO UPDATE SET is_active = true;
+      UPDATE public.tenant_modules SET is_active = false WHERE module_code NOT IN (${inList});
+    `);
+    fileLog('[Modules] 🔁 tenant_modules synced from license:', mods.join(','));
+    return true;
+  } catch (e) {
+    fileLog('[Modules] syncTenantModulesFromLicense skipped:', e.message);
     return false;
   }
 }
