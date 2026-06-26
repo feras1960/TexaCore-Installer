@@ -681,7 +681,10 @@ class HeartbeatSender {
           try { const inf = licenseGuard.getInfo(); if (inf && (inf.status === 'revoked' || inf.status === 'suspended')) licenseGuard.setLocalStatus('active'); } catch (e) {}
         }
       }
-      await syncFreePlanLimits();
+      // Gate the FREE package too: pull its modules + limits from the cloud and apply
+      // (tier forced to 'free' — never mis-resolve from a stale local license). This is
+      // why free used to show every module: the free path never synced the package.
+      await syncActivePlan('free');
       if (String(config.licenseKey || '').startsWith('FREE-2026')) {
         this._uploadCloudBackup(config);
       }
@@ -3839,71 +3842,103 @@ function fetchCloudPlan(code) {
   });
 }
 
-// Sync tenant_modules to (plan.included_modules ∪ CORE), reading the plan row in SQL
-// so it works online or offline. CORE always stays active. `code` is whitelisted.
+// Sync tenant_modules to exactly (moduleList ∪ CORE): activate those, deactivate the
+// rest. VALUES-based from a JS list → no dependency on the local included_modules
+// column type. Uses NOT EXISTS (not ON CONFLICT) so a differently-named/absent unique
+// constraint can't abort it. CORE always stays active. Codes sanitized → injection-proof.
+async function applyTenantModules(moduleList) {
+  const mods = [...new Set([...(moduleList || []), ...CORE_MODULES])]
+    .filter(m => typeof m === 'string' && m.trim())
+    .map(m => m.trim().replace(/[^a-zA-Z0-9_]/g, ''))
+    .filter(Boolean);
+  if (!mods.length) return false;
+  const vals = mods.map(m => `('${m}')`).join(',');
+  const inList = mods.map(m => `'${m}'`).join(',');
+  await psqlExec(`
+    INSERT INTO public.tenant_modules (id, tenant_id, module_code, is_active)
+    SELECT gen_random_uuid(), t.id, v.m, true
+    FROM public.tenants t, (VALUES ${vals}) AS v(m)
+    WHERE NOT EXISTS (SELECT 1 FROM public.tenant_modules tm WHERE tm.tenant_id = t.id AND tm.module_code = v.m);
+    UPDATE public.tenant_modules SET is_active = true  WHERE module_code IN     (${inList});
+    UPDATE public.tenant_modules SET is_active = false WHERE module_code NOT IN (${inList});
+  `);
+  return true;
+}
+
+// Offline fallback: sync tenant_modules from the LOCAL plan row. to_jsonb() handles
+// included_modules whether it is jsonb (no-op) OR text[] (→ json array) — drift-proof.
 async function applyTenantModulesFromPlan(code) {
   const coreVals = CORE_MODULES.map(m => `('${m}')`).join(',');
   const wanted = `
     SELECT DISTINCT m FROM (
-      SELECT jsonb_array_elements_text((SELECT included_modules FROM public.subscription_plans WHERE code = '${code}' LIMIT 1)) AS m
+      SELECT jsonb_array_elements_text(to_jsonb((SELECT included_modules FROM public.subscription_plans WHERE code = '${code}' LIMIT 1))) AS m
       UNION SELECT m FROM (VALUES ${coreVals}) AS c(m)
     ) u WHERE m ~ '^[a-zA-Z0-9_]+$'`;
   await psqlExec(`
     INSERT INTO public.tenant_modules (id, tenant_id, module_code, is_active)
     SELECT gen_random_uuid(), t.id, w.m, true
     FROM public.tenants t CROSS JOIN (${wanted}) w
-    ON CONFLICT (tenant_id, module_code) DO UPDATE SET is_active = true;
+    WHERE NOT EXISTS (SELECT 1 FROM public.tenant_modules tm WHERE tm.tenant_id = t.id AND tm.module_code = w.m);
+    UPDATE public.tenant_modules SET is_active = true  WHERE module_code IN     (${wanted});
     UPDATE public.tenant_modules SET is_active = false WHERE module_code NOT IN (${wanted});
   `);
 }
 
-// Align this install to its package. Called on every paid heartbeat + after company
-// create/import. Refreshes the local plan from the cloud, points the subscription at
-// it, and syncs tenant_modules. Tells the UI to refetch when modules may have changed.
-async function syncActivePlan() {
+// Align this install to its package. Called on every heartbeat (free + paid) + after
+// company create/import. Maps tier→plan, refreshes the local plan limits from the cloud,
+// points the subscription at it, and syncs tenant_modules. tierOverride forces the tier
+// (the free path passes 'free' so it never mis-resolves from a stale local license).
+//
+// ⚠️ Each step is ISOLATED in its own try/catch: psqlExec runs under ON_ERROR_STOP=1,
+// so one bad statement aborts only ITS call — a step-1 failure must never skip the
+// module gating in step 3 (the bug that left every module visible on upgraded installs).
+async function syncActivePlan(tierOverride) {
+  let tier = tierOverride || null, code = null;
   try {
-    const tier = (licenseGuard && licenseGuard.getInfo) ? ((licenseGuard.getInfo() || {}).tier) : null;
-    const code = planCodeForTier(tier);
-    if (!code) return false; // unknown tier / no license → leave gating + limits untouched
+    if (!tier) tier = (licenseGuard && licenseGuard.getInfo) ? ((licenseGuard.getInfo() || {}).tier) : null;
+    code = planCodeForTier(tier);
+  } catch (e) { /* ignore */ }
+  if (!code) return false; // unknown tier / no license → leave gating + limits untouched
 
-    // 1) [cloud-central] refresh the local plan's limits + modules from the cloud package
-    const cloud = await fetchCloudPlan(code);
-    if (cloud) {
+  // Fetch the cloud package once (limits + module list). null when offline.
+  let cloud = null;
+  try { cloud = await fetchCloudPlan(code); } catch (e) { fileLog('[Plan] fetchCloudPlan:', e.message); }
+
+  // 1) [cloud-central] refresh the local plan's LIMITS from the cloud (ints ONLY —
+  //    never touch included_modules, whose type may be jsonb OR text[] by lineage).
+  if (cloud) {
+    try {
       const sets = [];
-      for (const k of PLAN_LIMIT_COLS) {
-        const n = parseInt(cloud[k], 10);
-        if (!Number.isNaN(n)) sets.push(`${k} = ${n}`);
-      }
-      if (Array.isArray(cloud.included_modules)) {
-        const safe = cloud.included_modules.filter(m => typeof m === 'string' && /^[a-zA-Z0-9_]+$/.test(m));
-        if (safe.length) sets.push(`included_modules = '${JSON.stringify(safe)}'::jsonb`);
-      }
+      for (const k of PLAN_LIMIT_COLS) { const n = parseInt(cloud[k], 10); if (!Number.isNaN(n)) sets.push(`${k} = ${n}`); }
       if (sets.length) await psqlExec(`UPDATE public.subscription_plans SET ${sets.join(', ')} WHERE code = '${code}';`);
-    }
+    } catch (e) { fileLog('[Plan] limit refresh skipped:', e.message); }
+  }
 
-    // 2) point the tenant's subscription at this plan (create if missing, else re-point)
+  // 2) point the tenant subscription at this plan (create if missing, else re-point)
+  try {
     await psqlExec(`
       INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
       SELECT t.id, sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
       FROM public.tenants t, public.subscription_plans sp
       WHERE sp.code = '${code}'
-        AND NOT EXISTS (SELECT 1 FROM public.tenant_subscriptions ts WHERE ts.tenant_id = t.id)
-      ON CONFLICT DO NOTHING;
+        AND NOT EXISTS (SELECT 1 FROM public.tenant_subscriptions ts WHERE ts.tenant_id = t.id);
       UPDATE public.tenant_subscriptions ts SET plan_id = sp.id, status = 'active'
         FROM public.subscription_plans sp
        WHERE sp.code = '${code}' AND ts.plan_id IS DISTINCT FROM sp.id;
     `);
+  } catch (e) { fileLog('[Plan] subscription re-point skipped:', e.message); }
 
-    // 3) sync the sidebar's module gating from this plan
-    await applyTenantModulesFromPlan(code);
+  // 3) sync the sidebar's module gating — cloud list when online (cloud-central, so an
+  //    admin's /saas module toggle propagates), else the baked local plan.
+  try {
+    const list = (cloud && Array.isArray(cloud.included_modules)) ? cloud.included_modules : null;
+    if (list) await applyTenantModules(list);
+    else await applyTenantModulesFromPlan(code);
+  } catch (e) { fileLog('[Plan] module gating skipped:', e.message); }
 
-    fileLog(`[Plan] 🔁 active plan synced: tier=${tier} → ${code}`);
-    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('modules-updated');
-    return true;
-  } catch (e) {
-    fileLog('[Plan] syncActivePlan skipped:', e.message);
-    return false;
-  }
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('modules-updated'); } catch (e) {}
+  fileLog(`[Plan] ✅ active plan synced: tier=${tier} → ${code}`);
+  return true;
 }
 
 // Open browser
