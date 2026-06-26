@@ -912,6 +912,26 @@
       "order": 181,
       "file": "20260626e_align_notnull_to_cloud.sql",
       "name": "20260626e_align_notnull_to_cloud"
+    },
+    {
+      "order": 182,
+      "file": "20260626f_fix_company_creation_trigger.sql",
+      "name": "20260626f_fix_company_creation_trigger"
+    },
+    {
+      "order": 183,
+      "file": "20260626g_seed_subscription_plans.sql",
+      "name": "20260626g_seed_subscription_plans"
+    },
+    {
+      "order": 184,
+      "file": "20260626h_fix_plan_limits_jsonb_modules.sql",
+      "name": "20260626h_fix_plan_limits_jsonb_modules"
+    },
+    {
+      "order": 185,
+      "file": "20260626i_repair_existing_companies.sql",
+      "name": "20260626i_repair_existing_companies"
     }
   ]
 }

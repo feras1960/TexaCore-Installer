@@ -1306,17 +1306,19 @@ async function handleCreateLocalCompany(companyData) {
       console.warn('[TexaCore] Could not read license modules:', e.message);
     }
 
-    // Free install → seed an ACTIVE free subscription so the local enforcement
-    // triggers (which only act on plan_type='free') apply the 200/200/1 limits.
-    // Paid/trial installs get NO subscription row on purpose: they stay
-    // unlimited locally and are never enforced (seeding free for them would
-    // wrongly cap a paid user). end_date is a far date = "free forever".
-    const subscriptionSql = isFreeInstall ? `
+    // Always seed an ACTIVE local subscription. Without one, get_all_plan_limits
+    // returns {error:'no_active_subscription'} → the UI shows "0/0" and BLOCKS
+    // invoice creation on every screen. Free installs get the enforced free plan
+    // (200 invoices/mo — the enforcement triggers act only on plan_type='free', so
+    // this is the upsell teaser). Paid/trial installs get the local-unlimited plan
+    // (all -1) so the owner's own server is never capped. end_date far = "forever".
+    const installPlanCode = isFreeInstall ? 'free' : 'local-unlimited';
+    const subscriptionSql = `
       INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
       SELECT '${tenantId}', sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
-      FROM public.subscription_plans sp WHERE sp.code = 'free' LIMIT 1
+      FROM public.subscription_plans sp WHERE sp.code = '${installPlanCode}' LIMIT 1
       ON CONFLICT DO NOTHING;
-` : '';
+`;
 
     const modulesSql = enabledModules
       .map(mod => `('${require('crypto').randomUUID()}', '${tenantId}', '${mod}', true)`)
@@ -1374,7 +1376,42 @@ ${subscriptionSql}
         RAISE NOTICE 'Chart creation error: % — will retry on first login', SQLERRM;
       END $$;
 
-      -- Note: accounting_settings already set in companies INSERT above
+      -- Company defaults: company_accounting_settings ROW + default warehouse + branch.
+      -- create_extended_chart builds ONLY the chart; without this the settings row never
+      -- exists → company_accounting_settings returns 0 rows → 406 errors across every
+      -- screen + no default warehouse + cannot create invoices (exactly the broken
+      -- fresh-company symptom). Run with triggers ON so trg_set_cas_tenant_id fills
+      -- tenant_id (replica role would leave it NULL → NOT NULL violation); auth.uid() is
+      -- NULL on this admin connection so the audit trigger writes user_id=NULL (nullable).
+      DO $$ BEGIN
+        PERFORM setup_company_defaults('${companyId}'::uuid);
+      EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Company defaults error: % — will retry on first login', SQLERRM;
+      END $$;
+
+      -- Link the default posting accounts (cash/bank/revenue/inventory/COGS…) by code,
+      -- now that BOTH the chart and the settings row exist.
+      DO $$ BEGIN
+        PERFORM auto_set_default_accounts('${companyId}'::uuid);
+      EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Default account linking error: %', SQLERRM;
+      END $$;
+
+      -- Sync the chosen currencies into the settings row. setup_company_defaults
+      -- seeds only the base currency, but the user picked both a local and a main
+      -- currency (e.g. UAH + USD) — carry the full list from the company jsonb so
+      -- the importer can transact in the foreign currency.
+      DO $$ BEGIN
+        UPDATE public.company_accounting_settings cas
+        SET supported_currencies = ARRAY(SELECT jsonb_array_elements_text(c.accounting_settings->'supported_currencies'))
+        FROM public.companies c
+        WHERE cas.company_id = c.id AND c.id = '${companyId}'::uuid
+          AND c.accounting_settings ? 'supported_currencies';
+      EXCEPTION WHEN OTHERS THEN
+        RAISE NOTICE 'Currency sync error: %', SQLERRM;
+      END $$;
+
+      -- Note: accounting_settings jsonb already set in companies INSERT above
 
       -- Reload PostgREST schema cache so new objects are available
       NOTIFY pgrst, 'reload schema';
