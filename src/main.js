@@ -4038,7 +4038,12 @@ function createTray() {
 
 // ─── Auto-Update System ──────────────────────────────────────
 function setupAutoUpdater() {
-  autoUpdater.autoDownload = false;
+  // macOS builds are ad-hoc signed; Squirrel.Mac refuses to apply updates to
+  // non-Developer-ID apps, so on mac we skip OTA entirely and users update via
+  // the DMG. On Windows the exe + latest.yml feed is published per release, so
+  // we download in the background and prompt to restart when ready.
+  const isMac = process.platform === 'darwin';
+  autoUpdater.autoDownload = !isMac;
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on('update-available', (info) => {
@@ -4060,18 +4065,36 @@ function setupAutoUpdater() {
     });
   });
 
-  autoUpdater.on('update-downloaded', () => {
+  autoUpdater.on('update-downloaded', (info) => {
     mainWindow?.webContents.send('update-downloaded');
+    if (isMac) return; // cannot self-install an ad-hoc-signed mac app
+    dialog.showMessageBox(mainWindow, {
+      type: 'info',
+      buttons: ['إعادة التشغيل الآن', 'لاحقاً'],
+      defaultId: 0,
+      cancelId: 1,
+      noLink: true,
+      title: 'تحديث جاهز',
+      message: `الإصدار ${info?.version || ''} جاهز للتثبيت`,
+      detail: 'سيُعاد تشغيل التطبيق لتطبيق التحديث. سيُثبَّت تلقائياً عند الإغلاق إن اخترت لاحقاً.',
+    }).then(({ response }) => {
+      if (response === 0) {
+        app.isQuitting = true;
+        autoUpdater.quitAndInstall();
+      }
+    }).catch(() => {});
   });
 
   autoUpdater.on('error', (err) => {
     console.error('Update error:', err);
   });
 
-  // Check for updates after 5 seconds
-  setTimeout(() => {
-    autoUpdater.checkForUpdates().catch(() => {});
-  }, 5000);
+  if (isMac) return; // no update feed for mac — detection would only 404
+
+  // Initial check shortly after launch, then poll every 6 hours.
+  const check = () => autoUpdater.checkForUpdates().catch(() => {});
+  setTimeout(check, 5000);
+  setInterval(check, 6 * 60 * 60 * 1000);
 }
 
 // Check for update (manual)
