@@ -16,9 +16,9 @@
 
 
 # ─── النسخة الحالية ─────────────────────────────────────────
-INSTALLER_VERSION=1.5.42
-BUILD_DATE=2026-07-09T16:00:00Z
-GIT_TAG=v1.5.42
+INSTALLER_VERSION=1.5.43
+BUILD_DATE=2026-07-10T00:35:00Z
+GIT_TAG=v1.5.43
 
 # ─── مسار المشروع الرسمي ────────────────────────────────────
 INSTALLER_ROOT="/Users/macbook/TexaCore-Backups-2026-03-25/erpsystem supabase/texacore-installer"
