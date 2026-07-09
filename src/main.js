@@ -658,10 +658,23 @@ class HeartbeatSender {
       geo_country_code: geoCountryCode,
     };
 
+    // The license KEY is authoritative for free-vs-paid, NOT the mutable isFree
+    // flag or the cached license.dat tier — a stale isFree=true (or tier='free')
+    // left over from a free→paid transition used to pin the install to the free
+    // package forever, so its real cloud tier (e.g. PRO) never synced. Free keys
+    // are FREE-2026-* (or an unbound/empty key); anything else is a real license.
+    const _lkey = String(config.licenseKey || '');
+    const _looksFree = (!_lkey || _lkey.startsWith('FREE'));
+    if (!_looksFree && config.isFree === true) {
+      config.isFree = false;
+      try { saveConfig(config); } catch (e) {}
+      fileLog('[Heartbeat] 🔧 cleared stale isFree for real license key ' + _lkey);
+    }
+
     // FREE installs: register/refresh the stable cloud number (binds the local
     // placeholder → FREE-2026 on the first online beat), track last-seen, honor a
     // remote revoke/suspend, sync the smart limits, and back up to our cloud.
-    if (config.isFree === true || (licenseGuard && licenseGuard.getInfo()?.tier === 'free')) {
+    if (_looksFree && (config.isFree === true || (licenseGuard && licenseGuard.getInfo()?.tier === 'free'))) {
       const reg = await registerFreeOnline();   // null when offline
       if (reg && reg.license_key) {
         if (reg.license_key !== config.licenseKey) {

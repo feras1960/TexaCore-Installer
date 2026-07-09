@@ -136,6 +136,25 @@ async function run() {
   const inv = lim && lim.limits && lim.limits.invoices_monthly;
   assert(inv && inv.allowed === true, `invoice limit not allowed: ${JSON.stringify(lim && (lim.error || inv))}`);
 
+  // ── PRO gating (the path that escaped in v1.5.41): with an ACTIVE subscription
+  // the function used to hit COALESCE(varchar[], jsonb) on the local JSONB
+  // included_modules column and return {error:'exception'} → the frontend gate
+  // fell open and EVERY module showed. Assert: an active pro subscription
+  // resolves with NO error (and a non-empty module list when the plan has one).
+  await c.query(`INSERT INTO tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
+    SELECT $1, id, 'active', CURRENT_DATE, DATE '2099-12-31'
+    FROM subscription_plans WHERE code = 'texa-professional' LIMIT 1`, [TID]);
+  const pro = (await c.query(`SELECT get_all_plan_limits($1) AS j`, [TID])).rows[0].j;
+  assert(pro && !pro.error, `pro plan-limits error: ${JSON.stringify(pro && (pro.error + ' / ' + pro.message))}`);
+  assert(pro && pro.plan_code === 'texa-professional', `pro plan_code = ${pro && pro.plan_code}`);
+  const planHasModules = (await c.query(
+    `SELECT COALESCE(jsonb_array_length(to_jsonb(included_modules)), 0) > 0 AS has
+       FROM subscription_plans WHERE code = 'texa-professional'`)).rows[0].has;
+  if (planHasModules) {
+    assert(Array.isArray(pro.modules) && pro.modules.length > 0,
+      `pro modules empty despite plan list: ${JSON.stringify(pro.modules)}`);
+  }
+
   await c.end();
 
   console.log('\n══════════ RESULT ══════════');

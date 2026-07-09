@@ -1252,6 +1252,11 @@
       "order": 249,
       "file": "20260708c_close_anon_view_mv_leaks.sql",
       "name": "20260708c_close_anon_view_mv_leaks"
+    },
+    {
+      "order": 250,
+      "file": "20260709d_get_all_plan_limits_local_jsonb.sql",
+      "name": "20260709d_get_all_plan_limits_local_jsonb"
     }
   ]
 }
