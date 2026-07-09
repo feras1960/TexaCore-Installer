@@ -952,6 +952,306 @@
       "order": 189,
       "file": "20260626m_plan_limits_unlimited_when_no_subscription.sql",
       "name": "20260626m_plan_limits_unlimited_when_no_subscription"
+    },
+    {
+      "order": 190,
+      "file": "20260702a_ecommerce_reviews.sql",
+      "name": "20260702a_ecommerce_reviews"
+    },
+    {
+      "order": 191,
+      "file": "20260702b_security_tenant_guards_exchange_purchase.sql",
+      "name": "20260702b_security_tenant_guards_exchange_purchase"
+    },
+    {
+      "order": 192,
+      "file": "20260702c_post_purchase_invoice_dual_table.sql",
+      "name": "20260702c_post_purchase_invoice_dual_table"
+    },
+    {
+      "order": 193,
+      "file": "20260702d_expire_trial_subscriptions.sql",
+      "name": "20260702d_expire_trial_subscriptions"
+    },
+    {
+      "order": 194,
+      "file": "20260702e_mark_overdue_crm_tasks.sql",
+      "name": "20260702e_mark_overdue_crm_tasks"
+    },
+    {
+      "order": 195,
+      "file": "20260702f_ecommerce_order_items_ownership.sql",
+      "name": "20260702f_ecommerce_order_items_ownership"
+    },
+    {
+      "order": 196,
+      "file": "20260702g_fix_default_account_links.sql",
+      "name": "20260702g_fix_default_account_links"
+    },
+    {
+      "order": 197,
+      "file": "20260702h_get_account_balances_batch.sql",
+      "name": "20260702h_get_account_balances_batch"
+    },
+    {
+      "order": 198,
+      "file": "20260702i_plan_limits_grace_and_suspension.sql",
+      "name": "20260702i_plan_limits_grace_and_suspension"
+    },
+    {
+      "order": 199,
+      "file": "20260702k_ecommerce_category_enhancements.sql",
+      "name": "20260702k_ecommerce_category_enhancements"
+    },
+    {
+      "order": 200,
+      "file": "20260702l_ecommerce_sale_campaigns.sql",
+      "name": "20260702l_ecommerce_sale_campaigns"
+    },
+    {
+      "order": 201,
+      "file": "20260702m_order_automation_engine.sql",
+      "name": "20260702m_order_automation_engine"
+    },
+    {
+      "order": 202,
+      "file": "20260702n_campaigns_anon_read_fix.sql",
+      "name": "20260702n_campaigns_anon_read_fix"
+    },
+    {
+      "order": 203,
+      "file": "20260702o_ecommerce_cashback.sql",
+      "name": "20260702o_ecommerce_cashback"
+    },
+    {
+      "order": 204,
+      "file": "20260702q_ecommerce_margin_rules.sql",
+      "name": "20260702q_ecommerce_margin_rules"
+    },
+    {
+      "order": 205,
+      "file": "20260702r_material_price_overrides.sql",
+      "name": "20260702r_material_price_overrides"
+    },
+    {
+      "order": 206,
+      "file": "20260702s_ecommerce_coupons.sql",
+      "name": "20260702s_ecommerce_coupons"
+    },
+    {
+      "order": 207,
+      "file": "20260702t_coupon_scope_available_cashback_tiers.sql",
+      "name": "20260702t_coupon_scope_available_cashback_tiers"
+    },
+    {
+      "order": 208,
+      "file": "20260703a_automation_v2.sql",
+      "name": "20260703a_automation_v2"
+    },
+    {
+      "order": 209,
+      "file": "20260703b_rich_templates.sql",
+      "name": "20260703b_rich_templates"
+    },
+    {
+      "order": 210,
+      "file": "20260703c_supplier_qty_billing.sql",
+      "name": "20260703c_supplier_qty_billing"
+    },
+    {
+      "order": 211,
+      "file": "20260703e_supplier_portal.sql",
+      "name": "20260703e_supplier_portal"
+    },
+    {
+      "order": 212,
+      "file": "20260703g_fix_anon_storage_tenant_fn_grant.sql",
+      "name": "20260703g_fix_anon_storage_tenant_fn_grant"
+    },
+    {
+      "order": 213,
+      "file": "20260703h_auth_email_token_hash_links.sql",
+      "name": "20260703h_auth_email_token_hash_links"
+    },
+    {
+      "order": 214,
+      "file": "20260704_ecommerce_dynamic_filters.sql",
+      "name": "20260704_ecommerce_dynamic_filters"
+    },
+    {
+      "order": 215,
+      "file": "20260704_get_product_full_specs.sql",
+      "name": "20260704_get_product_full_specs"
+    },
+    {
+      "order": 216,
+      "file": "20260705_p0_uom_cleanup_unify.sql",
+      "name": "20260705_p0_uom_cleanup_unify"
+    },
+    {
+      "order": 217,
+      "file": "20260705_p1_footwear_sector_fix.sql",
+      "name": "20260705_p1_footwear_sector_fix"
+    },
+    {
+      "order": 218,
+      "file": "20260705_p2_packaging_levels.sql",
+      "name": "20260705_p2_packaging_levels"
+    },
+    {
+      "order": 219,
+      "file": "20260705_p3_uom_convert_guarded.sql",
+      "name": "20260705_p3_uom_convert_guarded"
+    },
+    {
+      "order": 220,
+      "file": "20260705_p5_fabric_chemical_calculators.sql",
+      "name": "20260705_p5_fabric_chemical_calculators"
+    },
+    {
+      "order": 221,
+      "file": "20260705_storefront_contact_messages.sql",
+      "name": "20260705_storefront_contact_messages"
+    },
+    {
+      "order": 222,
+      "file": "20260706_ecom_delivery_requires_documents.sql",
+      "name": "20260706_ecom_delivery_requires_documents"
+    },
+    {
+      "order": 223,
+      "file": "20260706_ecom_server_price_guard.sql",
+      "name": "20260706_ecom_server_price_guard"
+    },
+    {
+      "order": 224,
+      "file": "20260706_material_type_footwear_chemical.sql",
+      "name": "20260706_material_type_footwear_chemical"
+    },
+    {
+      "order": 225,
+      "file": "20260706_p1_unit_identity_backfill.sql",
+      "name": "20260706_p1_unit_identity_backfill"
+    },
+    {
+      "order": 226,
+      "file": "20260706_p3_movements_conversion_backfill.sql",
+      "name": "20260706_p3_movements_conversion_backfill"
+    },
+    {
+      "order": 227,
+      "file": "20260706_p4_invoice_unit_identity.sql",
+      "name": "20260706_p4_invoice_unit_identity"
+    },
+    {
+      "order": 228,
+      "file": "20260706_p6_uom_convert_material_first.sql",
+      "name": "20260706_p6_uom_convert_material_first"
+    },
+    {
+      "order": 229,
+      "file": "20260706_reviews_app_integration.sql",
+      "name": "20260706_reviews_app_integration"
+    },
+    {
+      "order": 230,
+      "file": "20260706_search_add_display_no.sql",
+      "name": "20260706_search_add_display_no"
+    },
+    {
+      "order": 231,
+      "file": "20260706_tax_cycle_receivables_linking.sql",
+      "name": "20260706_tax_cycle_receivables_linking"
+    },
+    {
+      "order": 232,
+      "file": "20260706_visitor_sessions_log.sql",
+      "name": "20260706_visitor_sessions_log"
+    },
+    {
+      "order": 233,
+      "file": "20260706a_nexalive_console_rpcs.sql",
+      "name": "20260706a_nexalive_console_rpcs"
+    },
+    {
+      "order": 234,
+      "file": "20260706b_console_depth_rpcs.sql",
+      "name": "20260706b_console_depth_rpcs"
+    },
+    {
+      "order": 235,
+      "file": "20260706c_console_doc_edit.sql",
+      "name": "20260706c_console_doc_edit"
+    },
+    {
+      "order": 236,
+      "file": "20260707_ecom_cost_columns_and_module_code.sql",
+      "name": "20260707_ecom_cost_columns_and_module_code"
+    },
+    {
+      "order": 237,
+      "file": "20260707_ecom_invoice_totals_guard.sql",
+      "name": "20260707_ecom_invoice_totals_guard"
+    },
+    {
+      "order": 238,
+      "file": "20260707_ecom_paid_amount_integrity.sql",
+      "name": "20260707_ecom_paid_amount_integrity"
+    },
+    {
+      "order": 239,
+      "file": "20260707_fix1_update_inventory_stock_base_quantity.sql",
+      "name": "20260707_fix1_update_inventory_stock_base_quantity"
+    },
+    {
+      "order": 240,
+      "file": "20260707_posting_account_resolution.sql",
+      "name": "20260707_posting_account_resolution"
+    },
+    {
+      "order": 241,
+      "file": "20260707_visitor_sessions_dedup.sql",
+      "name": "20260707_visitor_sessions_dedup"
+    },
+    {
+      "order": 242,
+      "file": "20260707a_console_warehouse_containers.sql",
+      "name": "20260707a_console_warehouse_containers"
+    },
+    {
+      "order": 243,
+      "file": "20260707b_console_actions_ledger_vouchers.sql",
+      "name": "20260707b_console_actions_ledger_vouchers"
+    },
+    {
+      "order": 244,
+      "file": "20260707c_console_voucher_currency_refs.sql",
+      "name": "20260707c_console_voucher_currency_refs"
+    },
+    {
+      "order": 245,
+      "file": "20260707d_console_party_balances.sql",
+      "name": "20260707d_console_party_balances"
+    },
+    {
+      "order": 246,
+      "file": "20260708_journal_reversal_and_yearend.sql",
+      "name": "20260708_journal_reversal_and_yearend"
+    },
+    {
+      "order": 247,
+      "file": "20260708a_fix_payment_fx_gl.sql",
+      "name": "20260708a_fix_payment_fx_gl"
+    },
+    {
+      "order": 248,
+      "file": "20260708b_fix_posting_fx_gl.sql",
+      "name": "20260708b_fix_posting_fx_gl"
+    },
+    {
+      "order": 249,
+      "file": "20260708c_close_anon_view_mv_leaks.sql",
+      "name": "20260708c_close_anon_view_mv_leaks"
     }
   ]
 }
