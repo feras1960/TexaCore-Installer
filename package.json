@@ -95,6 +95,9 @@
     "mac": {
       "category": "public.app-category.business",
       "icon": "build/icon.icns",
+      "extendInfo": {
+        "CFBundleIconName": "TexaCore"
+      },
       "extraResources": [
         {
           "from": "bin/macos-arm64",
@@ -102,6 +105,10 @@
           "filter": [
             "**/*"
           ]
+        },
+        {
+          "from": "build/Assets.car",
+          "to": "Assets.car"
         }
       ],
       "target": [
