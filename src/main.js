@@ -3974,12 +3974,20 @@ ipcMain.handle('install-docker', () => ({ success: true, message: 'Docker not re
 
 // ─── System Tray ─────────────────────────────────────────────
 function createTray() {
-  const trayIconPath = app.isPackaged
-    ? path.join(process.resourcesPath, 'build', 'trayTemplate.png')
-    : path.join(__dirname, '..', 'build', 'trayTemplate.png');
-
-  const icon = nativeImage.createFromPath(trayIconPath);
-  icon.setTemplateImage(true);
+  // macOS: template icon (pure black + alpha — the PNGs were regenerated with a
+  // real transparent background; an opaque white bg made the menu bar draw a
+  // solid square). Windows: template black-on-transparent would vanish on a dark
+  // taskbar, so use the colored logo resized for the tray instead.
+  const buildDir = app.isPackaged
+    ? path.join(process.resourcesPath, 'build')
+    : path.join(__dirname, '..', 'build');
+  let icon;
+  if (process.platform === 'darwin') {
+    icon = nativeImage.createFromPath(path.join(buildDir, 'trayTemplate.png'));
+    icon.setTemplateImage(true);
+  } else {
+    icon = nativeImage.createFromPath(path.join(buildDir, 'icon.png')).resize({ width: 16, height: 16 });
+  }
   tray = new Tray(icon);
   tray.setToolTip('TexaCore ERP');
 
