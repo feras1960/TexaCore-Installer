@@ -1317,6 +1317,11 @@
       "order": 263,
       "file": "20260713N_plan_driven_gating.sql",
       "name": "20260713N_plan_driven_gating"
+    },
+    {
+      "order": 264,
+      "file": "20260713230000_recent_activity_rpc_parity.sql",
+      "name": "20260713230000_recent_activity_rpc_parity"
     }
   ]
 }
