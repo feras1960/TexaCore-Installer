@@ -359,6 +359,11 @@ class LicenseGuard {
       license_key: license.license_key,
       max_companies: license.max_companies,
       features: license.features,
+      // Per-license admin module grant (from /saas/licensing). When
+      // modules_admin_set is true the device applies enabled_modules instead of
+      // the tier-default plan modules (see syncActivePlan). Stale/unset ⇒ ignored.
+      enabled_modules: license.enabled_modules,
+      modules_admin_set: license.modules_admin_set === true,
       // H2 observability: signature validity + enforced-or-not effective tier.
       signed: this.verifySignature(license),
       effective_tier: this.effectiveTier(license),
@@ -387,7 +392,7 @@ class LicenseGuard {
     const license = this.loadLicense();
     if (!license) return false;
     const fields = ['tier', 'expires_at', 'activated_at', 'max_users', 'max_companies',
-      'max_warehouses', 'max_storage_gb', 'enabled_modules', 'custom_branding',
+      'max_warehouses', 'max_storage_gb', 'enabled_modules', 'modules_admin_set', 'custom_branding',
       'cloud_backup', 'api_access'];
     let changed = false;
     for (const f of fields) {

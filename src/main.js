@@ -4035,12 +4035,26 @@ async function syncActivePlan(tierOverride) {
     } catch (e) { fileLog('[Plan] limit refresh skipped:', e.message); }
   }
 
-  // 2) [cloud-central] refresh the local plan's MODULE LIST from the cloud when online,
-  //    so a /saas module-tree change propagates. Stored as jsonb (local lineage).
-  if (cloud && Array.isArray(cloud.included_modules) && cloud.included_modules.length) {
+  // 2) refresh the active plan's MODULE LIST. Priority:
+  //    (a) per-license ADMIN GRANT (licenses.enabled_modules when modules_admin_set) —
+  //        the admin explicitly restricted THIS device via /saas/licensing;
+  //    (b) else the cloud plan's tier-default module list.
+  //    Stale/unset enabled_modules is IGNORED (only an explicit admin flag enforces it),
+  //    so existing devices are never wrongly restricted.
+  let moduleList = null;
+  try {
+    const info = (licenseGuard && licenseGuard.getInfo) ? licenseGuard.getInfo() : null;
+    if (info && info.modules_admin_set === true && Array.isArray(info.enabled_modules) && info.enabled_modules.length) {
+      moduleList = info.enabled_modules;
+      fileLog('[Plan] applying per-license admin module grant (' + moduleList.length + ' modules).');
+    } else if (cloud && Array.isArray(cloud.included_modules) && cloud.included_modules.length) {
+      moduleList = cloud.included_modules;
+    }
+  } catch (e) { /* fall through to tier default */ }
+  if (moduleList && moduleList.length) {
     try {
-      const clean = cloud.included_modules.filter(m => /^[a-zA-Z0-9_-]+$/.test(m));
-      await psqlExec(`UPDATE public.subscription_plans
+      const clean = moduleList.filter(m => typeof m === 'string' && /^[a-zA-Z0-9_-]+$/.test(m));
+      if (clean.length) await psqlExec(`UPDATE public.subscription_plans
         SET included_modules = '${JSON.stringify(clean).replace(/'/g, "''")}'::jsonb
         WHERE code = '${code}';`);
     } catch (e) { fileLog('[Plan] module list refresh skipped:', e.message); }
