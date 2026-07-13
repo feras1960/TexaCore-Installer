@@ -364,6 +364,9 @@ class LicenseGuard {
       // the tier-default plan modules (see syncActivePlan). Stale/unset ⇒ ignored.
       enabled_modules: license.enabled_modules,
       modules_admin_set: license.modules_admin_set === true,
+      // آخر حالة مطبّقة فعلياً على القاعدة المحلية (للعرض/التشخيص فقط — يكتبها
+      // النبض في حقل منفصل كي لا تلوّث enabled_modules/منحة الأدمن).
+      applied_modules: license.applied_modules,
       // H2 observability: signature validity + enforced-or-not effective tier.
       signed: this.verifySignature(license),
       effective_tier: this.effectiveTier(license),

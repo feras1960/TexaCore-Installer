@@ -637,9 +637,9 @@ class HeartbeatSender {
           PSQL_PREFIX +
           "SELECT sp.code FROM public.tenant_subscriptions ts JOIN public.subscription_plans sp ON sp.id=ts.plan_id WHERE ts.status IN ('active','trial','grace') ORDER BY ts.updated_at DESC NULLS LAST LIMIT 1;"
         );
-        // خذ أول سطر يشبه كود باقة فقط (يتجاهل أي صدى/تحذير متبقٍّ)
+        // خذ أول سطر يشبه كود باقة فقط (يتجاهل أي صدى/تحذير متبقٍّ؛ النقطة مسموحة)
         const line = String(out || '').split('\n').map(s => s.trim())
-          .find(s => /^[a-z0-9_-]+$/i.test(s));
+          .find(s => /^[a-z0-9._-]+$/i.test(s));
         if (line) currentPlan = line;
       } catch (e) { fileLog('[Heartbeat] current_plan query skipped:', e.message); }
       try {
@@ -813,20 +813,23 @@ class HeartbeatSender {
     // and apply it locally — on this beat if online, else the next one.
     await this._syncLicenseState(config);
 
-    // بعد نجاح syncActivePlan (داخل _syncLicenseState): اكتب الحالة الحقيقية
-    // (الموديولات الفعلية للباقة المطبّقة) في ملف الرخصة كي يعكس getInfo() الواقع.
-    // فقط عند اختلافها فعلاً (مقارنة JSON) لتفادي إعادة كتابة الملف كل نبضة، ولا
-    // نكتب مصفوفة فارغة (تعذّر/توقّف مؤقت) كي لا نمحو الموديولات الحقيقية.
+    // بعد نجاح syncActivePlan (داخل _syncLicenseState): اكتب الحالة الحقيقية في
+    // حقل منفصل applied_modules — ⚠️ ليس enabled_modules! الكتابة في enabled_modules
+    // كانت: (١) تلوّث منحة الأدمن حين modules_admin_set=true (تحقن core وتُبقي
+    // موديولات سحبها الأدمن)، فأي syncActivePlan أوفلاين في تلك النافذة يعيد فتح
+    // موديولات مسحوبة؛ (٢) تتصارع مع applyCloudState كل نبضة (core موجود محلياً
+    // وغائب بمنحة السحابة) = churn حفظ+IPC دائم. applied_modules للعرض/التشخيص فقط
+    // ولا يقرأه أي مسار تقييد.
     try {
       if (licenseGuard && Array.isArray(activeModules) && activeModules.length) {
         const lic = licenseGuard.loadLicense();
-        if (lic && JSON.stringify(lic.enabled_modules || null) !== JSON.stringify(activeModules)) {
-          lic.enabled_modules = activeModules;
+        if (lic && JSON.stringify(lic.applied_modules || null) !== JSON.stringify(activeModules)) {
+          lic.applied_modules = activeModules;
           licenseGuard.saveLicense(lic);
-          fileLog('[Heartbeat] 🔄 enabled_modules synced to real applied state (' + activeModules.length + ' modules).');
+          fileLog('[Heartbeat] 🔄 applied_modules synced to real applied state (' + activeModules.length + ' modules).');
         }
       }
-    } catch (e) { fileLog('[Heartbeat] enabled_modules local sync skipped:', e.message); }
+    } catch (e) { fileLog('[Heartbeat] applied_modules local sync skipped:', e.message); }
 
     // Upload TCDB cloud backup (twice daily or when file changes)
     this._uploadCloudBackup(config);
@@ -3872,6 +3875,11 @@ function landTrialToFree() {
     licenseGuard.saveLicense(freeLicense);
     cfg.isTrial = false;
     cfg.isFree = true;
+    // ⚠️ امسح مفتاح TRL-* القديم: حارس _looksFree بالنبضة يعتبر أي مفتاح غير FREE
+    // «رخصة حقيقية» فيمسح isFree كل نبضة ⇒ مسار المجاني (ربط FREE-2026 المستقر +
+    // تحديث المنحة) لا يعمل أبداً، وقد يعيد سحب tier=trial من السحابة (تذبذب
+    // free↔pro). بمسحه يمرّ _looksFree ويربط الرقم المستقر في أول نبضة أونلاين.
+    cfg.licenseKey = '';
     saveConfig(cfg);
     fileLog('[TexaCore] 🆓 Trial ended → landed on Free plan (offline, forever).');
     if (mainWindow && !mainWindow.isDestroyed()) {
