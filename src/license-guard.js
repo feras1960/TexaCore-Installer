@@ -15,6 +15,38 @@ const _k2 = Buffer.from('c2VjdXJpdHktbGF5ZXItaG1hYy1zaWduYXR1cmU=', 'base64').to
 const ENCRYPTION_ALGO = 'aes-256-gcm';
 const HMAC_ALGO = 'sha256';
 
+// ════════════════════════════════════════════════════════════════
+// 🔏 Phase H2 — Asymmetric (Ed25519) license SIGNATURE verification
+// ────────────────────────────────────────────────────────────────
+// The licensing server holds the Ed25519 PRIVATE key (Supabase secret,
+// NEVER shipped in this client) and signs the canonical payload of every
+// license into `_sig`. The client embeds ONLY the PUBLIC key below and
+// verifies that signature. Rule: a license whose signature is absent or
+// invalid is capped to the FREE tier (never trial/paid).
+//
+// SPKI (base64 DER) Ed25519 public key — safe to embed (public half only):
+const LICENSE_PUBKEY_B64 = 'MCowBQYDK2VwAyEAqUuyf9XwTQ4Q1x6eu7MwpjfWp15aWcZYp9fGRSg79nM=';
+
+// ⛔ TRANSITION SAFETY FLAG — DO NOT flip to true until the licensing server
+// issues `_sig` on ALL licenses AND the heartbeat has had time to backfill
+// existing installs. While false, the signature is COMPUTED and exposed via
+// getInfo().signed for observability, but the tier is NOT downgraded — so we
+// never brick the current fleet of unsigned (legacy v2) licenses. Flip to
+// true ONLY after backfill is confirmed via telemetry (getInfo().signed=true).
+const ENFORCE_SIGNATURE = false;
+
+// Lazily-built public KeyObject (built once, cached on first verify).
+let _licensePubKey = null;
+function _getLicensePubKey() {
+  if (_licensePubKey) return _licensePubKey;
+  _licensePubKey = crypto.createPublicKey({
+    key: Buffer.from(LICENSE_PUBKEY_B64, 'base64'),
+    format: 'der',
+    type: 'spki',
+  });
+  return _licensePubKey;
+}
+
 class LicenseGuard {
   constructor(dataDir) {
     this.dataDir = dataDir;
@@ -129,6 +161,10 @@ class LicenseGuard {
 
   // ─── Save license (encrypted) ─────────────────────────────
   saveLicense(licenseObj) {
+    // علامة مائية زمنية أحادية الاتجاه (high-water mark) لكشف إرجاع ساعة الجهاز.
+    // تُخزَّن داخل الحمولة المشفّرة وتنجو من دورات الحفظ/التحميل (المفقودة = 0).
+    licenseObj._maxSeenTs = Math.max(licenseObj._maxSeenTs || 0, Date.now());
+
     const encrypted = this._encrypt({
       ...licenseObj,
       _savedAt: Date.now(),
@@ -186,6 +222,30 @@ class LicenseGuard {
       return { valid: false, reason: 'no_license' };
     }
 
+    // ── حارس إرجاع الساعة (clock-rollback guard) ──────────────
+    // إن رجعت ساعة الجهاز أكثر من ٢٤ ساعة خلف العلامة المائية الأعلى المُسجّلة،
+    // فهذا تلاعب مقصود (محاولة تمديد تجربة/تجاوز انتهاء). المجاني لا حافز لديه
+    // للتلاعب (لا ينتهي) فنكتفي بتحذير. ثم نحدّث العلامة ونعيد الحفظ فقط إن تقدّمت
+    // أكثر من ٦ ساعات — تفادياً لإعادة كتابة الملف كل فحص مُخبّأ (كل ٥ دقائق).
+    const SIX_HOURS = 6 * 3600 * 1000;
+    const ROLLBACK_LIMIT = 24 * 3600 * 1000;
+    const prevMax = license._maxSeenTs || 0;
+    const now = Date.now();
+    if (prevMax > 0 && now < (prevMax - ROLLBACK_LIMIT)) {
+      if (license.tier === 'free') {
+        console.warn('[LicenseGuard] ⚠️ Clock rollback detected on FREE tier — ignoring (never expires).');
+      } else {
+        console.warn('[LicenseGuard] 🚨 Clock tampering detected — device clock is >24h behind high-water mark.');
+        return { valid: false, reason: 'clock_tamper', license };
+      }
+    }
+    // تقدّم العلامة المائية (لا تتراجع أبداً)؛ أعِد الحفظ فقط عند تقدّم > ٦ ساعات.
+    const newMax = Math.max(prevMax, now);
+    license._maxSeenTs = newMax;
+    if (newMax - prevMax > SIX_HOURS) {
+      try { this.saveLicense(license); } catch (e) { console.warn('[LicenseGuard] high-water save:', e.message); }
+    }
+
     // Check expiration
     if (license.expires_at) {
       const expiresDate = new Date(license.expires_at);
@@ -222,6 +282,70 @@ class LicenseGuard {
     return fs.existsSync(this.licensePath) || fs.existsSync(this.legacyPath);
   }
 
+  // ─── Canonical signed payload (client ⇄ server MUST agree byte-for-byte) ──
+  // Deterministic JSON over ONLY the authoritative fields, in a FIXED key
+  // order. The server builds the IDENTICAL string and signs it with the
+  // Ed25519 private key; we rebuild it here and verify against `_sig`.
+  //
+  // Field order is FIXED (do not reorder — it changes the bytes → breaks sig):
+  //   license_key, tier, status, expires_at, activated_at, hardware_id,
+  //   max_users, max_companies, enabled_modules
+  //
+  // • Missing/undefined field → null (via `?? null`) so shape is stable.
+  // • enabled_modules is SORTED (copy) before stringifying, so a differing
+  //   array order (cloud sync, module reshuffle) never invalidates the sig.
+  // • hardware_id: use the license's BOUND value (lic.hardware_id) when
+  //   present — that is exactly what the server had when it signed. Only fall
+  //   back to the live getHardwareId() for a license that predates hw binding.
+  //   The server MUST sign the same bound hardware_id it stored on the row.
+  _canonicalSignedString(lic) {
+    const mods = Array.isArray(lic.enabled_modules)
+      ? [...lic.enabled_modules].sort()
+      : (lic.enabled_modules ?? null);
+    const hw = (lic.hardware_id != null) ? lic.hardware_id : this.getHardwareId();
+    const ordered = [
+      ['license_key', lic.license_key ?? null],
+      ['tier', lic.tier ?? null],
+      ['status', lic.status ?? null],
+      ['expires_at', lic.expires_at ?? null],
+      ['activated_at', lic.activated_at ?? null],
+      ['hardware_id', hw ?? null],
+      ['max_users', lic.max_users ?? null],
+      ['max_companies', lic.max_companies ?? null],
+      ['enabled_modules', mods],
+    ];
+    return JSON.stringify(ordered);
+  }
+
+  // ─── Verify Ed25519 signature on the license ───────────────
+  // Returns false when there is no license or no `_sig`. Otherwise verifies
+  // the base64 signature over the canonical string with the embedded public
+  // key. Any throw (malformed sig/key) → false (fail-closed).
+  verifySignature(lic) {
+    if (!lic || !lic._sig) return false;
+    try {
+      return crypto.verify(
+        null,
+        Buffer.from(this._canonicalSignedString(lic), 'utf8'),
+        _getLicensePubKey(),
+        Buffer.from(lic._sig, 'base64')
+      );
+    } catch {
+      return false;
+    }
+  }
+
+  // ─── Effective tier — the SINGLE downgrade point ───────────
+  // When ENFORCE_SIGNATURE is true: a valid signature keeps lic.tier; an
+  // absent/invalid signature is capped to 'free'. When false (transition
+  // window): tier is returned unchanged (signature computed for observability
+  // only, never enforced) so legacy unsigned licenses are not bricked.
+  effectiveTier(lic) {
+    if (!lic || !lic.tier) return 'free';
+    if (!ENFORCE_SIGNATURE) return lic.tier;
+    return this.verifySignature(lic) ? lic.tier : 'free';
+  }
+
   // ─── Get license info (safe for UI) ───────────────────────
   getInfo() {
     const license = this._cachedLicense || this.loadLicense();
@@ -235,6 +359,9 @@ class LicenseGuard {
       license_key: license.license_key,
       max_companies: license.max_companies,
       features: license.features,
+      // H2 observability: signature validity + enforced-or-not effective tier.
+      signed: this.verifySignature(license),
+      effective_tier: this.effectiveTier(license),
     };
   }
 

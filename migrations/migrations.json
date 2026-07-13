@@ -1292,6 +1292,31 @@
       "order": 258,
       "file": "translate_coa_ru_uk.sql",
       "name": "translate_coa_ru_uk"
+    },
+    {
+      "order": 259,
+      "file": "20260713d_module_features_catalog.sql",
+      "name": "20260713d_module_features_catalog"
+    },
+    {
+      "order": 260,
+      "file": "20260713e_get_tenant_features_rpc.sql",
+      "name": "20260713e_get_tenant_features_rpc"
+    },
+    {
+      "order": 261,
+      "file": "20260713L_local_plans_and_guard.sql",
+      "name": "20260713L_local_plans_and_guard"
+    },
+    {
+      "order": 262,
+      "file": "20260713M_local_gating_engine.sql",
+      "name": "20260713M_local_gating_engine"
+    },
+    {
+      "order": 263,
+      "file": "20260713N_plan_driven_gating.sql",
+      "name": "20260713N_plan_driven_gating"
     }
   ]
 }

@@ -621,6 +621,30 @@ class HeartbeatSender {
       }
     } catch {}
 
+    // ── الحالة الحقيقية المطبّقة محلياً (الباقة + الموديولات النشطة) للسحابة ──
+    // psqlExec يتطلب تشغيل الخدمات؛ نحرسه بـ isRunning ونلفّ كلاً على حدة بـ
+    // try/catch كي لا يفشل النبض بسببها أبداً (null/[] عند التعذّر أو التوقّف).
+    let currentPlan = null;
+    let activeModules = [];
+    if (svcManager && svcManager.isRunning()) {
+      try {
+        const out = await psqlExec(
+          "\\pset tuples_only on\n\\pset format unaligned\n" +
+          "SELECT sp.code FROM public.tenant_subscriptions ts JOIN public.subscription_plans sp ON sp.id=ts.plan_id WHERE ts.status IN ('active','trial','grace') ORDER BY ts.updated_at DESC NULLS LAST LIMIT 1;"
+        );
+        const v = String(out || '').trim();
+        if (v) currentPlan = v.split('\n')[0].trim() || null;
+      } catch (e) { fileLog('[Heartbeat] current_plan query skipped:', e.message); }
+      try {
+        const out = await psqlExec(
+          "\\pset tuples_only on\n\\pset format unaligned\n" +
+          "SELECT COALESCE(jsonb_agg(DISTINCT m ORDER BY m), '[]'::jsonb) FROM (SELECT jsonb_array_elements_text(included_modules) AS m FROM public.subscription_plans sp JOIN public.tenant_subscriptions ts ON ts.plan_id=sp.id WHERE ts.status IN ('active','trial','grace') LIMIT 1) s;"
+        );
+        const v = String(out || '').trim();
+        if (v) { const parsed = JSON.parse(v); if (Array.isArray(parsed)) activeModules = parsed; }
+      } catch (e) { fileLog('[Heartbeat] active_modules query skipped:', e.message); }
+    }
+
     this._lastPayload = {
       license_key: config.licenseKey,
       hardware_id: hardwareId,
@@ -656,6 +680,8 @@ class HeartbeatSender {
       geo_country: geoCountry,
       geo_city: geoCity,
       geo_country_code: geoCountryCode,
+      current_plan: currentPlan,       // الباقة الفعلية المطبّقة محلياً (لا مجرد tier الرخصة)
+      active_modules: activeModules,   // الموديولات الفعلية للباقة النشطة
     };
 
     // The license KEY is authoritative for free-vs-paid, NOT the mutable isFree
@@ -674,7 +700,12 @@ class HeartbeatSender {
     // FREE installs: register/refresh the stable cloud number (binds the local
     // placeholder → FREE-2026 on the first online beat), track last-seen, honor a
     // remote revoke/suspend, sync the smart limits, and back up to our cloud.
-    if (_looksFree && (config.isFree === true || (licenseGuard && licenseGuard.getInfo()?.tier === 'free'))) {
+    // ⚠️ يعمل مسار المجاني فقط عند اختيار المستخدم الصريح (config.isFree===true).
+    // سابقاً كان يعمل أيضاً عند getInfo().tier==='free'، لكنه يقصُر الدائرة (return
+    // بالأسفل قبل مزامنة السحابة) ⇒ قفل ميت: license.dat يبقى free فلا تصل مزامنة
+    // trial أبداً ⇒ تذبذب/عدم رجوع للمدفوع إلا بـrestart. الآن: التجريبية/المدفوعة
+    // (isFree=false) لا تُشغّل مسار المجاني ⇒ النبض يزامن tier الحقيقي من السحابة.
+    if (config.isFree === true) {
       const reg = await registerFreeOnline();   // null when offline
       if (reg && reg.license_key) {
         if (reg.license_key !== config.licenseKey) {
@@ -762,6 +793,21 @@ class HeartbeatSender {
     // Pull the authoritative license state (tier / expiry / limits / modules)
     // and apply it locally — on this beat if online, else the next one.
     await this._syncLicenseState(config);
+
+    // بعد نجاح syncActivePlan (داخل _syncLicenseState): اكتب الحالة الحقيقية
+    // (الموديولات الفعلية للباقة المطبّقة) في ملف الرخصة كي يعكس getInfo() الواقع.
+    // فقط عند اختلافها فعلاً (مقارنة JSON) لتفادي إعادة كتابة الملف كل نبضة، ولا
+    // نكتب مصفوفة فارغة (تعذّر/توقّف مؤقت) كي لا نمحو الموديولات الحقيقية.
+    try {
+      if (licenseGuard && Array.isArray(activeModules) && activeModules.length) {
+        const lic = licenseGuard.loadLicense();
+        if (lic && JSON.stringify(lic.enabled_modules || null) !== JSON.stringify(activeModules)) {
+          lic.enabled_modules = activeModules;
+          licenseGuard.saveLicense(lic);
+          fileLog('[Heartbeat] 🔄 enabled_modules synced to real applied state (' + activeModules.length + ' modules).');
+        }
+      }
+    } catch (e) { fileLog('[Heartbeat] enabled_modules local sync skipped:', e.message); }
 
     // Upload TCDB cloud backup (twice daily or when file changes)
     this._uploadCloudBackup(config);
@@ -1136,6 +1182,9 @@ ipcMain.handle('activate-license', async (_, licenseKey) => {
       config.isFree = false;   // activating a real key clears the free flag
       config.isTrial = false;
       saveConfig(config);
+      if (mainWindow && !mainWindow.isDestroyed())
+        mainWindow.webContents.send('license-updated', { tier: result.license?.tier, status: result.license?.status });
+      // إعادة التشغيل تُنفّذها الواجهة (stopERP→startERP) بعد النجاح — التدفّق المُثبت.
       // Start heartbeat monitoring
       heartbeatSender.start();
       return { success: true, license: result.license };
@@ -1212,6 +1261,65 @@ ipcMain.handle('verify-subdomain', async () => {
 function psqlExec(sql) {
   if (!svcManager) return Promise.reject(new Error('Services not initialized'));
   return svcManager.psqlExec(sql);
+}
+
+// ── License → Plan sync ─────────────────────────────────────────────────────
+// مصدر واحد للحقيقة: syncActivePlan (يقرأ tier من licenseGuard، cloud-aware عبر
+// النبض، ويستخدم apply_tenant_plan النظيف). أُزيلت دالة syncTenantsToLicenseTier
+// المكرّرة لأنها كانت تتصارع معه (تقرأ license.dat محلياً قد يكون قديماً=free بينما
+// السحابة=trial) فتتناوب الباقة بين professional وfree. الآن الكل عبر syncActivePlan.
+
+// ── إعادة تشغيل المحرّكات عند تغيير الرخصة ───────────────────────────────────
+// أضمن من تحديث المتصفح المستمر، ويفيد التحصين: تحقّق رخصة جديد + إعادة اشتقاق
+// الباقة من الرخصة على إقلاع نظيف بلا حالة قديمة في الذاكرة. يوقف كل الخدمات ثم
+// يُقلعها ويطبّق الباقة. الواجهة تعيد الاتصال عند «Open in browser»/التحديث.
+function _waitPortFree(port, timeoutMs) {
+  return new Promise((resolve) => {
+    const net = require('net');
+    const deadline = Date.now() + (timeoutMs || 15000);
+    const probe = () => {
+      const s = net.connect({ host: '127.0.0.1', port }, () => { s.destroy(); // لا يزال مستمعاً
+        if (Date.now() >= deadline) return resolve(false);
+        setTimeout(probe, 500);
+      });
+      s.on('error', () => { s.destroy(); resolve(true); }); // المنفذ حرّ
+    };
+    probe();
+  });
+}
+
+async function restartEnginesForLicenseChange() {
+  try {
+    if (!svcManager) return;
+    const cfg = loadConfig();
+    const PGP = (typeof ServiceManager !== 'undefined' && ServiceManager.PG_PORT) ? ServiceManager.PG_PORT : 54322;
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('system-restarting', {});
+    fileLog('[Restart] 🔄 إعادة تشغيل المحرّكات بعد تغيير الرخصة…');
+    try { await svcManager.stopAll(); } catch (e) { fileLog('[Restart] stopAll:', e.message); }
+    // انتظر تحرّر منفذ PG فعلياً قبل الإقلاع (يمنع «PostgreSQL exited unexpectedly»)
+    await _waitPortFree(PGP, 15000);
+    await new Promise(r => setTimeout(r, 1500));
+    const startOpts = {
+      dbPassword: cfg.dbPassword || undefined,
+      port: cfg.port || APP_PORT,
+      onMigrationProgress: (step, total, name) => {
+        if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('migration-progress', { step, total, name });
+      },
+    };
+    let result = await svcManager.startAll(startOpts);
+    if (!result || !result.success) {   // محاولة ثانية بعد مهلة (تعافٍ من فشل عابر)
+      fileLog('[Restart] startAll فشل، إعادة المحاولة:', result && result.error);
+      try { await svcManager.stopAll(); } catch {}
+      await _waitPortFree(PGP, 15000); await new Promise(r => setTimeout(r, 2500));
+      result = await svcManager.startAll(startOpts);
+    }
+    if (!result || !result.success) { fileLog('[Restart] ❌ فشل الإقلاع بعد محاولتين:', result && result.error); return; }
+    await syncActivePlan();  // تطبيق الباقة حسب مستوى الرخصة على الإقلاع النظيف
+    if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('system-restarted', { port: cfg.port || APP_PORT });
+    fileLog('[Restart] ✅ اكتملت إعادة التشغيل وتطبيق الباقة.');
+  } catch (e) {
+    fileLog('[Restart] خطأ:', e.message);
+  }
 }
 
 /** Make an HTTP request to GoTrue via API proxy */
@@ -3486,6 +3594,7 @@ ipcMain.handle('start-erp', async (_, { licenseKey, dbPassword, port, enableClou
         expired: 'انتهت صلاحية الترخيص — يرجى تجديده',
         revoked: 'تم إلغاء الترخيص — تواصل مع الدعم',
         suspended: 'الترخيص معلّق — تواصل مع الدعم',
+        clock_tamper: 'اكتُشف تلاعب بساعة الجهاز — صحّح الوقت أو تواصل مع الدعم',
       };
       return { success: false, error: reasons[licCheck.reason] || 'ترخيص غير صالح' };
     }
@@ -3506,27 +3615,11 @@ ipcMain.handle('start-erp', async (_, { licenseKey, dbPassword, port, enableClou
       return { success: false, error: result.error };
     }
 
-    // If running on the Free plan, make sure every existing tenant has an active
-    // free subscription so the limit triggers actually apply — covers tenants
-    // created during a trial that has since landed on Free.
-    try {
-      if (licenseGuard.getInfo()?.tier === 'free') {
-        await psqlExec(`
-          INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
-          SELECT t.id, fp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
-          FROM public.tenants t
-          CROSS JOIN (SELECT id FROM public.subscription_plans WHERE code = 'free' LIMIT 1) fp
-          WHERE NOT EXISTS (
-            SELECT 1 FROM public.tenant_subscriptions ts
-            WHERE ts.tenant_id = t.id AND ts.status IN ('trial','active','grace')
-          )
-          ON CONFLICT DO NOTHING;
-        `);
-        fileLog('[TexaCore] Ensured free subscriptions for existing tenants.');
-      }
-    } catch (e) {
-      fileLog('[TexaCore] ensureFreeSubscriptions skipped:', e.message);
-    }
+    // Force every tenant onto the plan matching the current license tier
+    // (free→free, trial→professional, paid→its plan). This re-gates modules +
+    // limits so flipping the license (or landing off an expired trial) takes
+    // effect on the next launch. apply_tenant_plan rebuilds tenant_modules.
+    await syncActivePlan();
 
     return { success: true, ready: true, port: port || APP_PORT, migrations: result.migrations };
   } catch (err) {
@@ -3712,6 +3805,10 @@ ipcMain.handle('start-free', async () => {
     config.isFree = true;
     saveConfig(config);
 
+    if (mainWindow && !mainWindow.isDestroyed())
+      mainWindow.webContents.send('license-updated', { tier: 'free', status: freeLicense.status });
+    // إعادة التشغيل تُنفّذها الواجهة (stopERP→startERP) بعد النجاح — التدفّق المُثبت.
+
     fileLog(`[TexaCore] 🆓 Free activated — ${cloud ? 'cloud #' + licenseKey : 'offline (local), will bind on first online beat'}`);
     return { success: true, license: freeLicense, online: !!cloud };
   } catch (err) {
@@ -3822,6 +3919,15 @@ const PLAN_LIMIT_COLS = ['max_users', 'max_companies', 'max_branches', 'max_ware
 // License tier → local subscription plan code (the package defining its modules +
 // limits). Trial resolves to professional (product decision). Unknown → null (leave
 // gating/limits untouched). Returned codes are a fixed whitelist (safe to interpolate).
+// H2: the tier used for PLAN RESOLUTION must be the ENFORCED-OR-NOT effective
+// tier, not the raw license tier. While ENFORCE_SIGNATURE=false this equals
+// license.tier (no-op); when flipped on, an unsigned/invalid license resolves
+// to 'free' here so plan resolution downgrades it to the free plan.
+function currentEffectiveTier() {
+  try { return licenseGuard.effectiveTier(licenseGuard.loadLicense()); }
+  catch { return null; }
+}
+
 function planCodeForTier(tier) {
   switch (tier) {
     case 'free':       return 'free';
@@ -3830,7 +3936,9 @@ function planCodeForTier(tier) {
     case 'basic':      return 'texa-starter';
     case 'starter':    return 'texa-starter';
     case 'enterprise': return 'texa-enterprise';
-    default:           return null;
+    case 'unlimited':  return 'local-unlimited';
+    // مستوى غير معروف/فارغ/تجريبية منتهية ⇒ اسقط على المجاني (تقييد آمن، لا فشل مفتوح)
+    default:           return 'free';
   }
 }
 
@@ -3908,7 +4016,7 @@ async function applyTenantModulesFromPlan(code) {
 async function syncActivePlan(tierOverride) {
   let tier = tierOverride || null, code = null;
   try {
-    if (!tier) tier = (licenseGuard && licenseGuard.getInfo) ? ((licenseGuard.getInfo() || {}).tier) : null;
+    if (!tier) tier = (licenseGuard && licenseGuard.effectiveTier) ? currentEffectiveTier() : null;
     code = planCodeForTier(tier);
   } catch (e) { /* ignore */ }
   if (!code) return false; // unknown tier / no license → leave gating + limits untouched
@@ -3927,27 +4035,24 @@ async function syncActivePlan(tierOverride) {
     } catch (e) { fileLog('[Plan] limit refresh skipped:', e.message); }
   }
 
-  // 2) point the tenant subscription at this plan (create if missing, else re-point)
-  try {
-    await psqlExec(`
-      INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
-      SELECT t.id, sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
-      FROM public.tenants t, public.subscription_plans sp
-      WHERE sp.code = '${code}'
-        AND NOT EXISTS (SELECT 1 FROM public.tenant_subscriptions ts WHERE ts.tenant_id = t.id);
-      UPDATE public.tenant_subscriptions ts SET plan_id = sp.id, status = 'active'
-        FROM public.subscription_plans sp
-       WHERE sp.code = '${code}' AND ts.plan_id IS DISTINCT FROM sp.id;
-    `);
-  } catch (e) { fileLog('[Plan] subscription re-point skipped:', e.message); }
+  // 2) [cloud-central] refresh the local plan's MODULE LIST from the cloud when online,
+  //    so a /saas module-tree change propagates. Stored as jsonb (local lineage).
+  if (cloud && Array.isArray(cloud.included_modules) && cloud.included_modules.length) {
+    try {
+      const clean = cloud.included_modules.filter(m => /^[a-zA-Z0-9_-]+$/.test(m));
+      await psqlExec(`UPDATE public.subscription_plans
+        SET included_modules = '${JSON.stringify(clean).replace(/'/g, "''")}'::jsonb
+        WHERE code = '${code}';`);
+    } catch (e) { fileLog('[Plan] module list refresh skipped:', e.message); }
+  }
 
-  // 3) sync the sidebar's module gating — cloud list when online (cloud-central, so an
-  //    admin's /saas module toggle propagates), else the baked local plan.
+  // 3) point every tenant at this plan via apply_tenant_plan — a single atomic op that
+  //    de-dups subscriptions and REBUILDS tenant_modules cleanly from the plan
+  //    (canonical vocabulary, no accumulation of stale codes). The subscription
+  //    trigger rebuilds gating; get_all_plan_limits + the sidebar reflect it on refresh.
   try {
-    const list = (cloud && Array.isArray(cloud.included_modules)) ? cloud.included_modules : null;
-    if (list) await applyTenantModules(list);
-    else await applyTenantModulesFromPlan(code);
-  } catch (e) { fileLog('[Plan] module gating skipped:', e.message); }
+    await psqlExec(`SELECT public.apply_tenant_plan(t.id, '${code}', NULL) FROM public.tenants t;`);
+  } catch (e) { fileLog('[Plan] apply_tenant_plan skipped:', e.message); }
 
   try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('modules-updated'); } catch (e) {}
   fileLog(`[Plan] ✅ active plan synced: tier=${tier} → ${code}`);

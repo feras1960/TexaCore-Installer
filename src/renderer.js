@@ -374,9 +374,8 @@ async function activateLicense() {
     if (result.success) {
       feedback.className = 'feedback success';
       feedback.textContent = `${t('license.activatedOk')} ${result.license.tier} — ${t('license.expiresPrefix')} ${new Date(result.license.expires_at).toLocaleDateString()}`;
-      
-      // Refresh after 1 second
-      setTimeout(refreshState, 1000);
+      // اقتران التبديل بإعادة تشغيل فعلية لتطبيق الباقة
+      await restartSystemForLicense();
     } else {
       feedback.className = 'feedback error';
       feedback.textContent = `${t('license.activateFailed')} ${result.error}`;
@@ -388,6 +387,35 @@ async function activateLicense() {
 
   btn.disabled = false;
   btn.textContent = t('license.activateBtn');
+}
+
+// ─── إعادة تشغيل المحرّكات بعد تغيير الرخصة ──────────────────────
+// نفس تدفّق أزرار Stop→Start المُثبت (IPC مباشر) ⇒ يقترن كل تبديل رخصة بإيقاف
+// وإعادة تشغيل فعلية فتُطبَّق الباقة الجديدة بلا حالة قديمة. أضمن + يفيد التحصين.
+async function restartSystemForLicense() {
+  const fb = document.getElementById('feedback-license') || document.getElementById('feedback-control');
+  try {
+    if (fb) { fb.className = 'feedback loading'; fb.textContent = '🔄 جارٍ إيقاف وإعادة تشغيل المحرّكات لتطبيق الباقة…'; }
+    try { await texacore.stopERP(); } catch (e) { console.warn('[restart] stop:', e); }
+    await new Promise(r => setTimeout(r, 1800));       // مهلة تحرّر PG قبل الإقلاع
+    await refreshState();                               // config محدّث بالرخصة الجديدة
+    const c = (currentState && currentState.config) || {};
+    const result = await texacore.startERP({
+      licenseKey: c.licenseKey,
+      dbPassword: c.dbPassword || 'texacore2026',
+      port: parseInt(c.port) || 8080,
+      enableCloud: !!c.enableCloud,
+      subdomain: c.subdomain,
+    });
+    await refreshState();
+    if (fb) {
+      if (result && result.success) { fb.className = 'feedback success'; fb.textContent = '✅ أُعيد التشغيل وطُبّقت الباقة'; }
+      else { fb.className = 'feedback error'; fb.textContent = '❌ فشلت إعادة التشغيل: ' + ((result && result.error) || ''); }
+    }
+  } catch (e) {
+    console.error('[restart] failed:', e);
+    if (fb) { fb.className = 'feedback error'; fb.textContent = '❌ خطأ إعادة التشغيل: ' + e.message; }
+  }
 }
 
 function showLicensePanel() {
@@ -415,7 +443,8 @@ async function startTrial() {
         ? t('trial.alreadyHave')
         : t('trial.activated');
       feedback.textContent = msg;
-      setTimeout(refreshState, 1000);
+      // اقتران التبديل بإعادة تشغيل فعلية لتطبيق الباقة
+      await restartSystemForLicense();
     } else {
       feedback.className = 'feedback error';
       feedback.textContent = `❌ ${result.error}`;
@@ -445,7 +474,8 @@ async function startFree() {
     if (result.success) {
       feedback.className = 'feedback success';
       feedback.textContent = t('free.activated');
-      setTimeout(refreshState, 1000);
+      // اقتران التبديل بإعادة تشغيل فعلية لتطبيق الباقة المجانية
+      await restartSystemForLicense();
     } else {
       feedback.className = 'feedback error';
       feedback.textContent = `❌ ${result.error}`;
