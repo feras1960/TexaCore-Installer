@@ -1322,6 +1322,11 @@
       "order": 264,
       "file": "20260713230000_recent_activity_rpc_parity.sql",
       "name": "20260713230000_recent_activity_rpc_parity"
+    },
+    {
+      "order": 265,
+      "file": "20260714001000_recent_activity_party_fallback.sql",
+      "name": "20260714001000_recent_activity_party_fallback"
     }
   ]
 }
