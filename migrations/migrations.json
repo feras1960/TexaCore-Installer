@@ -1327,6 +1327,16 @@
       "order": 265,
       "file": "20260714001000_recent_activity_party_fallback.sql",
       "name": "20260714001000_recent_activity_party_fallback"
+    },
+    {
+      "order": 266,
+      "file": "20260714100000_journal_soft_delete_and_edit_log.sql",
+      "name": "20260714100000_journal_soft_delete_and_edit_log"
+    },
+    {
+      "order": 267,
+      "file": "20260714101000_recent_activity_exclude_deleted.sql",
+      "name": "20260714101000_recent_activity_exclude_deleted"
     }
   ]
 }
