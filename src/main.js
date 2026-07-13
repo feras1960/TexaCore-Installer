@@ -624,24 +624,37 @@ class HeartbeatSender {
     // ── الحالة الحقيقية المطبّقة محلياً (الباقة + الموديولات النشطة) للسحابة ──
     // psqlExec يتطلب تشغيل الخدمات؛ نحرسه بـ isRunning ونلفّ كلاً على حدة بـ
     // try/catch كي لا يفشل النبض بسببها أبداً (null/[] عند التعذّر أو التوقّف).
+    // ⚠️ \set QUIET on أولاً: بدونه يطبع psql صدى أوامر \pset في stdout
+    // («Tuples only is on.» / «Output format is unaligned.») فكان أول سطر يُقرأ
+    // كاسم الباقة، وJSON.parse للموديولات يفشل ⇒ reported_plan=نص الصدى
+    // وreported_modules=[] على السحابة. نكتم الصدى + نحلّل دفاعياً.
     let currentPlan = null;
     let activeModules = [];
     if (svcManager && svcManager.isRunning()) {
+      const PSQL_PREFIX = "\\set QUIET on\n\\pset tuples_only on\n\\pset format unaligned\n";
       try {
         const out = await psqlExec(
-          "\\pset tuples_only on\n\\pset format unaligned\n" +
+          PSQL_PREFIX +
           "SELECT sp.code FROM public.tenant_subscriptions ts JOIN public.subscription_plans sp ON sp.id=ts.plan_id WHERE ts.status IN ('active','trial','grace') ORDER BY ts.updated_at DESC NULLS LAST LIMIT 1;"
         );
-        const v = String(out || '').trim();
-        if (v) currentPlan = v.split('\n')[0].trim() || null;
+        // خذ أول سطر يشبه كود باقة فقط (يتجاهل أي صدى/تحذير متبقٍّ)
+        const line = String(out || '').split('\n').map(s => s.trim())
+          .find(s => /^[a-z0-9_-]+$/i.test(s));
+        if (line) currentPlan = line;
       } catch (e) { fileLog('[Heartbeat] current_plan query skipped:', e.message); }
       try {
+        // ⚠️ LIMIT 1 يجب أن يختار «باقة واحدة» لا «عنصراً واحداً» — الصيغة القديمة
+        // وضعته بعد jsonb_array_elements_text فقصّت الموديولات لعنصر واحد.
         const out = await psqlExec(
-          "\\pset tuples_only on\n\\pset format unaligned\n" +
-          "SELECT COALESCE(jsonb_agg(DISTINCT m ORDER BY m), '[]'::jsonb) FROM (SELECT jsonb_array_elements_text(included_modules) AS m FROM public.subscription_plans sp JOIN public.tenant_subscriptions ts ON ts.plan_id=sp.id WHERE ts.status IN ('active','trial','grace') LIMIT 1) s;"
+          PSQL_PREFIX +
+          "SELECT COALESCE((SELECT jsonb_agg(DISTINCT m ORDER BY m) FROM jsonb_array_elements_text(sp.included_modules) m), '[]'::jsonb) " +
+          "FROM public.tenant_subscriptions ts JOIN public.subscription_plans sp ON sp.id=ts.plan_id " +
+          "WHERE ts.status IN ('active','trial','grace') ORDER BY ts.updated_at DESC NULLS LAST LIMIT 1;"
         );
-        const v = String(out || '').trim();
-        if (v) { const parsed = JSON.parse(v); if (Array.isArray(parsed)) activeModules = parsed; }
+        // خذ أول سطر يبدأ بـ[ (مصفوفة JSON) — مناعة ضد أسطر الصدى
+        const line = String(out || '').split('\n').map(s => s.trim())
+          .find(s => s.startsWith('['));
+        if (line) { const parsed = JSON.parse(line); if (Array.isArray(parsed)) activeModules = parsed; }
       } catch (e) { fileLog('[Heartbeat] active_modules query skipped:', e.message); }
     }
 
