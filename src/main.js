@@ -725,9 +725,15 @@ class HeartbeatSender {
           try { const inf = licenseGuard.getInfo(); if (inf && (inf.status === 'revoked' || inf.status === 'suspended')) licenseGuard.setLocalStatus('active'); } catch (e) {}
         }
       }
-      // Gate the FREE package too: pull its modules + limits from the cloud and apply
-      // (tier forced to 'free' — never mis-resolve from a stale local license). This is
-      // why free used to show every module: the free path never synced the package.
+      // Refresh the admin module grant + limits from the cloud FIRST (so an admin's
+      // enable/DISABLE of a module for this license propagates on free too — the free
+      // path used to skip this, so a removed module never disappeared). tier forced
+      // to 'free' so a trial-keyed free install is never flipped. Then gate as free.
+      try {
+        const sRaw = await httpPostRpc('licensing_get_license_state', { p_license_key: config.licenseKey });
+        const st = typeof sRaw === 'string' ? (sRaw ? JSON.parse(sRaw) : null) : sRaw;
+        if (st) { st.tier = 'free'; licenseGuard.applyCloudState(st); }
+      } catch (e) { fileLog('[Heartbeat] free grant refresh skipped:', e.message); }
       await syncActivePlan('free');
       if (String(config.licenseKey || '').startsWith('FREE-2026')) {
         this._uploadCloudBackup(config);
@@ -823,17 +829,24 @@ class HeartbeatSender {
       const state = typeof stateRaw === 'string' ? (stateRaw ? JSON.parse(stateRaw) : null) : stateRaw;
       if (!state || !state.tier) return false;
 
+      // ⚠️ Respect the user's explicit FREE choice: the cloud tier for a trial key
+      // is 'trial', but a free install must NOT be flipped back to trial/paid by a
+      // sync. Force free here so applyCloudState + syncActivePlan stay on free. The
+      // admin module grant + limits still apply (via enabled_modules/modules_admin_set).
+      const cfg = loadConfig();
+      const isFree = !!(cfg && cfg.isFree === true);
+      if (isFree) state.tier = 'free';
+
       // tier / expiry / limits / modules → license.dat (does not touch status)
       const changed = licenseGuard.applyCloudState(state);
       if (changed) {
-        fileLog(`[Heartbeat] 🔁 License synced from cloud → tier=${state.tier}`);
+        fileLog(`[Heartbeat] 🔁 License synced from cloud → tier=${state.tier}${isFree ? ' (free-locked)' : ''}`);
         if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('license-updated', state);
       }
 
-      // Align modules + limits to this install's package (tier→plan), refreshing the
-      // plan from the cloud — so an admin's package change propagates on this heartbeat.
-      // syncActivePlan sends 'modules-updated' itself when it runs.
-      await syncActivePlan();
+      // Align modules + limits (tier→plan) + the admin per-license module grant.
+      // Pass 'free' when the user chose free so the cloud trial tier can't override it.
+      await syncActivePlan(isFree ? 'free' : undefined);
 
       // Enforce status pushed instantly (revoke / suspend / block lock the
       // device now; reactivation clears the local lock for recovery).
