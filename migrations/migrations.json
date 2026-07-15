@@ -1,7 +1,7 @@
 {
   "version": "2026.07.13",
   "generated": "2026-07-13T00:00:00Z",
-  "totalFiles": 258,
+  "totalFiles": 264,
   "migrations": [
     {
       "order": 1,
@@ -1337,6 +1337,56 @@
       "order": 267,
       "file": "20260714101000_recent_activity_exclude_deleted.sql",
       "name": "20260714101000_recent_activity_exclude_deleted"
+    },
+    {
+      "order": 268,
+      "file": "20260714120000_document_soft_delete_phase1.sql",
+      "name": "20260714120000_document_soft_delete_phase1"
+    },
+    {
+      "order": 269,
+      "file": "20260714123000_payment_vouchers_invoice_fk_parity.sql",
+      "name": "20260714123000_payment_vouchers_invoice_fk_parity"
+    },
+    {
+      "order": 270,
+      "file": "20260714150000_document_soft_delete_phase2.sql",
+      "name": "20260714150000_document_soft_delete_phase2"
+    },
+    {
+      "order": 271,
+      "file": "20260714180000_document_soft_delete_phase3_rolls.sql",
+      "name": "20260714180000_document_soft_delete_phase3_rolls"
+    },
+    {
+      "order": 272,
+      "file": "20260714b_local_install_notify_geo.sql",
+      "name": "20260714b_local_install_notify_geo"
+    },
+    {
+      "order": 273,
+      "file": "20260714c_check_special_permission.sql",
+      "name": "20260714c_check_special_permission"
+    },
+    {
+      "order": 274,
+      "file": "20260714d_fix_purchase_receipts_invoice_fk.sql",
+      "name": "20260714d_fix_purchase_receipts_invoice_fk"
+    },
+    {
+      "order": 275,
+      "file": "20260714e_direct_sale_cogs_fill.sql",
+      "name": "20260714e_direct_sale_cogs_fill"
+    },
+    {
+      "order": 276,
+      "file": "20260715a_sales_transactions_shipping_parity.sql",
+      "name": "20260715a_sales_transactions_shipping_parity"
+    },
+    {
+      "order": 277,
+      "file": "20260716a_roll_movements_rls.sql",
+      "name": "20260716a_roll_movements_rls"
     }
   ]
 }
