@@ -10,6 +10,7 @@ const { getVendorAccount } = require('./vendor-support');
 const https = require('https');
 const http = require('http');
 const { autoUpdater } = require('electron-updater');
+const { MacUpdater } = require('./mac-updater');
 const ServiceManager = require('./service-manager');
 const LicenseGuard = require('./license-guard');
 const BackupManager = require('./backup-manager');
@@ -4211,12 +4212,47 @@ function createTray() {
 }
 
 // ─── Auto-Update System ──────────────────────────────────────
+// macOS builds are ad-hoc signed; Squirrel.Mac refuses to apply updates to
+// non-Developer-ID apps, so on mac we use our own updater (src/mac-updater.js):
+// silent background download from the latest GitHub release, sha512-verified,
+// staged, then installed by a detached script on quit/restart — same UX as
+// Windows. Windows keeps using electron-updater untouched.
+let macUpdater = null;
+
+function offerRestartDialog(version) {
+  dialog.showMessageBox(mainWindow, {
+    type: 'info',
+    buttons: ['إعادة التشغيل الآن', 'لاحقاً'],
+    defaultId: 0,
+    cancelId: 1,
+    noLink: true,
+    title: 'تحديث جاهز',
+    message: `الإصدار ${version || ''} جاهز للتثبيت`,
+    detail: 'سيُعاد تشغيل التطبيق لتطبيق التحديث. سيُثبَّت تلقائياً عند الإغلاق إن اخترت لاحقاً.',
+  }).then(({ response }) => {
+    if (response === 0) {
+      app.isQuitting = true;
+      app.quit(); // the staged update is installed by the quit hook
+    }
+  }).catch(() => {});
+}
+
 function setupAutoUpdater() {
-  // macOS builds are ad-hoc signed; Squirrel.Mac refuses to apply updates to
-  // non-Developer-ID apps, so on mac we skip OTA entirely and users update via
-  // the DMG. On Windows the exe + latest.yml feed is published per release, so
-  // we download in the background and prompt to restart when ready.
   const isMac = process.platform === 'darwin';
+
+  if (isMac) {
+    macUpdater = new MacUpdater({
+      getVersion: () => app.getVersion(),
+      userDataPath: app.getPath('userData'),
+      isPackaged: app.isPackaged,
+      log: fileLog,
+      emit: (channel, payload) => mainWindow?.webContents.send(channel, payload),
+      onStaged: (version) => offerRestartDialog(version),
+    });
+    macUpdater.start();
+    return;
+  }
+
   autoUpdater.autoDownload = !isMac;
   autoUpdater.autoInstallOnAppQuit = true;
 
@@ -4241,7 +4277,6 @@ function setupAutoUpdater() {
 
   autoUpdater.on('update-downloaded', (info) => {
     mainWindow?.webContents.send('update-downloaded');
-    if (isMac) return; // cannot self-install an ad-hoc-signed mac app
     dialog.showMessageBox(mainWindow, {
       type: 'info',
       buttons: ['إعادة التشغيل الآن', 'لاحقاً'],
@@ -4263,8 +4298,6 @@ function setupAutoUpdater() {
     console.error('Update error:', err);
   });
 
-  if (isMac) return; // no update feed for mac — detection would only 404
-
   // Initial check shortly after launch, then poll every 6 hours.
   const check = () => autoUpdater.checkForUpdates().catch(() => {});
   setTimeout(check, 5000);
@@ -4273,6 +4306,10 @@ function setupAutoUpdater() {
 
 // Check for update (manual)
 ipcMain.handle('check-for-update', async () => {
+  if (process.platform === 'darwin') {
+    const r = await (macUpdater?.checkForUpdates() ?? { available: false });
+    return { available: !!r.available, version: r.version };
+  }
   try {
     const result = await autoUpdater.checkForUpdates();
     return { available: !!result?.updateInfo, version: result?.updateInfo?.version };
@@ -4283,6 +4320,9 @@ ipcMain.handle('check-for-update', async () => {
 
 // Download update
 ipcMain.handle('download-update', async () => {
+  if (process.platform === 'darwin') {
+    return await (macUpdater?.downloadUpdate() ?? { success: false, error: 'updater not ready' });
+  }
   try {
     await autoUpdater.downloadUpdate();
     return { success: true };
@@ -4294,6 +4334,11 @@ ipcMain.handle('download-update', async () => {
 // Install update
 ipcMain.handle('install-update', () => {
   app.isQuitting = true;
+  if (process.platform === 'darwin') {
+    // The staged update is installed by the detached script spawned on quit.
+    app.quit();
+    return;
+  }
   autoUpdater.quitAndInstall();
 });
 
@@ -4462,6 +4507,10 @@ app.on('before-quit', (event) => {
     } catch (e) {
       fileLog('[TexaCore] Quit finalize error:', e.message);
     } finally {
+      // If a verified mac update is staged, launch the detached installer
+      // script now — it waits for our PID to exit, swaps the bundle,
+      // re-signs it ad-hoc, and relaunches the app.
+      try { macUpdater?.spawnInstallerIfStaged(); } catch { /* noop */ }
       app.exit(0);
     }
   })();

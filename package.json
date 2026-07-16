@@ -1,6 +1,6 @@
 {
   "name": "texacore-installer",
-  "version": "1.6.1",
+  "version": "1.6.2",
   "buildDate": "2026-07-16",
   "description": "TexaCore ERP — Self-Hosted Installer",
   "main": "src/main.js",
@@ -117,8 +117,15 @@
           "arch": [
             "arm64"
           ]
+        },
+        {
+          "target": "zip",
+          "arch": [
+            "arm64"
+          ]
         }
       ],
+      "artifactName": "TexaCore-ERP-${version}-${arch}.${ext}",
       "darkModeSupport": true,
       "hardenedRuntime": true
     },
