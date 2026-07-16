@@ -4267,24 +4267,6 @@ function emitUpdateEvent(channel, payload) {
   mainWindow?.webContents.send(channel, payload);
 }
 
-function offerRestartDialog(version) {
-  dialog.showMessageBox(mainWindow, {
-    type: 'info',
-    buttons: ['إعادة التشغيل الآن', 'لاحقاً'],
-    defaultId: 0,
-    cancelId: 1,
-    noLink: true,
-    title: 'تحديث جاهز',
-    message: `الإصدار ${version || ''} جاهز للتثبيت`,
-    detail: 'سيُعاد تشغيل التطبيق لتطبيق التحديث. سيُثبَّت تلقائياً عند الإغلاق إن اخترت لاحقاً.',
-  }).then(({ response }) => {
-    if (response === 0) {
-      app.isQuitting = true;
-      app.quit(); // the staged update is installed by the quit hook
-    }
-  }).catch(() => {});
-}
-
 function setupAutoUpdater() {
   const isMac = process.platform === 'darwin';
 
@@ -4295,7 +4277,11 @@ function setupAutoUpdater() {
       isPackaged: app.isPackaged,
       log: fileLog,
       emit: emitUpdateEvent,
-      onStaged: (version) => offerRestartDialog(version),
+      // No native modal on "ready": the subtle in-app update widget (fed by the
+      // 'update-downloaded' event above) is the only surface. The staged update
+      // installs on the next quit/relaunch via the quit-hook installer, or
+      // immediately when the user clicks the widget's restart action.
+      onStaged: (version) => fileLog('[MacUpdater] update staged & ready (widget-only, no modal):', version),
     });
     macUpdater.start();
     return;
@@ -4325,22 +4311,10 @@ function setupAutoUpdater() {
 
   autoUpdater.on('update-downloaded', (info) => {
     if (info?.version) updateStatus.version = info.version;
+    // No native modal: the subtle in-app update widget is the only surface.
+    // autoInstallOnAppQuit (set above) installs the staged update on the next
+    // quit, or the widget's restart action triggers it immediately.
     emitUpdateEvent('update-downloaded');
-    dialog.showMessageBox(mainWindow, {
-      type: 'info',
-      buttons: ['إعادة التشغيل الآن', 'لاحقاً'],
-      defaultId: 0,
-      cancelId: 1,
-      noLink: true,
-      title: 'تحديث جاهز',
-      message: `الإصدار ${info?.version || ''} جاهز للتثبيت`,
-      detail: 'سيُعاد تشغيل التطبيق لتطبيق التحديث. سيُثبَّت تلقائياً عند الإغلاق إن اخترت لاحقاً.',
-    }).then(({ response }) => {
-      if (response === 0) {
-        app.isQuitting = true;
-        autoUpdater.quitAndInstall();
-      }
-    }).catch(() => {});
   });
 
   autoUpdater.on('error', (err) => {
