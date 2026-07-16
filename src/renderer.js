@@ -843,3 +843,74 @@ document.addEventListener('keydown', (e) => {
     }
   }
 });
+
+// ─── OTA Update Widget ───────────────────────────────────────
+// Driven by main-process events (update-available / update-progress /
+// update-downloaded). Hidden by default; collapses via «لاحقاً» (the update
+// still installs on quit — autoInstallOnAppQuit semantics on both platforms).
+(function initUpdateWidget() {
+  const widget = document.getElementById('update-widget');
+  if (!widget || !window.texacore?.onUpdateAvailable) return;
+
+  const iconEl = document.getElementById('update-icon');
+  const textEl = document.getElementById('update-text');
+  const mbEl = document.getElementById('update-mb');
+  const barWrap = document.getElementById('update-progress-wrap');
+  const barEl = document.getElementById('update-progress-bar');
+  const restartBtn = document.getElementById('update-restart-btn');
+  const laterBtn = document.getElementById('update-later-btn');
+
+  let updVersion = '';
+  let updState = 'idle'; // idle | downloading | ready
+  let dismissed = false;
+
+  function render() {
+    if (updState === 'idle' || dismissed) { widget.style.display = 'none'; return; }
+    widget.style.display = 'block';
+    if (updState === 'downloading') {
+      iconEl.textContent = '⬇️';
+      textEl.textContent = t('update.downloading').replace('{v}', updVersion);
+      barWrap.style.display = 'block';
+      restartBtn.style.display = 'none';
+      laterBtn.style.display = 'none';
+    } else { // ready
+      iconEl.textContent = '✅';
+      textEl.textContent = t('update.ready').replace('{v}', updVersion);
+      mbEl.textContent = '';
+      barWrap.style.display = 'none';
+      restartBtn.textContent = t('update.restartNow');
+      restartBtn.style.display = 'inline-flex';
+      laterBtn.textContent = t('update.later');
+      laterBtn.style.display = 'inline-flex';
+    }
+  }
+
+  window.texacore.onUpdateAvailable((info) => {
+    updVersion = info?.version || '';
+    updState = 'downloading';
+    dismissed = false;
+    if (barEl) barEl.style.width = '0%';
+    render();
+  });
+
+  window.texacore.onUpdateProgress((p) => {
+    updState = 'downloading';
+    if (barEl && typeof p?.percent === 'number') barEl.style.width = p.percent + '%';
+    if (mbEl && p?.transferred && p?.total) mbEl.textContent = `${p.percent}% — ${p.transferred}/${p.total} MB`;
+    render();
+  });
+
+  window.texacore.onUpdateDownloaded(() => {
+    updState = 'ready';
+    render();
+  });
+
+  restartBtn?.addEventListener('click', () => {
+    restartBtn.disabled = true;
+    window.texacore.installUpdate();
+  });
+  laterBtn?.addEventListener('click', () => {
+    dismissed = true;
+    render();
+  });
+})();

@@ -6,6 +6,10 @@
 
 const I18N = {
   ar: {
+    'update.downloading': 'يتم تنزيل التحديث v{v} بالخلفية…',
+    'update.ready': 'التحديث v{v} جاهز — يُثبَّت عند إعادة التشغيل',
+    'update.restartNow': 'إعادة التشغيل الآن',
+    'update.later': 'لاحقاً',
     'app.subtitle': 'نظام إدارة الأعمال المتكامل',
     'card.database': 'قاعدة البيانات',
     'card.license': 'الترخيص',
@@ -105,6 +109,10 @@ const I18N = {
   },
 
   en: {
+    'update.downloading': 'Downloading update v{v} in the background…',
+    'update.ready': 'Update v{v} is ready — installs on restart',
+    'update.restartNow': 'Restart now',
+    'update.later': 'Later',
     'app.subtitle': 'Integrated business management system',
     'card.database': 'Database',
     'card.license': 'License',
@@ -204,6 +212,10 @@ const I18N = {
   },
 
   ru: {
+    'update.downloading': 'Обновление v{v} загружается в фоне…',
+    'update.ready': 'Обновление v{v} готово — установится при перезапуске',
+    'update.restartNow': 'Перезапустить сейчас',
+    'update.later': 'Позже',
     'app.subtitle': 'Комплексная система управления бизнесом',
     'card.database': 'База данных',
     'card.license': 'Лицензия',
@@ -303,6 +315,10 @@ const I18N = {
   },
 
   uk: {
+    'update.downloading': 'Оновлення v{v} завантажується у фоні…',
+    'update.ready': 'Оновлення v{v} готове — встановиться під час перезапуску',
+    'update.restartNow': 'Перезапустити зараз',
+    'update.later': 'Пізніше',
     'app.subtitle': 'Комплексна система управління бізнесом',
     'card.database': 'База даних',
     'card.license': 'Ліцензія',

@@ -386,8 +386,49 @@ function shq(s) {
   return `'${String(s).replace(/'/g, `'\\''`)}'`;
 }
 
+/**
+ * Pure reducer that maps updater events (mac MacUpdater or Windows
+ * electron-updater) onto the shared update-status object served by the
+ * local API (GET /api/update/status) and shown in the ERP web UI widget.
+ * Mutates and returns `status`.
+ */
+function applyUpdateEvent(status, channel, payload) {
+  switch (channel) {
+    case 'update-available':
+      status.state = 'downloading'; // both platforms auto-download right after
+      status.version = (payload && payload.version) || status.version || null;
+      status.percent = 0;
+      status.transferredMB = null;
+      status.totalMB = null;
+      break;
+    case 'update-progress':
+      status.state = 'downloading';
+      if (payload) {
+        status.percent = typeof payload.percent === 'number' ? payload.percent : status.percent;
+        status.transferredMB = payload.transferred ?? status.transferredMB;
+        status.totalMB = payload.total ?? status.totalMB;
+      }
+      break;
+    case 'update-downloaded':
+      status.state = 'ready';
+      status.percent = 100;
+      break;
+    case 'update-not-available':
+      status.state = 'idle';
+      status.version = null;
+      status.percent = null;
+      status.transferredMB = null;
+      status.totalMB = null;
+      break;
+    default:
+      break;
+  }
+  return status;
+}
+
 module.exports = {
   MacUpdater,
+  applyUpdateEvent,
   // exported for tests
   _internals: { parseFeed, cmpVersions, chooseAsset, sha512OfFile, currentAppBundlePath, fetchText, httpsGet, FEED_URL },
 };

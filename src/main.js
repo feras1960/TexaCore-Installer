@@ -10,7 +10,7 @@ const { getVendorAccount } = require('./vendor-support');
 const https = require('https');
 const http = require('http');
 const { autoUpdater } = require('electron-updater');
-const { MacUpdater } = require('./mac-updater');
+const { MacUpdater, applyUpdateEvent } = require('./mac-updater');
 const ServiceManager = require('./service-manager');
 const LicenseGuard = require('./license-guard');
 const BackupManager = require('./backup-manager');
@@ -2106,6 +2106,7 @@ function initBackupOnStartup() {
 const DESTRUCTIVE_API = new Set([
   '/api/delete-company', '/api/restore-tcdb', '/api/import-rsf', '/api/import-rsf-path',
   '/api/create-local-company', '/api/backup', '/api/open-tcdb', '/api/tunnel-fix', '/api/tunnel-restart',
+  '/api/update/install',
 ]);
 const httpServer = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
@@ -2792,6 +2793,43 @@ const httpServer = http.createServer(async (req, res) => {
     const status = backupManager.getStatus();
     res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ initialized: true, ...status }));
+
+  // ─── GET /api/update/status ──────────────────────────────
+  // Live OTA update status for the ERP web UI widget (DesktopUpdateWidget).
+  } else if (req.method === 'GET' && req.url === '/api/update/status') {
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, ...updateStatus }));
+
+  // ─── POST /api/update/install ────────────────────────────
+  // Restart-to-install, triggered from the ERP web UI. Same path as the
+  // 'install-update' IPC: quit → quit hook installs the staged update
+  // (mac: detached installer script / win: autoInstallOnAppQuit).
+  // Local-only: in DESTRUCTIVE_API (CSRF) + ADMIN_LOCAL_ONLY (tunnel), and
+  // double-checked here against non-loopback callers.
+  } else if (req.method === 'POST' && req.url === '/api/update/install') {
+    const remote = req.socket.remoteAddress || '';
+    const isLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+    if (!isLoopback) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'forbidden: update install is local-only' }));
+      return;
+    }
+    if (updateStatus.state !== 'ready') {
+      res.writeHead(409, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: `no update ready (state: ${updateStatus.state})` }));
+      return;
+    }
+    res.writeHead(200, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: true, message: 'restarting to install' }));
+    fileLog('[Update] install requested via local API — quitting to install v' + updateStatus.version);
+    setTimeout(() => {
+      app.isQuitting = true;
+      if (process.platform === 'darwin') {
+        app.quit(); // quit hook spawns the detached installer script
+      } else {
+        autoUpdater.quitAndInstall(); // same as the 'install-update' IPC on Windows
+      }
+    }, 400); // let the response flush first
 
   // ─── GET /api/companies ──────────────────────────────────
   } else if (req.method === 'GET' && req.url === '/api/companies') {
@@ -4219,6 +4257,16 @@ function createTray() {
 // Windows. Windows keeps using electron-updater untouched.
 let macUpdater = null;
 
+// Shared update status served by the local API (GET /api/update/status) so the
+// ERP web UI (localhost:8080) can show a live update widget. Fed by BOTH the
+// mac MacUpdater flow and the Windows electron-updater flow through
+// emitUpdateEvent(), which also forwards the event to the installer renderer.
+const updateStatus = { state: 'idle', version: null, percent: null, transferredMB: null, totalMB: null };
+function emitUpdateEvent(channel, payload) {
+  applyUpdateEvent(updateStatus, channel, payload);
+  mainWindow?.webContents.send(channel, payload);
+}
+
 function offerRestartDialog(version) {
   dialog.showMessageBox(mainWindow, {
     type: 'info',
@@ -4246,7 +4294,7 @@ function setupAutoUpdater() {
       userDataPath: app.getPath('userData'),
       isPackaged: app.isPackaged,
       log: fileLog,
-      emit: (channel, payload) => mainWindow?.webContents.send(channel, payload),
+      emit: emitUpdateEvent,
       onStaged: (version) => offerRestartDialog(version),
     });
     macUpdater.start();
@@ -4257,18 +4305,18 @@ function setupAutoUpdater() {
   autoUpdater.autoInstallOnAppQuit = true;
 
   autoUpdater.on('update-available', (info) => {
-    mainWindow?.webContents.send('update-available', {
+    emitUpdateEvent('update-available', {
       version: info.version,
       releaseNotes: info.releaseNotes,
     });
   });
 
   autoUpdater.on('update-not-available', () => {
-    mainWindow?.webContents.send('update-not-available');
+    emitUpdateEvent('update-not-available');
   });
 
   autoUpdater.on('download-progress', (progress) => {
-    mainWindow?.webContents.send('update-progress', {
+    emitUpdateEvent('update-progress', {
       percent: Math.round(progress.percent),
       transferred: (progress.transferred / 1024 / 1024).toFixed(1),
       total: (progress.total / 1024 / 1024).toFixed(0),
@@ -4276,7 +4324,8 @@ function setupAutoUpdater() {
   });
 
   autoUpdater.on('update-downloaded', (info) => {
-    mainWindow?.webContents.send('update-downloaded');
+    if (info?.version) updateStatus.version = info.version;
+    emitUpdateEvent('update-downloaded');
     dialog.showMessageBox(mainWindow, {
       type: 'info',
       buttons: ['إعادة التشغيل الآن', 'لاحقاً'],

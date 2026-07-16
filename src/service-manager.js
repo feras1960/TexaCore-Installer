@@ -924,6 +924,7 @@ window.__TEXACORE_CONFIG__ = {
       const ADMIN_LOCAL_ONLY = new Set([
         '/api/delete-company', '/api/restore-tcdb', '/api/import-rsf', '/api/import-rsf-path',
         '/api/create-local-company', '/api/backup', '/api/open-tcdb', '/api/tunnel-fix', '/api/tunnel-restart',
+        '/api/update/install',
       ]);
       app.all('/api/*', (req, res) => {
         const host = req.headers.host || '';

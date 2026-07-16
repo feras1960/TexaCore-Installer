@@ -78,6 +78,20 @@
       </div>
     </div>
 
+    <!-- OTA Update Widget (hidden until an update is downloading/ready) -->
+    <div class="update-widget" id="update-widget" style="display:none;">
+      <div class="update-widget-row">
+        <span class="update-icon" id="update-icon">⬇️</span>
+        <span class="update-text" id="update-text"></span>
+        <span class="update-mb" id="update-mb"></span>
+        <button class="btn-update-restart" id="update-restart-btn" style="display:none;"></button>
+        <button class="btn-update-later" id="update-later-btn" style="display:none;"></button>
+      </div>
+      <div class="update-progress" id="update-progress-wrap">
+        <div class="update-progress-bar" id="update-progress-bar"></div>
+      </div>
+    </div>
+
     <!-- panel-no-docker removed — no longer needed -->
     <div id="panel-no-docker" style="display:none;"></div>
 
