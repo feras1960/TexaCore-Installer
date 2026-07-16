@@ -1,7 +1,7 @@
 {
-  "version": "2026.07.13",
-  "generated": "2026-07-13T00:00:00Z",
-  "totalFiles": 264,
+  "version": "2026.07.16",
+  "generated": "2026-07-16T00:00:00Z",
+  "totalFiles": 276,
   "migrations": [
     {
       "order": 1,
@@ -1382,11 +1382,6 @@
       "order": 276,
       "file": "20260715a_sales_transactions_shipping_parity.sql",
       "name": "20260715a_sales_transactions_shipping_parity"
-    },
-    {
-      "order": 277,
-      "file": "20260716a_roll_movements_rls.sql",
-      "name": "20260716a_roll_movements_rls"
     }
   ]
 }
