@@ -1,7 +1,7 @@
 {
-  "version": "2026.07.16",
-  "generated": "2026-07-16T00:00:00Z",
-  "totalFiles": 276,
+  "version": "2026.07.18",
+  "generated": "2026-07-18T13:32:31.723496Z",
+  "totalFiles": 324,
   "migrations": [
     {
       "order": 1,
@@ -1382,6 +1382,246 @@
       "order": 276,
       "file": "20260715a_sales_transactions_shipping_parity.sql",
       "name": "20260715a_sales_transactions_shipping_parity"
+    },
+    {
+      "order": 277,
+      "file": "20260713a_module_registry_canonicalize.sql",
+      "name": "20260713a_module_registry_canonicalize"
+    },
+    {
+      "order": 278,
+      "file": "20260713c_plans_canonicalize_pricing.sql",
+      "name": "20260713c_plans_canonicalize_pricing"
+    },
+    {
+      "order": 279,
+      "file": "20260714a_direct_post_sale_v3.sql",
+      "name": "20260714a_direct_post_sale_v3"
+    },
+    {
+      "order": 280,
+      "file": "20260714a_notify_version_channel.sql",
+      "name": "20260714a_notify_version_channel"
+    },
+    {
+      "order": 281,
+      "file": "20260714b_direct_post_purchase.sql",
+      "name": "20260714b_direct_post_purchase"
+    },
+    {
+      "order": 282,
+      "file": "20260716a_roll_movements_rls.sql",
+      "name": "20260716a_roll_movements_rls"
+    },
+    {
+      "order": 283,
+      "file": "20260716b_manufacturing_master_data.sql",
+      "name": "20260716b_manufacturing_master_data"
+    },
+    {
+      "order": 284,
+      "file": "20260716c_products_manufacturing_flags.sql",
+      "name": "20260716c_products_manufacturing_flags"
+    },
+    {
+      "order": 285,
+      "file": "20260716d_manufacturing_module_registration.sql",
+      "name": "20260716d_manufacturing_module_registration"
+    },
+    {
+      "order": 286,
+      "file": "20260716e_manufacturing_bom.sql",
+      "name": "20260716e_manufacturing_bom"
+    },
+    {
+      "order": 287,
+      "file": "20260716f_manufacturing_orders.sql",
+      "name": "20260716f_manufacturing_orders"
+    },
+    {
+      "order": 288,
+      "file": "20260716g_manufacturing_rpcs.sql",
+      "name": "20260716g_manufacturing_rpcs"
+    },
+    {
+      "order": 289,
+      "file": "20260716h_manufacturing_print_templates.sql",
+      "name": "20260716h_manufacturing_print_templates"
+    },
+    {
+      "order": 290,
+      "file": "20260717a_manufacturing_p2_gl_and_fixes.sql",
+      "name": "20260717a_manufacturing_p2_gl_and_fixes"
+    },
+    {
+      "order": 291,
+      "file": "20260717a_p0_purchase_isolation.sql",
+      "name": "20260717a_p0_purchase_isolation"
+    },
+    {
+      "order": 292,
+      "file": "20260717a_wizard_fiscal_billing_language.sql",
+      "name": "20260717a_wizard_fiscal_billing_language"
+    },
+    {
+      "order": 293,
+      "file": "20260717b_manufacturing_p2_labor.sql",
+      "name": "20260717b_manufacturing_p2_labor"
+    },
+    {
+      "order": 294,
+      "file": "20260717b_p1_unify_posting_perpetual.sql",
+      "name": "20260717b_p1_unify_posting_perpetual"
+    },
+    {
+      "order": 295,
+      "file": "20260717c_manufacturing_p2_print_templates.sql",
+      "name": "20260717c_manufacturing_p2_print_templates"
+    },
+    {
+      "order": 296,
+      "file": "20260717c_p2_grn_atomicity.sql",
+      "name": "20260717c_p2_grn_atomicity"
+    },
+    {
+      "order": 297,
+      "file": "20260717d_manufacturing_p3a_batch_quality.sql",
+      "name": "20260717d_manufacturing_p3a_batch_quality"
+    },
+    {
+      "order": 298,
+      "file": "20260717d_p3_stage_vocabulary.sql",
+      "name": "20260717d_p3_stage_vocabulary"
+    },
+    {
+      "order": 299,
+      "file": "20260717e_manufacturing_p3a_mto_sales.sql",
+      "name": "20260717e_manufacturing_p3a_mto_sales"
+    },
+    {
+      "order": 300,
+      "file": "20260717f_manufacturing_p3a_subcontracting.sql",
+      "name": "20260717f_manufacturing_p3a_subcontracting"
+    },
+    {
+      "order": 301,
+      "file": "20260717g_manufacturing_p3a_trace_wip_process.sql",
+      "name": "20260717g_manufacturing_p3a_trace_wip_process"
+    },
+    {
+      "order": 302,
+      "file": "20260717h_manufacturing_p3a_dynamic_fields.sql",
+      "name": "20260717h_manufacturing_p3a_dynamic_fields"
+    },
+    {
+      "order": 303,
+      "file": "20260717i_manufacturing_p3b_fg_reservation_release_fix.sql",
+      "name": "20260717i_manufacturing_p3b_fg_reservation_release_fix"
+    },
+    {
+      "order": 304,
+      "file": "20260717j_manufacturing_p3b_print_templates.sql",
+      "name": "20260717j_manufacturing_p3b_print_templates"
+    },
+    {
+      "order": 305,
+      "file": "20260717k_manufacturing_p4a_bundles.sql",
+      "name": "20260717k_manufacturing_p4a_bundles"
+    },
+    {
+      "order": 306,
+      "file": "20260717l2_manufacturing_p4a_complete_order_stage_dag.sql",
+      "name": "20260717l2_manufacturing_p4a_complete_order_stage_dag"
+    },
+    {
+      "order": 307,
+      "file": "20260717l_manufacturing_p4a_dag_engine.sql",
+      "name": "20260717l_manufacturing_p4a_dag_engine"
+    },
+    {
+      "order": 308,
+      "file": "20260717m_manufacturing_p4a_exploded_bom_mrp.sql",
+      "name": "20260717m_manufacturing_p4a_exploded_bom_mrp"
+    },
+    {
+      "order": 309,
+      "file": "20260717n_manufacturing_p4a_unbuild_reports.sql",
+      "name": "20260717n_manufacturing_p4a_unbuild_reports"
+    },
+    {
+      "order": 310,
+      "file": "20260717o_manufacturing_p4b_bundle_ticket_template.sql",
+      "name": "20260717o_manufacturing_p4b_bundle_ticket_template"
+    },
+    {
+      "order": 311,
+      "file": "20260717p_manufacturing_saas_manageability.sql",
+      "name": "20260717p_manufacturing_saas_manageability"
+    },
+    {
+      "order": 312,
+      "file": "20260717q_manufacturing_free_tier_gating.sql",
+      "name": "20260717q_manufacturing_free_tier_gating"
+    },
+    {
+      "order": 313,
+      "file": "20260717q_p4_r10_fx_supplier_payment.sql",
+      "name": "20260717q_p4_r10_fx_supplier_payment"
+    },
+    {
+      "order": 314,
+      "file": "20260717r_p4_r8a_incremental_refinalize.sql",
+      "name": "20260717r_p4_r8a_incremental_refinalize"
+    },
+    {
+      "order": 315,
+      "file": "20260717s_free_plan_unlimited_products.sql",
+      "name": "20260717s_free_plan_unlimited_products"
+    },
+    {
+      "order": 316,
+      "file": "20260717t_free_plan_messaging.sql",
+      "name": "20260717t_free_plan_messaging"
+    },
+    {
+      "order": 317,
+      "file": "20260718a_manufacturing_p4c_verification_fixes.sql",
+      "name": "20260718a_manufacturing_p4c_verification_fixes"
+    },
+    {
+      "order": 318,
+      "file": "20260718b_manufacturing_bag_serial_codes.sql",
+      "name": "20260718b_manufacturing_bag_serial_codes"
+    },
+    {
+      "order": 319,
+      "file": "20260718c_manufacturing_pkg_sizes_wc_employees.sql",
+      "name": "20260718c_manufacturing_pkg_sizes_wc_employees"
+    },
+    {
+      "order": 320,
+      "file": "20260718d_manufacturing_pallets.sql",
+      "name": "20260718d_manufacturing_pallets"
+    },
+    {
+      "order": 321,
+      "file": "20260718e_manufacturing_notifications.sql",
+      "name": "20260718e_manufacturing_notifications"
+    },
+    {
+      "order": 322,
+      "file": "20260718f_fix_mfg_module_guards_restrictive.sql",
+      "name": "20260718f_fix_mfg_module_guards_restrictive"
+    },
+    {
+      "order": 323,
+      "file": "20260718g_manufacturing_bom_revisions.sql",
+      "name": "20260718g_manufacturing_bom_revisions"
+    },
+    {
+      "order": 324,
+      "file": "20260718h_manufacturing_realtime_publication.sql",
+      "name": "20260718h_manufacturing_realtime_publication"
     }
   ]
 }
