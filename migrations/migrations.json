@@ -1622,6 +1622,51 @@
       "order": 324,
       "file": "20260718h_manufacturing_realtime_publication.sql",
       "name": "20260718h_manufacturing_realtime_publication"
+    },
+    {
+      "order": 325,
+      "file": "20260719a_phase0_unified_materials_view.sql",
+      "name": "20260719a_phase0_unified_materials_view"
+    },
+    {
+      "order": 326,
+      "file": "20260719b_phase1_fabric_product_bridge.sql",
+      "name": "20260719b_phase1_fabric_product_bridge"
+    },
+    {
+      "order": 327,
+      "file": "20260719c_phase2_muc_allow_products.sql",
+      "name": "20260719c_phase2_muc_allow_products"
+    },
+    {
+      "order": 328,
+      "file": "20260809a_category_subtree_rollup.sql",
+      "name": "20260809a_category_subtree_rollup"
+    },
+    {
+      "order": 329,
+      "file": "p1_revive_journal_balance_guard.sql",
+      "name": "p1_revive_journal_balance_guard"
+    },
+    {
+      "order": 330,
+      "file": "p1b_fix_broken_posting_functions.sql",
+      "name": "p1b_fix_broken_posting_functions"
+    },
+    {
+      "order": 331,
+      "file": "p1c_fix_balance_application.sql",
+      "name": "p1c_fix_balance_application"
+    },
+    {
+      "order": 332,
+      "file": "p1_mandatory_cogs.sql",
+      "name": "p1_mandatory_cogs"
+    },
+    {
+      "order": 333,
+      "file": "p3_mfg_notifications_to_bell.sql",
+      "name": "p3_mfg_notifications_to_bell"
     }
   ]
 }
