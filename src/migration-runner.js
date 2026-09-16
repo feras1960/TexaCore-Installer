@@ -103,9 +103,25 @@ class MigrationRunner {
       this.onProgress(i + 1, pending.length, migration.name);
 
       // Check file exists
+      // RC-8b: كانت هذه تتخطّى الملف الغائب بـ`continue` مباشرة — فلو كان
+      // هجرة «حرجة» (order <= 23) لا يصل التنفيذ أبداً إلى حارس الإيقاف
+      // أسفل هذه الحلقة، ويكمل صامتاً على قاعدة بمخطط أساسي ناقص. الآن
+      // يُعامَل بنفس منطق فشل التنفيذ العادي (يُسجَّل __FAILED، ويُوقف إن
+      // كان حرجاً).
       if (!fs.existsSync(filePath)) {
-        console.warn(`[MigrationRunner] ⚠️ File not found: ${migration.file} — skipping`);
+        console.error(`[MigrationRunner] ❌ File not found: ${migration.file}`);
         errors.push({ name: migration.name, error: 'File not found' });
+        try {
+          await this.psqlExec(`
+            INSERT INTO public._texacore_migrations (name, checksum, execution_ms)
+            VALUES ('${migration.name.replace(/'/g, "''")}__FAILED', 'missing-file', 0)
+            ON CONFLICT (name) DO NOTHING;
+          `);
+        } catch { /* ignore tracking error */ }
+        if (migration.order <= 23) {
+          console.error('[MigrationRunner] 🛑 Critical migration file missing — aborting');
+          break;
+        }
         continue;
       }
 
@@ -145,17 +161,24 @@ class MigrationRunner {
                 spawnOpts.env = { ...process.env, PATH: this.pgBin + ';' + (process.env.PATH || '') };
               }
               console.log(`[MigrationRunner] Executing: ${psqlPath} -f ${tmpFile}`);
+              // RC-8b: ON_ERROR_STOP=1 (كان 0) — الإصدار القديم جعل psql يخرج
+              // برمز 0 دائماً حتى لو فشلت كل عبارة في الملف، فلا سبيل لتمييز
+              // نجاح حقيقي عن فشل صامت لملفات >100KB. الآن رمز الخروج ورسالة
+              // stderr تصلان فعلياً إلى catch أدناه، فتُسجَّل بنفس منطق
+              // `__FAILED`/`order <= 23` الذي يعمل بالفعل للملفات الأصغر.
               const psql = spawn(psqlPath, [
                 '-p', '54322', '-h', 'localhost', '-U', 'postgres',
-                '-d', 'postgres', '-v', 'ON_ERROR_STOP=0',
+                '-d', 'postgres', '-v', 'ON_ERROR_STOP=1',
                 '-f', tmpFile
               ], spawnOpts);
               let errOut = '';
               psql.stdout.on('data', () => {});
               psql.stderr.on('data', d => errOut += d.toString());
               psql.on('error', err => reject(new Error(`psql spawn error: ${err.message}`)));
-              // ON_ERROR_STOP=0 means psql always exits 0; we treat it as success
-              psql.on('close', () => resolve());
+              psql.on('close', (code) => {
+                if (code === 0) resolve();
+                else reject(new Error(errOut.trim() || `psql exited with code ${code}`));
+              });
             });
           } finally {
             try { fs.unlinkSync(tmpFile); } catch {}

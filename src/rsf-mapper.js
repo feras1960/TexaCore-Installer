@@ -1,6 +1,21 @@
 /**
  * TexaCore RSF Mapper — تحويل بيانات الرشيد لهيكل TexaCore
  * يأخذ البيانات من rsf-reader ويدخلها في PostgreSQL المحلي
+ *
+ * ⛔ RC-8b — متقاعد: لا يُستدعى من main.js بعد اليوم. الاستيراد من الرشيد
+ * (سحابياً ومحلياً معاً) يمرّ الآن عبر المعالج الموحَّد نفسه
+ * (`src/features/import/wizard/UnifiedImportWizard.tsx` بمستودع
+ * TexaCore2026 الرئيسي) على PostgREST المحلي (54321) — بجلسة موثَّقة
+ * وRLS مفعَّلة، لا اتصال Postgres خارق مباشر. سبب التقاعد مقيس، لا رأي:
+ * (أ) يكتب بمفاتيح ON CONFLICT بنطاق المستأجر بينما قيود الإنتاج الحيّة
+ * بنطاق الشركة (customers/suppliers/journal_entries) — يفشل صامتاً بلا
+ * أثر مرئي؛ (ب) يشير لأعمدة محذوفة من المخطط الحيّ
+ * (`products.base_unit_id`, `purchase_invoices.payment_status`,
+ * `inventory_movements.warehouse_id`)؛ (ج) `_createUsersFromRsf` كانت
+ * تُنشئ مستخدمي دخول حقيقيين بكلمة مرور حرفية واحدة — أُبطِلت أدناه
+ * صراحةً. راجع docs/reports/onboarding/g2-g7/RC-8-COMPARE.md
+ * وRC-8b-summary.md (المستودع الرئيسي) للتفاصيل الكاملة والأرقام
+ * المقيسة. الملف يبقى بالمستودع كمرجع تاريخي فقط.
  */
 
 const { RsfReader } = require('./rsf-reader');
@@ -506,6 +521,20 @@ class RsfMapper {
   // ═══════════════════════════════════════════════════════
 
   async _createUsersFromRsf(pgClient, gotrueRequest) {
+    // ─── RC-8b: مُتقاعدة ────────────────────────────────────────────
+    // كانت تُنشئ مستخدم GoTrue حقيقياً (بريد + دخول) لكل صفّ في جدول
+    // `Password` الرشيدي بكلمة مرور حرفية واحدة `'admin123'` للجميع —
+    // عيب أمني، لا فجوة تغطية. لا مستدعٍ حيّ لهذه الدالّة بعد اليوم (كل
+    // منادي `RsfMapper.importAll` في main.js أُزيل — راجع تعليق
+    // ipcMain.handle('import-rsf') هناك)؛ تُبقى الدالّة بجسمها القديم
+    // أدناه (مرجع تاريخي) خلف هذا الرمي الصريح كي لا يُنشئ أي استدعاء
+    // مستقبلي غير مقصود حساباً بكلمة مرور حرفية صامتاً.
+    throw new Error(
+      '_createUsersFromRsf متقاعدة — مسار الرشيد القديم لم يعد يُنشئ مستخدمي GoTrue. ' +
+      'استيراد الرشيد المحلي يمرّ الآن عبر معالج الاستيراد الموحَّد؛ إنشاء المستخدم الإداري ' +
+      'يتم عبر /api/create-local-company (كلمة مرور حقيقية من إدخال المستخدم، لا حرفية).'
+    );
+    // eslint-disable-next-line no-unreachable
     const rsfUsers = this.reader.getUsers();
     if (!rsfUsers || rsfUsers.length === 0) return [];
 

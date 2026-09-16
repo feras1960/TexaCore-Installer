@@ -57,12 +57,13 @@ contextBridge.exposeInMainWorld('texacore', {
   backupStatus: () => ipcRenderer.invoke('backup-status'),
   onBackupProgress: (cb) => ipcRenderer.on('backup-progress', (_, d) => cb(d)),
 
-  // RSF Import/Export (Al-Rasheed)
+  // RSF detect/export (Al-Rasheed) — RC-8b: `importRSF`/`onRsfProgress` أُزيلا؛
+  // كانا يستدعيان مسار rsf-mapper.js المتقاعد ولا استدعاء حقيقي لهما اليوم
+  // (بحث في src/renderer.js وواجهة التطبيق الرئيسية: صفر نتيجة). الاستيراد
+  // الآن عبر معالج الاستيراد الموحَّد داخل واجهة التطبيق نفسها، لا عبر IPC.
   detectFileType: (filePath) => ipcRenderer.invoke('detect-file-type', filePath),
   rsfSummary: (filePath) => ipcRenderer.invoke('rsf-summary', filePath),
-  importRSF: (filePath) => ipcRenderer.invoke('import-rsf', filePath),
   exportRSF: (rsfPath) => ipcRenderer.invoke('export-rsf', rsfPath),
-  onRsfProgress: (cb) => ipcRenderer.on('rsf-progress', (_, d) => cb(d)),
 
   // Window
   minimize: () => ipcRenderer.invoke('window-minimize'),
