@@ -522,6 +522,15 @@ async function main() {
         if (out.status !== 0) throw new Error(`${out.stdout}\n${out.stderr}`.trim().slice(-900));
         return out.stdout.trim().split('\n').slice(-1)[0];
       });
+      // A PC in the office opens the ERP at the machine's LAN address: the page points at its own /_supabase proxy, gets no admin secret,
+      // picks its company with the employee link (/login?c=<code> — the company picker needs the admin API, which is local-only) and logs in.
+      await R.check('5.3 browser from the LAN address: the ERP loads, the employee link selects the company, the admin logs in and reaches the dashboard', async () => {
+        const base = lanIp ? `http://${lanIp}:${PORTS.ui}` : UI;
+        const code = String(A.companyId).split('-')[0];
+        const out = require('child_process').spawnSync('node', [path.join(__dirname, 'browser-login.cjs'), '--erp', ERP, '--ui', base, '--code', code, '--email', 'owner@e2e.test', '--password', 'E2ePass#2026', '--shots', path.join(WORK, 'shots-lan')], { encoding: 'utf8', timeout: 240000 });
+        if (out.status !== 0) throw new Error(`${out.stdout}\n${out.stderr}`.trim().slice(-900));
+        return `${lanIp ? 'via ' + lanIp : 'loopback (no LAN interface)'}; ${out.stdout.trim().split('\n').slice(-1)[0].replace(/ \(screenshots:.*$/, '')}`;
+      });
     } else console.log('  SKIP  5.2 browser login (no --erp given: Playwright lives in the ERP checkout)');
 
     // ── 6. Rashid import ──

@@ -7,6 +7,7 @@ const path = require('path');
 const arg = (n, d = '') => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const ERP = arg('erp'); const UI = arg('ui'); const EMAIL = arg('email'); const PASSWORD = arg('password'); const SHOTS = arg('shots');
 const COMPANY = arg('company', '');
+const CODE = arg('code', '');   // the employee link (/login?c=<code>) — how a PC on the LAN / the tunnel picks its company (no admin API there)
 const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
 
 (async () => {
@@ -20,11 +21,13 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
       const u = r.url();
       if (r.status() >= 400 && /\/(rest|auth)\/v1\//.test(u) && !/rpc\/(get_user_tenants|get_template_preview)/.test(u)) failures.push(`${r.status()} ${u.replace(/^https?:\/\/[^/]+/, '').slice(0, 100)}`);
     });
-    await page.goto(`${UI}/login`, { waitUntil: 'networkidle', timeout: 90000 });
+    await page.goto(CODE ? `${UI}/login?c=${CODE}` : `${UI}/login`, { waitUntil: 'networkidle', timeout: 90000 });
     await page.screenshot({ path: path.join(SHOTS, '1-login.png') });
-    const card = COMPANY ? page.getByRole('button', { name: new RegExp(COMPANY) }) : page.locator('button', { hasText: 'Local Database' }).first();
-    if (!(await card.count())) throw new Error('no company card on the login page (admin API / runtime secret broken?)');
-    await card.click();
+    if (!CODE) {
+      const card = COMPANY ? page.getByRole('button', { name: new RegExp(COMPANY) }) : page.locator('button', { hasText: 'Local Database' }).first();
+      if (!(await card.count())) throw new Error('no company card on the login page (admin API / runtime secret broken?)');
+      await card.click();
+    }
     await page.fill('input[type="text"]', EMAIL);
     await page.fill('input[type="password"]', PASSWORD);
     await page.locator('button[type="submit"]').first().click();
