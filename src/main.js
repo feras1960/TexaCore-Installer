@@ -1721,6 +1721,29 @@ ipcMain.handle('list-local-companies', async () => {
   catch (e) { return { success: false, companies: [], error: e.message }; }
 });
 
+const WIDGET_PROBE = `(() => { const g = (id) => document.getElementById(id); const w = g('update-widget'); if (!w) return { present: false };
+  const vis = (el) => !!el && getComputedStyle(el).display !== 'none' && el.getClientRects().length > 0;
+  return { present: true, shown: vis(w), text: (g('update-text') || {}).textContent || '', mb: (g('update-mb') || {}).textContent || '', progressVisible: vis(g('update-progress-wrap')),
+    progressWidth: (g('update-progress-bar') || { style: {} }).style.width || '', restartVisible: vis(g('update-restart-btn')), restartText: (g('update-restart-btn') || {}).textContent || '',
+    laterText: (g('update-later-btn') || {}).textContent || '', lang: document.documentElement.lang, title: document.title }; })()`;
+async function uiUpdate(url, method) {
+  if (!mainWindow || mainWindow.isDestroyed()) return { ok: false, error: 'no installer window' };
+  const wc = mainWindow.webContents;
+  if (wc.isLoading()) await new Promise((r) => wc.once('did-finish-load', r));
+  if (method === 'POST' && url.pathname === '/api/ui-update-click') {
+    await wc.executeJavaScript("document.getElementById('update-restart-btn').click()", true);
+    return { ok: true, clicked: true };
+  }
+  const out = { ok: true, version: app.getVersion(), widget: await wc.executeJavaScript(WIDGET_PROBE, true), status: { ...updateStatus } };
+  const shot = url.searchParams.get('shot');
+  if (shot && process.env.TEXACORE_SHOT_DIR) {
+    const f = path.join(process.env.TEXACORE_SHOT_DIR, path.basename(shot).replace(/[^A-Za-z0-9._-]/g, '_'));
+    fs.writeFileSync(f, (await wc.capturePage()).toPNG());
+    out.shot = f;
+  }
+  return out;
+}
+
 async function uiSmoke() {
   if (!mainWindow || mainWindow.isDestroyed()) return { ok: false, error: 'no installer window (start with TEXACORE_UI_SMOKE=1)' };
   const wc = mainWindow.webContents;
@@ -2434,6 +2457,11 @@ const httpServer = http.createServer(async (req, res) => {
   } else if (HARNESS_OK && req.method === 'GET' && req.url === '/api/ui-smoke') {
     // release-check only (isolated harness runs): drive the installer window — preload bridge, IPC handlers, renderer — against the live services
     uiSmoke().then((r) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r)); })
+      .catch((e) => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: e.message })); });
+
+  } else if (HARNESS_OK && (req.url || '').startsWith('/api/ui-update')) {
+    // release-check only (isolated harness runs): read the installer window's OTA widget (what the user is shown) and press its «restart now» button
+    uiUpdate(new URL(req.url, 'http://127.0.0.1'), req.method).then((r) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r)); })
       .catch((e) => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: e.message })); });
 
   } else if (req.method === 'GET' && (req.url || '').startsWith('/api/employee-roles')) {
@@ -3287,6 +3315,9 @@ app.whenReady().then(() => {
   if (DEV_HARNESS) {
     // Launch check: no cloud presence / heartbeat / diagnostics. Optionally auto-start the services.
     if (process.env.TEXACORE_UI_SMOKE === '1') createWindow();      // hidden (see createWindow): the check drives the real preload bridge + renderer through /api/ui-smoke
+    // OTA release check (isolated runs only): the installer window and the REAL updater, still with no cloud presence / heartbeat. The feed is never overridden in
+    // the product: the check redirects github.com at the network layer from OUTSIDE the app (scripts/e2e/net-redirect-preload.js).
+    if (process.env.TEXACORE_UPDATE_TEST === '1') { if (process.env.TEXACORE_UI_SMOKE !== '1') createWindow(); setupAutoUpdater(); }
     if (process.env.TEXACORE_E2E_AUTOSTART === '1') {
       (async () => {
         try {
