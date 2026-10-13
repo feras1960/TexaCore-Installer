@@ -29,6 +29,13 @@ CSC_IDENTITY_AUTO_DISCOVERY=false npm run build:mac   # prebuild-checks → elec
 `afterPack` (scripts/lib/verify-packed.js) FAILS the build if any pinned baseline file is missing from the app or differs from the pin, if the
 packaged web bundle is not this version, if fonts/binaries/bootstrap SQL are missing, or if a 1.x migrations manifest rides along.
 
+### Build notes learned on 2026-10-13
+- **One baseline pack per release.** `npm run build:mac` and `npm run build:win` each run `pack-baseline` (fresh key + container). Build both platforms from the same pack — `npm run build:all` (or `publish`), or run the second build without
+  `pack-baseline` — otherwise the repo's generated key no longer matches the first platform's package and `verify-mac-build` M5 / `verify-win-build` W4 report "built from different source".
+- **Do not build inside an iCloud-synced folder.** File-provider attributes on directories make `codesign` refuse in place; `afterPack` then signs a clean copy in the temp folder and puts it back, and fails the build if the final bundle does not verify.
+- **After the mac build run `node scripts/verify-mac-build.js`** (zip + dmg + latest-mac.yml, signature validity of the extracted zip and the mounted dmg). Earlier builds shipped an invalid signature and the launch checks did not notice, because they run the inner binary.
+- Update check: `node scripts/e2e/ota-check.js` (hops a, tamper, tamper2, b; mock GitHub with the real redirect chain, outside the product) and `node scripts/e2e/ui-shots.js` (launcher window, Arabic RTL + English LTR).
+
 ## Re-cutting the baseline (the only thing that changes)
 
 1. ERP: `scripts/schema/build-baseline.sh` (see `supabase/baseline/BASELINE.md`), copy the stub file as it says, commit.
