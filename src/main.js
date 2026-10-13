@@ -261,6 +261,13 @@ function saveConfig(config) {
 }
 
 // ─── Create Window ───────────────────────────────────────────
+/** The window/title-bar icon. Packaged builds ship build/icon.ico (+ icon.png) under resources/build; the repo checkout has them next to src. */
+function windowIconPath() {
+  const dir = app.isPackaged ? path.join(process.resourcesPath, 'build') : path.join(__dirname, '..', 'build');
+  const ico = path.join(dir, 'icon.ico');
+  return process.platform === 'win32' && fs.existsSync(ico) ? ico : path.join(dir, 'icon.png');
+}
+
 function createWindow() {
   const isMac = process.platform === 'darwin';
   mainWindow = new BrowserWindow({
@@ -282,7 +289,7 @@ function createWindow() {
       contextIsolation: true,
       nodeIntegration: false,
     },
-    icon: path.join(__dirname, '..', 'build', 'icon.png'),
+    icon: windowIconPath(),
   });
 
   mainWindow.loadFile(path.join(__dirname, 'index.html'));
@@ -3124,6 +3131,14 @@ ipcMain.handle('show-in-folder', async (_, filePath) => { shell.showItemInFolder
 ipcMain.handle('install-docker', () => ({ success: true, message: 'Docker not required' }));
 
 // ─── System Tray ─────────────────────────────────────────────
+// Windows / Linux: the tray draws a 16 px (100 % scaling) or 32 px (200 %) image. build/icon.ico carries real 16/24/32/48/64/128/256 entries, so Windows
+// picks the hand-sized one instead of a 256 px PNG squeezed down by `resize()` (which looked smeared). Falls back to the PNG only if the .ico is missing.
+function trayIconNonMac(buildDir) {
+  const ico = nativeImage.createFromPath(path.join(buildDir, 'icon.ico'));
+  if (!ico.isEmpty()) return ico;
+  return nativeImage.createFromPath(path.join(buildDir, 'icon.png')).resize({ width: 16, height: 16 });
+}
+
 function createTray() {
   // macOS: template icon (pure black + alpha — the PNGs were regenerated with a
   // real transparent background; an opaque white bg made the menu bar draw a
@@ -3137,7 +3152,7 @@ function createTray() {
     icon = nativeImage.createFromPath(path.join(buildDir, 'trayTemplate.png'));
     icon.setTemplateImage(true);
   } else {
-    icon = nativeImage.createFromPath(path.join(buildDir, 'icon.png')).resize({ width: 16, height: 16 });
+    icon = trayIconNonMac(buildDir);
   }
   tray = new Tray(icon);
   tray.setToolTip('TexaCore ERP');
@@ -3152,7 +3167,7 @@ function createTray() {
       },
       { type: 'separator' },
       {
-        label: '📊 فتح لوحة التحكم',
+        label: 'فتح لوحة التحكم',
         click: () => {
           if (mainWindow) {
             mainWindow.show();
@@ -3163,7 +3178,7 @@ function createTray() {
         },
       },
       {
-        label: '🌐 فتح في المتصفح',
+        label: 'فتح في المتصفح',
         click: () => {
           const config = loadConfig();
           shell.openExternal(`http://localhost:${config.port || APP_PORT}`);
@@ -3171,7 +3186,7 @@ function createTray() {
       },
       { type: 'separator' },
       {
-        label: running ? '⏹ إيقاف النظام' : '▶ تشغيل النظام',
+        label: running ? 'إيقاف النظام' : 'تشغيل النظام',
         click: async () => {
           if (running) {
             if (svcManager) await svcManager.stopAll();
@@ -3184,7 +3199,7 @@ function createTray() {
       },
       { type: 'separator' },
       {
-        label: '❌ إنهاء TexaCore',
+        label: 'إنهاء TexaCore',
         click: () => {
           app.isQuitting = true;
           app.quit();

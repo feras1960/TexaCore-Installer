@@ -61,6 +61,7 @@ would otherwise have talked to an installed app's database** — and the run was
   The request that makes a page "local" is decided in src/net-guard.js (`classifyRequest`): loopback Host + a peer that is this machine (loopback in any spelling, or one of its own addresses) + not forwarded from elsewhere
   (Cloudflare headers, or a forwarding header naming a foreign / unreadable address, or a foreign X-Forwarded-Host). A raw TCP forwarder (ssh -R, ngrok tcp) that adds no header at all cannot be told from a local program — as before.
 - **Third-party files are not in the repo**: `Sample.rsf`, `*.tcdb`, `.tmp-rsf/`, `data/backups/` are ignored (and untracked in 2.0.1; the git history still holds the old copies). A check that needs a Rashid file reads it from OUTSIDE the repo (`--rsf <path>`).
+- **No emoji as icons**: the launcher window draws every icon as an inline SVG (`src/icons.js`, Lucide shapes, ISC — `THIRD_PARTY_NOTICES.md`), so Windows renders them like macOS does; translated strings carry no symbols; the Windows tray uses the real 16/32 px entries of `build/icon.ico` and a plain-text menu. `test/launcher-icons.test.js` fails if an emoji comes back into the window sources, the translations or the tray menu. Log lines in the main process keep theirs (not the interface).
 
 ## Re-cutting the baseline (the only thing that changes)
 

@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// 🔗 Preload — Secure bridge between Main and Renderer
+// Preload — Secure bridge between Main and Renderer
 // ════════════════════════════════════════════════════════════════
 const { contextBridge, ipcRenderer } = require('electron');
 

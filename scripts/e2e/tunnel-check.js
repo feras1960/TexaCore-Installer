@@ -82,9 +82,9 @@ async function runCase(name, { token, extraEnv = {}, work }, body) {
       if (snap.everConnected) throw new Error('it claims to have connected');
       await c.js(`document.getElementById('tunnel-status').scrollIntoView({ block: 'center' })`);
       await sleep(5500);                                                            // the window polls the state (1.5 s while not connected)
-      const w = await c.js(`({ text: document.getElementById('tunnel-status').textContent, state: document.getElementById('tunnel-status').dataset.tunnelState, detail: document.getElementById('tunnel-detail').textContent })`);
+      const w = await c.js(`({ icon: (document.querySelector('#tunnel-status use') || { getAttribute: () => '' }).getAttribute('href'), text: document.getElementById('tunnel-status').textContent, state: document.getElementById('tunnel-status').dataset.tunnelState, detail: document.getElementById('tunnel-detail').textContent })`);
       await c.ev({ shot: 'T1-malformed-token.png', wait: 300 });
-      if (!/^error:token_invalid$/.test(w.state) || !/^❌/.test(w.text) || /🟢/.test(w.text)) throw new Error(`window shows ${JSON.stringify(w)}`);
+      if (!/^error:token_invalid$/.test(w.state) || w.icon !== '#i-circle-x' || !w.text.trim()) throw new Error(`window shows ${JSON.stringify(w)}`);
       const log = c.readHb();
       if (!log.includes(`cloudflared ${pin.version} (${bundled})`)) throw new Error('the app log does not show the bundled binary being started');
       evidence.malformed = { snap, window: w };
@@ -122,9 +122,9 @@ async function runCase(name, { token, extraEnv = {}, work }, body) {
       if (evidence.cfCmd.includes(FAKE_WELL_FORMED) || /--token/.test(evidence.cfCmd)) throw new Error(`the token is on the command line: ${evidence.cfCmd}`);
       if (!evidence.cfCmd.includes(bundled)) throw new Error(`the process is not the bundled binary: ${evidence.cfCmd}`);
       await sleep(5500);
-      const w = await c.js(`({ text: document.getElementById('tunnel-status').textContent, state: document.getElementById('tunnel-status').dataset.tunnelState, detail: document.getElementById('tunnel-detail').textContent })`);
+      const w = await c.js(`({ icon: (document.querySelector('#tunnel-status use') || { getAttribute: () => '' }).getAttribute('href'), text: document.getElementById('tunnel-status').textContent, state: document.getElementById('tunnel-status').dataset.tunnelState, detail: document.getElementById('tunnel-detail').textContent })`);
       await c.ev({ shot: 'T3-token-refused-en.png', wait: 300 });
-      if (w.state !== 'error:token_rejected' || /🟢/.test(w.text)) throw new Error(`window shows ${JSON.stringify(w)}`);
+      if (w.state !== 'error:token_rejected' || w.icon === '#i-circle-check') throw new Error(`window shows ${JSON.stringify(w)}`);
       if (w.detail.includes(FAKE_WELL_FORMED)) throw new Error('the detail line shows the token');
       // the same in Arabic
       await c.js(`(() => { const s = document.getElementById('lang-select'); s.value = 'ar'; onLangChange(); })()`); await sleep(700);
@@ -148,9 +148,9 @@ async function runCase(name, { token, extraEnv = {}, work }, body) {
       const snap = await c.until(async () => { const t = await c.tunnel(); return t && t.state === 'error' ? t : null; }, 60000, 'the error state');
       if (snap.reason !== 'binary_unrunnable') throw new Error(`reason ${snap.reason}`);
       await sleep(5500);
-      const w = await c.js(`({ text: document.getElementById('tunnel-status').textContent, state: document.getElementById('tunnel-status').dataset.tunnelState })`);
+      const w = await c.js(`({ icon: (document.querySelector('#tunnel-status use') || { getAttribute: () => '' }).getAttribute('href'), text: document.getElementById('tunnel-status').textContent, state: document.getElementById('tunnel-status').dataset.tunnelState })`);
       await c.ev({ shot: 'T4-binary-unrunnable.png', wait: 300 });
-      if (w.state !== 'error:binary_unrunnable' || /🟢/.test(w.text)) throw new Error(`window shows ${JSON.stringify(w)}`);
+      if (w.state !== 'error:binary_unrunnable' || w.icon === '#i-circle-check') throw new Error(`window shows ${JSON.stringify(w)}`);
       if (!/\[Tunnel\] ❌ cloudflared cannot run/.test(c.readHb())) throw new Error('not in the app log');
       return `state error:binary_unrunnable; window "${w.text}"; logged`;
     });

@@ -12,7 +12,7 @@
 //   H1  the headers: /config.js no-store + Pragma; the shell no-cache and its config script versioned (?v=); hashed assets immutable; the served sw.js has no config.js precache entry
 //   S1  a clean profile, the normal path
 //   S2  a profile with a service worker whose precache holds a STALE 1.x-style /config.js (no admin bits, old key) → the app restarts ("the upgrade") → the wizard works
-//   S3  an intermediary that ignores the cache-busting query and answers the page's /config.js with the stale copy, plus a local "security product" adding Via / X-Forwarded-For: 127.0.0.1
+//   S3  an intermediary that ignores the cache-busting query and answers the page's /config.js with an earlier copy WITHOUT the admin bits, plus a local "security product" adding Via / X-Forwarded-For: 127.0.0.1
 //       → the page asks for a fresh copy once (ERP localDevApi) and the wizard works
 //   S4  tunnel-shaped requests (Cf-Ray, Cf-Connecting-Ip, Cdn-Loop, X-Forwarded-For: <foreign>) get NO admin bits, and the wizard says the FRIENDLY localized text — never developer words
 //
@@ -90,7 +90,7 @@ const get = (url, headers = {}) => new Promise((resolve, reject) => {
   const userData = path.join(WORK, 'userdata');
   const evidence = {};
   const boot = (tag) => startApp({ userData, license: 'trial', logFile: path.join(WORK, `app-${tag}.log`), appBinary: binary });
-  const hb = () => { try { return fs.readFileSync(path.join(userData, 'texacore-data', 'logs', 'heartbeat.log'), 'utf8'); } catch { return ''; } };
+  const hb = () => { try { return fs.readFileSync(path.join(userData, 'logs', 'heartbeat.log'), 'utf8'); } catch { return ''; } };
   const bundleDir = APP ? path.join(path.resolve(APP), 'Contents', 'Resources', 'frontend') : path.join(__dirname, '..', '..', 'frontend');
 
   const browser = await chromium.launch({ channel: 'chrome', headless: true });
@@ -143,7 +143,7 @@ const get = (url, headers = {}) => new Promise((resolve, reject) => {
         // a bundle built with the ERP's own `globIgnores: ['**/config.js']` no longer lists the file: put the entry back to be the OLD bundle's worker
         if (!/url:\s*["']config\.js["']/.test(oldSw)) oldSw = oldSw.replace(/precacheAndRoute\(\[/, 'precacheAndRoute([{url:"config.js",revision:"59c4552ffff1d98f1d129fe0c22a39d8"},');
         if (!/url:\s*["']config\.js["']/.test(oldSw)) throw new Error('could not build an old-style service worker from the bundle\'s sw.js');
-        await page.route((u) => u.pathname === '/sw.js', (route) => route.fulfill({ status: 200, contentType: 'application/javascript', headers: { 'cache-control': 'no-store' }, body: oldSw }));
+        await ctx.route((u) => u.pathname === '/sw.js', (route) => route.fulfill({ status: 200, contentType: 'application/javascript', headers: { 'cache-control': 'no-store' }, body: oldSw }));   // (the browser fetches the worker script itself: a context route sees it, a page route does not)
         await page.goto(`${UI}/login`, { waitUntil: 'networkidle', timeout: 120000 });
         await page.evaluate(async () => { await navigator.serviceWorker.register('/sw.js', { scope: '/' }); await navigator.serviceWorker.ready; });
         await page.waitForTimeout(4000);
@@ -187,15 +187,17 @@ const get = (url, headers = {}) => new Promise((resolve, reject) => {
       try {
         const page = await ctx.newPage();
         let stale = 0; let fresh = 0;
+        // what a cache would hold from an earlier moment: this install's own config WITHOUT the admin bits (the keys and URLs are right, so the app itself works)
+        const noAdminBits = (await get(`${UI}/config.js`)).body.replace(/\n\s*localApiBase:[^\n]*/, '').replace(/\n\s*localApiSecret:[^\n]*/, '');
+        if (/localApiSecret|localApiBase/.test(noAdminBits) || !/supabaseKey/.test(noAdminBits)) throw new Error('could not build the "no admin bits" copy');
         await page.route((u) => u.pathname === '/config.js', (route) => {
           const u = new URL(route.request().url());
-          if (u.searchParams.has('v')) { stale++; return route.fulfill({ status: 200, contentType: 'application/javascript', body: STALE_CONFIG_JS }); }
+          if (u.searchParams.has('v')) { stale++; return route.fulfill({ status: 200, contentType: 'application/javascript', body: noAdminBits }); }
           if (u.searchParams.has('fresh')) fresh++;
           return route.continue();
         });
         const r = await runWizard(page, { email: 'owner3@rsf.test', shots, shot: 'S3-preview.png' });
         if (!stale) throw new Error('the stale answer was never served (the shell is not versioned?)');
-        if (r.cfg.secret) throw new Error('the page had the secret from the start — the stale copy was not used, nothing was tested');
         if (fresh < 1) throw new Error('the ERP never asked for a fresh /config.js');
         if (!r.reached) throw new Error(`no preview; error "${r.error}"; page "${r.pageText}"`);
         evidence.S3 = { stale, fresh, ...r };

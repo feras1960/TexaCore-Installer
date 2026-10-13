@@ -53,7 +53,7 @@
     <!-- Status Cards -->
     <div class="status-grid">
       <div class="status-card" id="card-database">
-        <div class="status-icon" id="icon-database">🗄️</div>
+        <div class="status-icon" id="icon-database"><svg class="icon icon-28" aria-hidden="true" focusable="false"><use href="#i-database"></use></svg></div>
         <div class="status-info">
           <span class="status-label" data-i18n="card.database">قاعدة البيانات</span>
           <span class="status-value" id="status-database" data-i18n="status.checking">جاري الفحص...</span>
@@ -61,7 +61,7 @@
         <div class="status-indicator" id="indicator-database"></div>
       </div>
       <div class="status-card" id="card-license">
-        <div class="status-icon">🔑</div>
+        <div class="status-icon"><svg class="icon icon-28" aria-hidden="true" focusable="false"><use href="#i-key"></use></svg></div>
         <div class="status-info">
           <span class="status-label" data-i18n="card.license">الترخيص</span>
           <span class="status-value" id="status-license" data-i18n="status.inactive">غير مفعّل</span>
@@ -69,7 +69,7 @@
         <div class="status-indicator" id="indicator-license"></div>
       </div>
       <div class="status-card" id="card-erp">
-        <div class="status-icon">🏭</div>
+        <div class="status-icon"><svg class="icon icon-28" aria-hidden="true" focusable="false"><use href="#i-factory"></use></svg></div>
         <div class="status-info">
           <span class="status-label" data-i18n="card.system">النظام</span>
           <span class="status-value" id="status-erp" data-i18n="status.stopped">متوقف</span>
@@ -81,7 +81,7 @@
     <!-- OTA Update Widget (hidden until an update is downloading/ready) -->
     <div class="update-widget" id="update-widget" role="status" aria-live="polite" style="display:none;">
       <div class="update-widget-row">
-        <span class="update-icon" id="update-icon">⬇️</span>
+        <span class="update-icon" id="update-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-download"></use></svg></span>
         <span class="update-text" id="update-text"></span>
         <span class="update-mb" id="update-mb"></span>
         <button class="btn-update-restart" id="update-restart-btn" style="display:none;"></button>
@@ -95,9 +95,9 @@
     <!-- One-time notice after an upgrade over a 1.x install: where the previous data is, how to bring the companies back (hidden until the main process says there is one) -->
     <div class="upgrade-notice" id="upgrade-notice" role="region" aria-labelledby="upgrade-notice-title" style="display:none;">
       <div class="upgrade-notice-head">
-        <span class="upgrade-notice-icon" aria-hidden="true">ℹ️</span>
+        <span class="upgrade-notice-icon" aria-hidden="true"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-info"></use></svg></span>
         <strong id="upgrade-notice-title" data-i18n="upgrade.title">تمّ التحديث</strong>
-        <button type="button" class="upgrade-close" id="upgrade-close" data-i18n-aria="upgrade.dismiss" aria-label="إغلاق">×</button>
+        <button type="button" class="upgrade-close" id="upgrade-close" data-i18n-aria="upgrade.dismiss" aria-label="إغلاق"><svg class="icon icon-16" aria-hidden="true" focusable="false"><use href="#i-x"></use></svg></button>
       </div>
       <p class="upgrade-line" id="upgrade-line-a"></p>
       <code class="upgrade-folder" id="upgrade-folder" dir="ltr"></code>
@@ -107,7 +107,7 @@
         <ul id="upgrade-file-list"></ul>
       </div>
       <div class="upgrade-actions">
-        <button type="button" class="btn btn-ghost" id="upgrade-open-folder" data-i18n="upgrade.openFolder">فتح المجلد</button>
+        <button type="button" class="btn btn-ghost" id="upgrade-open-folder"><svg class="icon icon-16" aria-hidden="true" focusable="false"><use href="#i-folder-open"></use></svg><span data-i18n="upgrade.openFolder">فتح المجلد</span></button>
         <button type="button" class="btn btn-ghost" id="upgrade-dismiss" data-i18n="upgrade.dismiss">فهمت، إغلاق</button>
       </div>
       <div class="upgrade-status" id="upgrade-status" role="status" aria-live="polite"></div>
@@ -118,33 +118,33 @@
 
     <!-- ═══ Step 2: License Activation ═══ -->
     <div class="panel" id="panel-license" style="display:none;">
-      <h2 data-i18n="license.activateTitle">🔐 تفعيل الترخيص</h2>
+      <h2 class="panel-title"><svg class="icon icon-28 icon-lead" aria-hidden="true" focusable="false"><use href="#i-lock"></use></svg><span data-i18n="license.activateTitle">تفعيل الترخيص</span></h2>
       <p data-i18n="license.enterKey">أدخل مفتاح الترخيص الذي حصلت عليه:</p>
       <div class="input-group">
         <input type="text" id="input-license" placeholder="LIC-2026-XXXXX-XXXXX" 
                class="input" dir="ltr" spellcheck="false" autocomplete="off">
       </div>
-      <button class="btn btn-primary" id="btn-activate" onclick="activateLicense()" data-i18n="license.activateBtn">
-        ⚡ تفعيل الترخيص
+      <button class="btn btn-primary" id="btn-activate" onclick="activateLicense()" >
+        <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-zap"></use></svg><span data-i18n="license.activateBtn">تفعيل الترخيص</span>
       </button>
 
       <div class="separator">
         <span data-i18n="common.or">أو</span>
       </div>
 
-      <button class="btn btn-trial" id="btn-trial" onclick="startTrial()" data-i18n="license.trialBtn">
-        🎁 ابدأ تجربة مجانية — 30 يوم
+      <button class="btn btn-trial" id="btn-trial" onclick="startTrial()" >
+        <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-gift"></use></svg><span data-i18n="license.trialBtn">ابدأ تجربة مجانية — 30 يوم</span>
       </button>
       <p class="trial-note" data-i18n="license.trialNote">نسخة تجريبية بكامل الميزات الأساسية بدون مفتاح</p>
 
-      <button class="btn btn-trial" id="btn-free" onclick="startFree()" style="background:#0d9488; border-color:#0d9488; margin-top:12px;" data-i18n="license.freeBtn">
-        🆓 ابدأ مجاناً — للأبد (بدون إنترنت)
+      <button class="btn btn-trial" id="btn-free" onclick="startFree()" style="background:#0d9488; border-color:#0d9488; margin-top:12px;" >
+        <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-sparkles"></use></svg><span data-i18n="license.freeBtn">ابدأ مجاناً — للأبد (بدون إنترنت)</span>
       </button>
       <p class="trial-note" data-i18n="license.freeNote">باقة مجانية دائمة بحدود ذكية — تعمل بدون إنترنت ولا تحتاج مفتاحاً</p>
 
       <div class="feedback" id="feedback-license"></div>
-      <button class="btn btn-ghost" id="btn-cancel-license" onclick="refreshState()" style="display:none; margin-top:12px; width:100%;" data-i18n="common.back">
-        العودة 🔙
+      <button class="btn btn-ghost" id="btn-cancel-license" onclick="refreshState()" style="display:none; margin-top:12px; width:100%;" >
+        <svg class="icon icon-16 icon-flip" aria-hidden="true" focusable="false"><use href="#i-arrow-left"></use></svg><span data-i18n="common.back">العودة</span>
       </button>
     </div>
 
@@ -156,8 +156,8 @@
           <span class="badge-expires" id="badge-expires">ينتهي: --</span>
         </div>
         <div style="display:flex; gap:8px;">
-          <button class="btn btn-ghost" style="padding:4px 8px; font-size:12px; height:auto; min-height:auto; color:var(--accent); border-color:var(--accent);" onclick="texacore.openBrowser('https://texacore.ai/pricing')" data-i18n="license.upgrade">شراء/ترقية الترخيص 🛒</button>
-          <button class="btn btn-ghost" style="padding:4px 8px; font-size:12px; height:auto; min-height:auto;" onclick="showLicensePanel()" data-i18n="license.changeKey">تغيير المفتاح 🔑</button>
+          <button class="btn btn-ghost" style="padding:4px 8px; font-size:12px; height:auto; min-height:auto; color:var(--accent); border-color:var(--accent);" onclick="texacore.openBrowser('https://texacore.ai/pricing')"><svg class="icon icon-16" aria-hidden="true" focusable="false"><use href="#i-shopping-cart"></use></svg><span data-i18n="license.upgrade">شراء/ترقية الترخيص</span></button>
+          <button class="btn btn-ghost" style="padding:4px 8px; font-size:12px; height:auto; min-height:auto;" onclick="showLicensePanel()"><svg class="icon icon-16" aria-hidden="true" focusable="false"><use href="#i-key"></use></svg><span data-i18n="license.changeKey">تغيير المفتاح</span></button>
         </div>
       </div>
 
@@ -167,20 +167,20 @@
           <span style="font-size:11px; color:#8a93a6;" data-i18n="support.label">كود الدعم / رقم النسخة</span>
           <code id="support-code" style="font-size:14px; font-weight:600; letter-spacing:1px; font-family:monospace; color:#e6e9ef; user-select:all; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">—</code>
         </div>
-        <button class="btn btn-ghost" id="btn-copy-key" style="padding:4px 10px; font-size:12px; height:auto; min-height:auto; white-space:nowrap;" onclick="copySupportCode()" data-i18n="common.copy">نسخ 📋</button>
+        <button class="btn btn-ghost" id="btn-copy-key" style="padding:4px 10px; font-size:12px; height:auto; min-height:auto; white-space:nowrap;" onclick="copySupportCode()"><svg class="icon icon-16" aria-hidden="true" focusable="false"><use href="#i-copy"></use></svg><span data-i18n="common.copy">نسخ</span></button>
       </div>
 
       <div class="control-actions">
         <button class="btn btn-start" id="btn-start" onclick="startERP()">
-          <span class="btn-icon">▶</span>
+          <span class="btn-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-play"></use></svg></span>
           <span data-i18n="btn.start">تشغيل النظام</span>
         </button>
         <button class="btn btn-stop" id="btn-stop" onclick="requestStopERP()" style="display:none;">
-          <span class="btn-icon">⏹</span>
+          <span class="btn-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-square"></use></svg></span>
           <span data-i18n="btn.stop">إيقاف النظام</span>
         </button>
         <button class="btn btn-open" id="btn-open" onclick="openERP()" style="display:none;">
-          <span class="btn-icon">🌐</span>
+          <span class="btn-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-globe"></use></svg></span>
           <span data-i18n="btn.open">فتح في المتصفح</span>
         </button>
       </div>
@@ -199,7 +199,7 @@
       <!-- Migration Progress (shown during first-run schema setup) -->
       <div id="migration-progress-box" style="display:none; margin-top:12px;">
         <div style="display:flex; justify-content:space-between; align-items:center; margin-bottom:6px;">
-          <span style="font-size:12px; color:var(--text-muted); font-weight:600;" data-i18n="migration.setup">⚙️ إعداد قاعدة البيانات...</span>
+          <span style="font-size:12px; color:var(--text-muted); font-weight:600;"><svg class="icon icon-16 icon-lead spin-slow" aria-hidden="true" focusable="false"><use href="#i-settings"></use></svg><span data-i18n="migration.setup">إعداد قاعدة البيانات...</span></span>
           <span style="font-size:11px; color:var(--accent); font-weight:700;" id="migration-counter">0/0</span>
         </div>
         <div class="progress-bar-container">
@@ -218,7 +218,7 @@
       <div class="cloud-box" id="employees-box" style="display:none; margin-bottom:16px;">
         <div class="cloud-header">
           <div>
-            <h3 data-i18n="emp.title">👥 الموظفون</h3>
+            <h3><svg class="icon icon-20 icon-lead" aria-hidden="true" focusable="false"><use href="#i-users"></use></svg><span data-i18n="emp.title">الموظفون</span></h3>
             <p data-i18n="emp.subtitle">أضف موظفاً على هذا الجهاز؛ يدخل من شبكتك المحلية بالرابط أدناه.</p>
           </div>
         </div>
@@ -244,7 +244,7 @@
       <div class="cloud-box" id="cloud-box">
         <div class="cloud-header">
           <div>
-            <h3 id="cloud-title" data-i18n="cloud.title">🌐 الوصول السحابي (Cloud Access)</h3>
+            <h3 id="cloud-title"><svg class="icon icon-20 icon-lead" aria-hidden="true" focusable="false"><use href="#i-cloud"></use></svg><span data-i18n="cloud.title">الوصول السحابي (Cloud Access)</span></h3>
             <p data-i18n="cloud.subtitle">اربط الخادم بالإنترنت للوصول من أي مكان</p>
           </div>
           <label class="toggle-switch">
@@ -257,8 +257,8 @@
         <div style="margin-top:14px;">
           <button type="button" id="btn-toggle-admin-password" onclick="toggleAdminPasswordPanel()"
             style="width:100%; display:flex; align-items:center; justify-content:space-between; gap:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px 14px; color:var(--text); font-size:13px; font-weight:600; cursor:pointer;">
-            <span data-i18n="admin.title">🔑 كلمة مرور بوابة الإدارة</span>
-            <span id="admin-password-chevron" style="color:var(--text-muted); font-size:12px; font-weight:500;" data-i18n="admin.toggleChange">تغيير ▾</span>
+            <span><svg class="icon icon-16 icon-lead" aria-hidden="true" focusable="false"><use href="#i-key"></use></svg><span data-i18n="admin.title">كلمة مرور بوابة الإدارة</span></span>
+            <span id="admin-password-chevron" class="chevron-label" style="color:var(--text-muted); font-size:12px; font-weight:500;"><span data-i18n="admin.toggleChange">تغيير</span><svg class="icon icon-16 icon-chevron" aria-hidden="true" focusable="false"><use href="#i-chevron-down"></use></svg></span>
           </button>
           <div id="admin-password-panel" style="display:none; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px; margin-top:8px;">
             <div style="font-size:11px; color:var(--text-muted); margin-bottom:10px;" data-i18n="admin.desc">تحمي صفحة «عرض كافة الشركات» عند الدخول من الرابط السحابي. الافتراضية = مفتاح الترخيص (لا حاجة للقديمة).</div>
@@ -312,8 +312,8 @@
               <div style="font-size:10px; color:var(--text-muted); margin-top:6px;" data-i18n="cloud.employeeHint">أرسل هذا الرابط لموظفي هذه الشركة ليدخلوا مباشرةً.</div>
             </div>
             <div style="display:flex; justify-content:center; gap:16px;">
-              <span style="font-size:12px; color:var(--text-muted);"><span data-i18n="cloud.connStatus">حالة الاتصال:</span> <strong id="tunnel-status" style="color:var(--danger);" data-i18n="cloud.disconnected">غير متصل 🔴</strong></span>
-              <span style="font-size:12px; color:var(--text-muted);"><strong style="color:var(--accent);">✓</strong> <span data-i18n="cloud.reserved">تم الحجز للترخيص</span></span>
+              <span style="font-size:12px; color:var(--text-muted);"><span data-i18n="cloud.connStatus">حالة الاتصال:</span> <strong id="tunnel-status" style="color:var(--danger);" data-i18n="cloud.disconnected">غير متصل</strong></span>
+              <span style="font-size:12px; color:var(--text-muted);"><svg class="icon icon-16 icon-accent" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg> <span data-i18n="cloud.reserved">تم الحجز للترخيص</span></span>
             </div>
             <div id="tunnel-detail" dir="ltr" style="display:none; margin-top:6px; font-family:monospace; font-size:11px; color:var(--text-muted); word-break:break-all; text-align:center;"></div>
           </div>
@@ -333,6 +333,7 @@
     </div>
   </div>
 
+  <script src="icons.js"></script>
   <script src="i18n.js"></script>
   <script src="renderer.js"></script>
 </body>

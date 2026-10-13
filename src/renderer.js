@@ -1,5 +1,5 @@
 // ════════════════════════════════════════════════════════════════
-// 🖥️ TexaCore Installer — Renderer (UI Logic)
+// TexaCore Installer — Renderer (UI Logic)
 // v2: Native embedded services — no Docker dependency
 // ════════════════════════════════════════════════════════════════
 
@@ -179,7 +179,7 @@ function updateUI(state) {
     // setup with a warning + the old name pre-filled so the user re-registers it.
     if (state.config?.subdomain && _deletedSubdomain === state.config.subdomain) {
       const warn = document.getElementById('subdomain-deleted-warning');
-      if (warn) { warn.textContent = t('subdomain.deleted'); warn.style.display = 'block'; }
+      if (warn) { setWithIcon(warn, 'triangle-alert', t('subdomain.deleted')); warn.style.display = 'block'; }
       const inp = document.getElementById('input-subdomain');
       if (inp && !inp.value) { inp.value = state.config.subdomain; checkSubdomain(state.config.subdomain); }
     }
@@ -202,7 +202,7 @@ async function verifyCloudSubdomain(subdomain) {
       document.getElementById('cloud-active').style.display = 'none';
       document.getElementById('cloud-setup').style.display = 'block';
       const warn = document.getElementById('subdomain-deleted-warning');
-      if (warn) { warn.textContent = t('subdomain.deleted'); warn.style.display = 'block'; }
+      if (warn) { setWithIcon(warn, 'triangle-alert', t('subdomain.deleted')); warn.style.display = 'block'; }
       const inp = document.getElementById('input-subdomain');
       if (inp) { inp.value = subdomain; checkSubdomain(subdomain); }
     } else if (r && r.valid === true) {
@@ -273,23 +273,25 @@ function renderTunnelStatus(state) {
   const det = document.getElementById('tunnel-detail');
   if (!el) return;
   const tn = state && state.tunnel;
-  let text; let color; let detail = '';
+  let text; let color; let ico; let detail = '';
   if (!state || !state.containerRunning || !tn || !tn.enabled) {
-    text = t('cloud.disconnected'); color = 'var(--danger)';
+    text = t('cloud.disconnected'); color = 'var(--danger)'; ico = 'circle-x';
   } else if (tn.state === 'connected') {
-    text = t('cloud.connected'); color = 'var(--accent)';
+    text = t('cloud.connected'); color = 'var(--accent)'; ico = 'circle-check';
   } else if (tn.state === 'starting') {
-    text = t('cloud.connecting'); color = 'var(--warning)';
+    text = t('cloud.connecting'); color = 'var(--warning)'; ico = 'loader';
   } else if (tn.state === 'error') {
-    text = '❌ ' + (t('cloud.err.' + tn.reason) !== 'cloud.err.' + tn.reason ? t('cloud.err.' + tn.reason) : t('cloud.disconnected')); color = 'var(--danger)';
+    text = (t('cloud.err.' + tn.reason) !== 'cloud.err.' + tn.reason ? t('cloud.err.' + tn.reason) : t('cloud.disconnected')); color = 'var(--danger)'; ico = 'circle-x';
     detail = tn.detail || '';
   } else if (tn.reason === 'subdomain_deleted') {
-    text = t('cloud.off.subdomain_deleted'); color = 'var(--danger)';
+    text = t('cloud.off.subdomain_deleted'); color = 'var(--danger)'; ico = 'triangle-alert';
   } else {
-    text = t('cloud.disconnected'); color = 'var(--danger)';
+    text = t('cloud.disconnected'); color = 'var(--danger)'; ico = 'circle-x';
   }
-  el.textContent = text; el.style.color = color;
+  setWithIcon(el, ico, text, 16, ico === 'loader' ? 'icon-lead spin' : 'icon-lead');
+  el.style.color = color;
   el.dataset.tunnelState = tn ? `${tn.state}${tn.reason ? ':' + tn.reason : ''}` : 'none';
+  el.dataset.tunnelIcon = ico;
   if (det) { det.textContent = detail; det.style.display = detail ? 'block' : 'none'; }
 }
 
@@ -334,7 +336,7 @@ function copySupportCode() {
   if (!code || code === '—') return;
   const flash = () => {
     const btn = document.getElementById('btn-copy-key');
-    if (btn) { const prev = btn.textContent; btn.textContent = t('common.copied'); setTimeout(() => { btn.textContent = prev; }, 1500); }
+    if (btn) { const prev = btn.innerHTML; setWithIcon(btn, 'check', t('common.copied'), 16, ''); setTimeout(() => { btn.innerHTML = prev; }, 1500); }
   };
   if (navigator.clipboard && navigator.clipboard.writeText) {
     navigator.clipboard.writeText(code).then(flash).catch(() => fallbackCopy(code, flash));
@@ -383,7 +385,7 @@ async function activateLicense() {
   }
 
   btn.disabled = true;
-  btn.textContent = t('license.activating');
+  setWithIcon(btn, 'loader', t('license.activating'), 20, 'spin');
   feedback.className = 'feedback loading';
   feedback.textContent = t('license.connectingLicense');
 
@@ -405,7 +407,7 @@ async function activateLicense() {
   }
 
   btn.disabled = false;
-  btn.textContent = t('license.activateBtn');
+  setWithIcon(btn, 'zap', t('license.activateBtn'), 20, '');
 }
 
 // ─── إعادة تشغيل المحرّكات بعد تغيير الرخصة ──────────────────────
@@ -414,7 +416,7 @@ async function activateLicense() {
 async function restartSystemForLicense() {
   const fb = document.getElementById('feedback-license') || document.getElementById('feedback-control');
   try {
-    if (fb) { fb.className = 'feedback loading'; fb.textContent = '🔄 جارٍ إيقاف وإعادة تشغيل المحرّكات لتطبيق الباقة…'; }
+    if (fb) { fb.className = 'feedback loading'; fb.textContent = 'جارٍ إيقاف وإعادة تشغيل المحرّكات لتطبيق الباقة…'; }
     try { await texacore.stopERP(); } catch (e) { console.warn('[restart] stop:', e); }
     await new Promise(r => setTimeout(r, 1800));       // مهلة تحرّر PG قبل الإقلاع
     await refreshState();                               // config محدّث بالرخصة الجديدة
@@ -428,12 +430,12 @@ async function restartSystemForLicense() {
     });
     await refreshState();
     if (fb) {
-      if (result && result.success) { fb.className = 'feedback success'; fb.textContent = '✅ أُعيد التشغيل وطُبّقت الباقة'; }
-      else { fb.className = 'feedback error'; fb.textContent = '❌ فشلت إعادة التشغيل: ' + ((result && result.error) || ''); }
+      if (result && result.success) { fb.className = 'feedback success'; fb.textContent = 'أُعيد التشغيل وطُبّقت الباقة'; }
+      else { fb.className = 'feedback error'; fb.textContent = 'فشلت إعادة التشغيل: ' + ((result && result.error) || ''); }
     }
   } catch (e) {
     console.error('[restart] failed:', e);
-    if (fb) { fb.className = 'feedback error'; fb.textContent = '❌ خطأ إعادة التشغيل: ' + e.message; }
+    if (fb) { fb.className = 'feedback error'; fb.textContent = 'خطأ إعادة التشغيل: ' + e.message; }
   }
 }
 
@@ -449,7 +451,7 @@ async function startTrial() {
   const feedback = document.getElementById('feedback-license');
 
   btn.disabled = true;
-  btn.textContent = t('trial.creating');
+  setWithIcon(btn, 'loader', t('trial.creating'), 20, 'spin');
   feedback.className = 'feedback loading';
   feedback.textContent = t('trial.connecting');
 
@@ -466,7 +468,7 @@ async function startTrial() {
       await restartSystemForLicense();
     } else {
       feedback.className = 'feedback error';
-      feedback.textContent = `❌ ${result.error}`;
+      feedback.textContent = `${result.error}`;
     }
   } catch (err) {
     feedback.className = 'feedback error';
@@ -474,7 +476,7 @@ async function startTrial() {
   }
 
   btn.disabled = false;
-  btn.textContent = t('license.trialBtn');
+  setWithIcon(btn, 'gift', t('license.trialBtn'), 20, '');
 }
 
 // ─── Start Free (offline) ────────────────────────────────────
@@ -483,7 +485,7 @@ async function startFree() {
   const feedback = document.getElementById('feedback-license');
 
   btn.disabled = true;
-  btn.textContent = t('free.creating');
+  setWithIcon(btn, 'loader', t('free.creating'), 20, 'spin');
   feedback.className = 'feedback loading';
   feedback.textContent = t('free.activating');
 
@@ -497,7 +499,7 @@ async function startFree() {
       await restartSystemForLicense();
     } else {
       feedback.className = 'feedback error';
-      feedback.textContent = `❌ ${result.error}`;
+      feedback.textContent = `${result.error}`;
     }
   } catch (err) {
     feedback.className = 'feedback error';
@@ -505,7 +507,7 @@ async function startFree() {
   }
 
   btn.disabled = false;
-  btn.textContent = t('license.freeBtn');
+  setWithIcon(btn, 'sparkles', t('license.freeBtn'), 20, '');
 }
 
 // ─── Start ERP ───────────────────────────────────────────────
@@ -523,7 +525,7 @@ async function startERP() {
   }
 
   btn.disabled = true;
-  btn.innerHTML = `<span class="btn-icon">⏳</span><span>${t('status.starting')}</span>`;
+  btn.innerHTML = `<span class="btn-icon">${icon('loader', 20, 'spin')}</span><span>${t('status.starting')}</span>`;
   feedback.className = 'feedback loading';
   feedback.textContent = t('system.startingServices');
 
@@ -556,7 +558,7 @@ async function startERP() {
       await refreshState();
     } else {
       feedback.className = 'feedback error';
-      feedback.textContent = `❌ ${result.error}`;
+      feedback.textContent = `${result.error}`;
     }
   } catch (err) {
     feedback.className = 'feedback error';
@@ -564,7 +566,7 @@ async function startERP() {
   }
 
   btn.disabled = false;
-  btn.innerHTML = `<span class="btn-icon">▶</span><span>${t('btn.start')}</span>`;
+  btn.innerHTML = `<span class="btn-icon">${icon('play', 20)}</span><span>${t('btn.start')}</span>`;
 }
 
 // ─── Stop ERP ────────────────────────────────────────────────
@@ -607,7 +609,7 @@ async function stopERP() {
       await refreshState();
     } else {
       feedback.className = 'feedback error';
-      feedback.textContent = `❌ ${result.error}`;
+      feedback.textContent = `${result.error}`;
     }
   } catch (err) {
     feedback.className = 'feedback error';
@@ -808,7 +810,7 @@ async function toggleCloudView() {
   const statusEl = document.getElementById('tunnel-status');
   try {
     if (statusEl) {
-      statusEl.textContent = isChecked ? t('cloud.connecting') : t('cloud.disconnecting');
+      setWithIcon(statusEl, 'loader', isChecked ? t('cloud.connecting') : t('cloud.disconnecting'), 16, 'icon-lead spin');
       statusEl.style.color = 'var(--warning)';
     }
     if (window.texacore && window.texacore.setCloudAccess) {
@@ -820,7 +822,7 @@ async function toggleCloudView() {
     for (const ms of [1500, 4000, 9000]) setTimeout(() => { refreshStatus(); }, ms);
   } catch (e) {
     console.error('[Cloud] setCloudAccess failed:', e);
-    if (statusEl) { statusEl.textContent = t('cloud.toggleFailed'); statusEl.style.color = 'var(--danger)'; }
+    if (statusEl) { setWithIcon(statusEl, 'triangle-alert', t('cloud.toggleFailed')); statusEl.style.color = 'var(--danger)'; }
   }
 }
 
@@ -832,7 +834,7 @@ async function saveAdminPassword() {
   const val = (input?.value || '').trim();
   const n = adminMinLength;
   if (val.length < n) {
-    if (statusEl) { statusEl.textContent = t('admin.tooShort').replace('{n}', n); statusEl.style.color = 'var(--danger)'; }
+    if (statusEl) { setWithIcon(statusEl, 'triangle-alert', t('admin.tooShort').replace('{n}', n)); statusEl.style.color = 'var(--danger)'; }
     return;
   }
   try {
@@ -840,21 +842,20 @@ async function saveAdminPassword() {
     const res = await window.texacore.setAdminPassword(val);
     if (res && res.success) {
       if (input) input.value = '';
-      if (statusEl) { statusEl.textContent = t('admin.savedOk'); statusEl.style.color = 'var(--accent)'; }
+      if (statusEl) { setWithIcon(statusEl, 'circle-check', t('admin.savedOk')); statusEl.style.color = 'var(--accent)'; }
       // Collapse the box shortly after a successful change.
       setTimeout(() => {
         const panel = document.getElementById('admin-password-panel');
-        const chevron = document.getElementById('admin-password-chevron');
         if (panel) panel.style.display = 'none';
-        if (chevron) chevron.textContent = t('admin.toggleChange');
+        setChevron(false);
       }, 1600);
     } else {
       const key = res && res.code ? 'admin.err.' + res.code : null;
       const msg = key && t(key) !== key ? t(key).replace('{n}', (res && res.minLength) || adminMinLength) : ((res && res.error) || t('admin.saveFailed'));
-      if (statusEl) { statusEl.textContent = '⚠️ ' + msg; statusEl.style.color = 'var(--danger)'; }
+      if (statusEl) { setWithIcon(statusEl, 'triangle-alert', msg); statusEl.style.color = 'var(--danger)'; }
     }
   } catch (e) {
-    if (statusEl) { statusEl.textContent = '⚠️ ' + e.message; statusEl.style.color = 'var(--danger)'; }
+    if (statusEl) { setWithIcon(statusEl, 'triangle-alert', e.message); statusEl.style.color = 'var(--danger)'; }
   } finally {
     if (btn) { btn.disabled = false; btn.textContent = t('common.save'); }
   }
@@ -870,7 +871,7 @@ function applyAdminPolicyTexts() {
   const statusEl = document.getElementById('admin-password-status');
   if (statusEl && adminStatus && adminStatus.success) {
     const key = adminStatus.customized ? 'admin.statusCustom' : (adminStatus.hasDefault ? 'admin.statusDefault' : 'admin.statusNone');
-    statusEl.textContent = t(key).replace('{n}', adminMinLength);
+    setWithIcon(statusEl, adminStatus.customized || !adminStatus.hasDefault ? 'lock' : 'info', t(key).replace('{n}', adminMinLength));
     statusEl.style.color = 'var(--text-muted)';
   }
 }
@@ -888,15 +889,23 @@ async function refreshAdminPasswordStatus() {
   } catch { /* ignore */ }
 }
 
+// The label of the collapsible header: text + a chevron that turns over when the box is open (the label is the inner span; the icon is kept).
+function setChevron(open) {
+  const chevron = document.getElementById('admin-password-chevron');
+  if (!chevron) return;
+  const label = chevron.querySelector('[data-i18n]');
+  if (label) { label.setAttribute('data-i18n', open ? 'admin.toggleClose' : 'admin.toggleChange'); label.textContent = t(open ? 'admin.toggleClose' : 'admin.toggleChange'); }
+  chevron.classList.toggle('chevron-open', !!open);
+}
+
 // Collapsible: the button reveals the change-password box; it hides again
 // after a successful save (or when toggled off).
 function toggleAdminPasswordPanel() {
   const panel = document.getElementById('admin-password-panel');
-  const chevron = document.getElementById('admin-password-chevron');
   if (!panel) return;
   const show = !panel.style.display || panel.style.display === 'none';
   panel.style.display = show ? 'block' : 'none';
-  if (chevron) chevron.textContent = show ? t('admin.toggleClose') : t('admin.toggleChange');
+  setChevron(show);
   if (show) {
     refreshAdminPasswordStatus();
     setTimeout(() => document.getElementById('input-admin-password')?.focus(), 50);
@@ -918,13 +927,13 @@ function checkSubdomain(value) {
   // Basic format validation
   const cleaned = value.toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (cleaned !== value || !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(value)) {
-    statusEl.textContent = t('subdomain.onlyLatin');
+    setWithIcon(statusEl, 'circle-x', t('subdomain.onlyLatin'));
     statusEl.style.color = 'var(--danger)';
     btn.disabled = true;
     return;
   }
 
-  statusEl.textContent = t('subdomain.checking');
+  setWithIcon(statusEl, 'loader', t('subdomain.checking'), 16, 'icon-lead spin');
   statusEl.style.color = 'var(--warning)';
   btn.disabled = true;
 
@@ -939,20 +948,20 @@ function checkSubdomain(value) {
       const data = await res.json();
 
       if (data.available) {
-        statusEl.textContent = t('subdomain.available');
+        setWithIcon(statusEl, 'circle-check', t('subdomain.available'));
         statusEl.style.color = 'var(--accent)';
         btn.disabled = false;
       } else {
         const reason = data.reason === 'reserved' ? t('subdomain.reservedName') :
                        data.reason === 'taken' ? t('subdomain.taken') :
                        data.reason === 'invalid_format' ? t('subdomain.badFormat') : t('subdomain.unavailable');
-        statusEl.textContent = `❌ ${reason}`;
+        setWithIcon(statusEl, 'circle-x', reason);
         statusEl.style.color = 'var(--danger)';
         btn.disabled = true;
       }
     } catch (err) {
       // Offline fallback — allow registration (server will validate)
-      statusEl.textContent = t('subdomain.checkFailed');
+      setWithIcon(statusEl, 'triangle-alert', t('subdomain.checkFailed'));
       statusEl.style.color = 'var(--warning)';
       btn.disabled = false;
     }
@@ -967,7 +976,7 @@ async function registerSubdomain() {
   if (!input.value) return;
 
   btn.disabled = true;
-  btn.textContent = t('subdomain.reserving');
+  setWithIcon(btn, 'loader', t('subdomain.reserving'), 16, 'spin');
 
   try {
     const result = await window.texacore.registerSubdomain(input.value);
@@ -991,13 +1000,13 @@ async function registerSubdomain() {
 
       alert(t('subdomain.reserved'));
     } else {
-      statusEl.textContent = `❌ ${result.error}`;
+      setWithIcon(statusEl, 'circle-x', result.error);
       statusEl.style.color = 'var(--danger)';
       btn.textContent = t('subdomain.registerNow');
       btn.disabled = false;
     }
   } catch (err) {
-    statusEl.textContent = `❌ ${err.message}`;
+    setWithIcon(statusEl, 'circle-x', err.message);
     statusEl.style.color = 'var(--danger)';
     btn.textContent = t('subdomain.registerNow');
     btn.disabled = false;
@@ -1039,13 +1048,13 @@ document.addEventListener('keydown', (e) => {
     widget.style.display = 'block';
     widget.classList.toggle('ready', updState === 'ready');
     if (updState === 'downloading') {
-      iconEl.textContent = '⬇️';
+      setIconOnly(iconEl, 'download', 20);
       textEl.textContent = t('update.downloading').replace('{v}', updVersion);
       barWrap.style.display = 'block';
       restartBtn.style.display = 'none';
       laterBtn.style.display = 'none';
     } else { // ready
-      iconEl.textContent = '✅';
+      setIconOnly(iconEl, 'circle-check', 20);
       textEl.textContent = t('update.ready').replace('{v}', updVersion);
       mbEl.textContent = '';
       barWrap.style.display = 'none';
@@ -1128,7 +1137,7 @@ document.addEventListener('keydown', (e) => {
       const pa = document.createElement('div'); pa.className = 'upgrade-file-path'; pa.textContent = f.path; pa.title = f.path;
       info.append(nm, pa); li.append(info);
       if (f.exists) {
-        const b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-ghost'; b.textContent = t('upgrade.open'); b.disabled = busy;
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-ghost'; setWithIcon(b, 'folder-open', t('upgrade.open'), 16, ''); b.disabled = busy;
         b.dataset.path = f.path; b.addEventListener('click', () => openFile(f.path));
         li.append(b);
       } else {
@@ -1136,7 +1145,7 @@ document.addEventListener('keydown', (e) => {
       }
       ul.append(li);
     }
-    if (busy) setStatus(t('upgrade.opening'), '');
+    if (busy) setStatus(t('upgrade.opening'), 'busy');
     else if (result) setStatus(result.text, result.ok ? 'ok' : 'err');
   }
 

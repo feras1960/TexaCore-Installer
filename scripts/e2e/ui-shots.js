@@ -14,6 +14,8 @@
 //   U7  the connection status is HONEST: «connected» only for a connector that registered; starting / off / each error reason (binary missing, token invalid / refused …) is worded as such, in ar and en
 //   U8  the admin-portal password UI states the REAL policy (8+ characters, from the main process): placeholder and messages say 8, 7 characters are refused in the window, «admin» and licence-key-like values
 //       are refused with their own message, a good password is accepted and the SERVER then verifies it (a free licence has no default password)
+//   U9  the licence panel, every kind of status line and the subdomain checker draw SVG icons; the whole page has no emoji and every icon points at a defined symbol
+//   U10 starting again: the start button's busy icon, then the running state
 //   U5  the one-time upgrade notice (the run starts over a 1.x data folder): shown with the old folder and the old company file, in Arabic RTL and English LTR; «فتح المجلد» asks the OS to open exactly that folder;
 //       the «فتح» button beside a 1.x company file is refused with the translated message; «إغلاق» dismisses it for good (still gone after a reload and after the files are re-read)
 //
@@ -182,30 +184,31 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         await js(`updateUI(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: true, subdomain: 'acme-demo', port: 80 }), localIp: '192.168.1.20' }))`);
         await sleep(300);
         const cases = [
-          ['connected', { enabled: true, state: 'connected', reason: null, detail: '' }, /🟢/, 'connected'],
-          ['starting', { enabled: true, state: 'starting', reason: null, detail: '' }, /⏳/, 'starting'],
-          ['off', { enabled: true, state: 'off', reason: 'stopped', detail: '' }, /🔴/, 'off:stopped'],
-          ['error-binary-missing', { enabled: true, state: 'error', reason: 'binary_missing', detail: 'looked in /Applications/TexaCore ERP.app/Contents/Resources/bin/cloudflared/cloudflared' }, /❌/, 'error:binary_missing'],
-          ['error-token-invalid', { enabled: true, state: 'error', reason: 'token_invalid', detail: 'Provided Tunnel token is not valid.' }, /❌/, 'error:token_invalid'],
-          ['error-token-rejected', { enabled: true, state: 'error', reason: 'token_rejected', detail: 'ERR Register tunnel error from server side error="Failed to get tunnel"' }, /❌/, 'error:token_rejected'],
-          ['error-exited', { enabled: true, state: 'error', reason: 'exited', detail: 'exit code 1' }, /❌/, 'error:exited'],
+          ['connected', { enabled: true, state: 'connected', reason: null, detail: '' }, 'circle-check', 'connected'],
+          ['starting', { enabled: true, state: 'starting', reason: null, detail: '' }, 'loader', 'starting'],
+          ['off', { enabled: true, state: 'off', reason: 'stopped', detail: '' }, 'circle-x', 'off:stopped'],
+          ['error-binary-missing', { enabled: true, state: 'error', reason: 'binary_missing', detail: 'looked in /Applications/TexaCore ERP.app/Contents/Resources/bin/cloudflared/cloudflared' }, 'circle-x', 'error:binary_missing'],
+          ['error-token-invalid', { enabled: true, state: 'error', reason: 'token_invalid', detail: 'Provided Tunnel token is not valid.' }, 'circle-x', 'error:token_invalid'],
+          ['error-token-rejected', { enabled: true, state: 'error', reason: 'token_rejected', detail: 'ERR Register tunnel error from server side error="Failed to get tunnel"' }, 'circle-x', 'error:token_rejected'],
+          ['error-exited', { enabled: true, state: 'error', reason: 'exited', detail: 'exit code 1' }, 'circle-x', 'error:exited'],
         ];
         const seen = [];
         for (const [name, tn, mark, dataState] of cases) {
           await js(`renderTunnelStatus({ containerRunning: true, tunnel: ${JSON.stringify(tn)} })`);
-          const w = await js(`({ text: document.getElementById('tunnel-status').textContent, state: document.getElementById('tunnel-status').dataset.tunnelState, color: document.getElementById('tunnel-status').style.color,
+          const w = await js(`({ icon: (document.querySelector('#tunnel-status use') || { getAttribute: () => '' }).getAttribute('href'), text: document.getElementById('tunnel-status').textContent, state: document.getElementById('tunnel-status').dataset.tunnelState, color: document.getElementById('tunnel-status').style.color,
             detail: document.getElementById('tunnel-detail').textContent, detailShown: getComputedStyle(document.getElementById('tunnel-detail')).display !== 'none' })`);
           if (w.state !== dataState) throw new Error(`${name}: state ${w.state}`);
-          if (!mark.test(w.text)) throw new Error(`${name}: text "${w.text}"`);
-          if (name !== 'connected' && /🟢/.test(w.text)) throw new Error(`${name}: shows the connected mark`);
+          if (w.icon !== `#i-${mark}`) throw new Error(`${name}: icon ${w.icon} (wanted ${mark}); text "${w.text}"`);
+          if (!w.text.trim() || /\p{Extended_Pictographic}/u.test(w.text)) throw new Error(`${name}: text "${w.text}" is empty or carries an emoji`);
+          if (name !== 'connected' && w.icon === '#i-circle-check') throw new Error(`${name}: shows the connected mark`);
           if (name.startsWith('error') && (!w.detailShown || !w.detail)) throw new Error(`${name}: no detail line`);
           if (/^(error-binary-missing|error-token-rejected|connected)$/.test(name)) { await js(`document.getElementById('tunnel-status').scrollIntoView({ block: 'center' })`); await ev({ shot: `ui-${lang}-tunnel-${name}.png`, wait: 100 }); }
           seen.push(`${name}: "${w.text}"`);
         }
         // services stopped, or cloud access off: never «connected»
         await js(`renderTunnelStatus({ containerRunning: false, tunnel: { enabled: true, state: 'connected' } })`);
-        const stopped = await js(`document.getElementById('tunnel-status').textContent`);
-        if (/🟢/.test(stopped)) throw new Error(`services stopped but the window says "${stopped}"`);
+        const stopped = await js(`({ text: document.getElementById('tunnel-status').textContent, icon: (document.querySelector('#tunnel-status use') || { getAttribute: () => '' }).getAttribute('href') })`);
+        if (stopped.icon === '#i-circle-check') throw new Error(`services stopped but the window says "${stopped.text}" with the connected mark`);
         await js(`delete window.refreshStatus`);
         await js(`updateUI(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: false }) }))`);   // leave the switch as it was
         return seen.join(' | ');
@@ -219,25 +222,62 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         await js(`document.getElementById('admin-password-panel').scrollIntoView({ block: 'center' })`);
         const attempt = async (value) => {
           await js(`document.getElementById('input-admin-password').value = ${JSON.stringify(value)}; saveAdminPassword()`); await sleep(1200);
-          return js(`({ text: document.getElementById('admin-password-status').textContent, color: document.getElementById('admin-password-status').style.color })`);
+          return js(`({ text: document.getElementById('admin-password-status').textContent, color: document.getElementById('admin-password-status').style.color, icon: (document.querySelector('#admin-password-status use') || { getAttribute: () => '' }).getAttribute('href') })`);
         };
         const short = await attempt('1234567');
-        if (!/8/.test(short.text) || /✅/.test(short.text)) throw new Error(`7 characters: "${short.text}"`);
+        if (!/8/.test(short.text) || short.icon === '#i-circle-check') throw new Error(`7 characters: "${short.text}"`);
         await ev({ shot: `ui-${lang}-admin-password-too-short.png`, wait: 100 });
         const adminPw = await attempt('admin');
-        if (/✅/.test(adminPw.text)) throw new Error(`"admin" accepted: ${adminPw.text}`);
+        if (adminPw.icon === '#i-circle-check') throw new Error(`"admin" accepted: ${adminPw.text}`);
         const keyLike = await attempt('FREE-2026-12345');
-        if (/✅/.test(keyLike.text)) throw new Error(`a licence-key shape accepted: ${keyLike.text}`);
-        if (!/⚠️/.test(keyLike.text)) throw new Error(`the server's refusal is not shown: "${keyLike.text}"`);
+        if (keyLike.icon === '#i-circle-check') throw new Error(`a licence-key shape accepted: ${keyLike.text}`);
+        if (keyLike.icon !== '#i-triangle-alert') throw new Error(`the server's refusal is not shown: "${keyLike.text}"`);
         await ev({ shot: `ui-${lang}-admin-password-key-like.png`, wait: 100 });
         const good = lang === 'ar' ? 'Correct#Horse9' : 'Another#Pass77';
         const ok = await attempt(good);
-        if (!/✅/.test(ok.text)) throw new Error(`a good password was not accepted: "${ok.text}"`);
+        if (ok.icon !== '#i-circle-check') throw new Error(`a good password was not accepted: "${ok.text}"`);
         await ev({ shot: `ui-${lang}-admin-password-saved.png`, wait: 100 });
         const verify = async (p) => (await request('POST', `http://127.0.0.1:${PORTS.api}/rest/v1/rpc/verify_admin_password`, { headers: { apikey: secrets.anonKey, Authorization: `Bearer ${secrets.anonKey}` }, body: { p_input: p } })).json;
         if (await verify(good) !== true) throw new Error('the server does not accept the password the window reported as saved');
         if (await verify('1234567') !== false || await verify('FREE-LOCAL') !== false) throw new Error('the server accepts a refused value');
         return `placeholder "${open.ph}"; status "${open.status}"; 7 chars → "${short.text}"; "admin" → "${adminPw.text}"; key shape → "${keyLike.text}"; good → "${ok.text}" and the server verifies it (a free licence has no default)`;
+      });
+
+      // Every icon is an inline SVG now (no emoji): the licence panel, every kind of status line, the subdomain checker, the buttons' busy labels — shot and measured, per language.
+      await R.check(`U9 [${lang}] the licence panel and every status line draw SVG icons (no emoji anywhere on the page); icons have a size, point at a defined symbol, and the status ::before masks are painted`, async () => {
+        await js(`window.refreshStatus = async () => {}; window.scrollTo(0, 0); showLicensePanel()`); await sleep(400);
+        await ev({ shot: `ui-${lang}-license-panel.png`, wait: 200 });
+        // each kind of status line, as the real code sets them (class + plain text): four lines on one frame
+        const kinds = await js(`(() => {
+          const fb = document.getElementById('feedback-license'); const out = [];
+          const set = (cls, text) => { fb.className = 'feedback ' + cls; fb.textContent = text; };
+          const probe = (el) => { const b = getComputedStyle(el, '::before'); return { content: b.content, mask: (b.webkitMaskImage || b.maskImage || ''), w: b.width }; };
+          for (const [cls, text] of [['loading', t('license.connectingLicense')], ['success', t('license.activatedOk')], ['error', t('license.errNoKey')], ['info', t('cloud.connecting')]]) { set(cls, text); out.push({ cls, ...probe(fb) }); }
+          // a composite frame: the four lines stacked (clones keep the classes)
+          set('loading', t('license.connectingLicense'));
+          for (const [cls, text] of [['success', t('license.activatedOk')], ['error', t('license.errNoKey')], ['info', t('cloud.connecting')]]) { const c = fb.cloneNode(false); c.className = 'feedback ' + cls; c.textContent = text; c.dataset.clone = '1'; fb.parentNode.insertBefore(c, fb.nextSibling); }
+          return out; })()`);
+        for (const k of kinds) if (!/svg\+xml/.test(k.mask) || k.w !== '16px') throw new Error(`status "${k.cls}" has no painted icon: ${JSON.stringify(k)}`);
+        // busy buttons exactly as the real code words them
+        await js(`(() => { const b = document.getElementById('btn-activate'); b.disabled = true; setWithIcon(b, 'loader', t('license.activating'), 20, 'spin'); })()`);
+        await js(`document.getElementById('feedback-license').scrollIntoView({ block: 'center' })`);
+        await ev({ shot: `ui-${lang}-feedback-states.png`, wait: 250 });
+        await js(`(() => { document.querySelectorAll('[data-clone]').forEach((n) => n.remove()); const fb = document.getElementById('feedback-license'); fb.className = 'feedback'; fb.textContent = ''; const b = document.getElementById('btn-activate'); b.disabled = false; setWithIcon(b, 'zap', t('license.activateBtn'), 20, ''); })()`);
+        // the subdomain checker: a non-Latin name is refused with its own icon (no network involved)
+        await js(`document.getElementById('cloud-setup').style.display = 'block'; document.getElementById('cloud-active').style.display = 'none'; checkSubdomain('عربي')`); await sleep(300);
+        const dom = await js(`({ icon: (document.querySelector('#domain-status use') || { getAttribute: () => '' }).getAttribute('href'), text: document.getElementById('domain-status').textContent })`);
+        if (dom.icon !== '#i-circle-x' || !dom.text) throw new Error(`subdomain status: ${JSON.stringify(dom)}`);
+        await js(`document.getElementById('domain-status').scrollIntoView({ block: 'center' })`);
+        await ev({ shot: `ui-${lang}-subdomain-refused.png`, wait: 200 });
+        // page-wide: no emoji / pictograph in what is shown; every icon has a size and a defined symbol
+        const page = await js(`(() => {
+          const text = document.body.innerText; const bad = [...text.matchAll(/[\\p{Extended_Pictographic}\\p{Emoji_Presentation}\\uFE0F\\u20E3\\u2713-\\u2718]/gu)].map((m) => m[0]).filter((c) => !['\\u00A9', '\\u00AE', '\\u2122'].includes(c));
+          const uses = [...document.querySelectorAll('svg.icon use')]; const undef = uses.filter((u) => !document.querySelector(u.getAttribute('href'))).map((u) => u.getAttribute('href'));
+          const flat = [...document.querySelectorAll('svg.icon')].filter((sv) => sv.getClientRects().length && (sv.getBoundingClientRect().width < 10 || sv.getBoundingClientRect().height < 10)).length;
+          return { emoji: bad, icons: uses.length, undef, flat, sprite: !!document.getElementById('icon-sprite') }; })()`);
+        if (page.emoji.length || page.undef.length || page.flat || !page.sprite || page.icons < 15) throw new Error(`page icons: ${JSON.stringify(page)}`);
+        await js(`delete window.refreshStatus; refreshState()`); await sleep(800);
+        return `${page.icons} icons on the page, none undefined/collapsed, no emoji in the text; status lines ${kinds.map((k) => k.cls).join('/')} painted; subdomain refusal "${dom.text}"`;
       });
     }
 
@@ -262,6 +302,21 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await ev({ shot: 'ui-en-after-stop.png', wait: 300 });
       if (running) throw new Error('the services did not stop after «yes»');
       return `stopped after ${Math.round((Date.now() - t0) / 1000)}s`;
+    });
+
+    await R.check('U10 starting the system again: the start button shows the busy icon, then the running state returns — shot at each step', async () => {
+      await js(`window.scrollTo(0, 0); document.getElementById('btn-start').click()`); await sleep(350);
+      const busy = await js(`({ icon: (document.querySelector('#btn-start use') || { getAttribute: () => '' }).getAttribute('href'), spin: !!document.querySelector('#btn-start .spin'), disabled: document.getElementById('btn-start').disabled, text: document.getElementById('btn-start').textContent.trim(), fb: document.getElementById('feedback-control').className })`);
+      await ev({ shot: 'ui-en-starting.png', wait: 200 });
+      if (busy.icon !== '#i-loader' || !busy.spin || !busy.disabled) throw new Error(`start button while starting: ${JSON.stringify(busy)}`);
+      const t0 = Date.now(); let running = false;
+      while (!running && Date.now() - t0 < 240000) { await sleep(2000); running = await js(`texacore.getState().then((s) => !!s.containerRunning)`); }
+      if (!running) throw new Error('the services did not start again');
+      await sleep(2500);
+      await ev({ shot: 'ui-en-running-again.png', wait: 300 });
+      const after = await js(`({ stopShown: getComputedStyle(document.getElementById('btn-stop')).display !== 'none', startShown: getComputedStyle(document.getElementById('btn-start')).display !== 'none' })`);
+      if (!after.stopShown || after.startShown) throw new Error(`after starting: ${JSON.stringify(after)}`);
+      return `busy: ${busy.icon} spinning, "${busy.text}", status line "${busy.fb}"; running again after ${Math.round((Date.now() - t0) / 1000)}s`;
     });
   } finally {
     await stopApp(child, userData);
