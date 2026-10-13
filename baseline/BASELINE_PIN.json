@@ -1,25 +1,25 @@
 {
   "schema": 1,
   "pgMajor": 17,
-  "cutTimestamp": "2026-10-13T08:15:22.068Z",
-  "erpCommit": "c058338abb0f0708a551531e06257e23e368f93f",
-  "erpBranch": "claude/release-2.0.0",
+  "cutTimestamp": "2026-10-13T12:29:15.284Z",
+  "erpCommit": "a302170429e3e96cfe5e0402766253ff792783ef",
+  "erpBranch": "HEAD",
   "files": {
     "production_baseline.sql": {
       "source": "supabase/baseline/production_baseline.sql",
-      "sourceSha256": "29f86893fe6a3a52b5bd540d5fd59bdc77f232c3d46466df80b610d7c21129fa",
-      "sha256": "29f86893fe6a3a52b5bd540d5fd59bdc77f232c3d46466df80b610d7c21129fa",
-      "bytes": 10948104,
+      "sourceSha256": "dc7c722ffb28a582ba5834fc68caaf9356d84a8e970aee77cfaf157d7a41f091",
+      "sha256": "dc7c722ffb28a582ba5834fc68caaf9356d84a8e970aee77cfaf157d7a41f091",
+      "bytes": 11135087,
       "derived": false,
-      "lastChangedCommit": "8962f40a8e987306d072bec2b1fda49c055ab11b"
+      "lastChangedCommit": "5c8694927c9eb2a00def7f3cd6cc0942986ebf00"
     },
     "production_baseline.inventory.json": {
       "source": "supabase/baseline/production_baseline.inventory.json",
-      "sourceSha256": "9c3a63c9c337b825c5b6b188c198b743db9cdc88244c6e60dadaf1caa62fed64",
-      "sha256": "9c3a63c9c337b825c5b6b188c198b743db9cdc88244c6e60dadaf1caa62fed64",
-      "bytes": 826556,
+      "sourceSha256": "a0d688f95a67ecffc4a226439c3358001decfff0e1371e2e8d5df80769f95fac",
+      "sha256": "a0d688f95a67ecffc4a226439c3358001decfff0e1371e2e8d5df80769f95fac",
+      "bytes": 833890,
       "derived": false,
-      "lastChangedCommit": "8962f40a8e987306d072bec2b1fda49c055ab11b"
+      "lastChangedCommit": "5c8694927c9eb2a00def7f3cd6cc0942986ebf00"
     },
     "storage_stubs.sql": {
       "source": "tests/fixtures/prod_schema_auth_storage_stubs.sql",
