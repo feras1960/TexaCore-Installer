@@ -90,14 +90,17 @@ exports.default = async function afterPack(context) {
   // the dmg ships the signed app. No-op on Windows/Linux.
   if (context.electronPlatformName === 'darwin') {
     const appPath = path.join(context.appOutDir, context.packager.appInfo.productFilename + '.app');
+    const { execFileSync } = require('child_process');
+    console.log(`  • afterPack: ad-hoc signing ${appPath}`);
+    // macOS tags files it sees arriving with com.apple.provenance; codesign refuses a bundle with such "detritus" (xattr) — strip first
+    try { execFileSync('/usr/bin/xattr', ['-cr', appPath], { stdio: 'ignore' }); } catch { /* nothing to strip */ }
+    // A build whose signature is not valid must NOT be produced: on Apple Silicon the app would not open at all ("is damaged").
     try {
-      const { execFileSync } = require('child_process');
-      console.log(`  • afterPack: ad-hoc signing ${appPath}`);
       execFileSync('codesign', ['--force', '--deep', '--sign', '-', appPath], { stdio: 'inherit' });
-      execFileSync('codesign', ['--verify', '--deep', appPath], { stdio: 'inherit' });
-      console.log('  • afterPack: ad-hoc signature valid ✅');
+      execFileSync('codesign', ['--verify', '--deep', '--strict', appPath], { stdio: 'inherit' });
     } catch (e) {
-      console.warn(`  • afterPack: ad-hoc sign failed: ${e.message}`);
+      throw new Error(`afterPack: ad-hoc signing failed — refusing to produce an app with an invalid signature: ${e.message}`);
     }
+    console.log('  • afterPack: ad-hoc signature valid ✅');
   }
 };

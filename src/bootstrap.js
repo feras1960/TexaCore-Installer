@@ -102,6 +102,57 @@ function moveAside(from, label, now = new Date()) {
   return to;
 }
 
+// ─── what survives from a pre-2.0 data dir (and what must NOT) ─────────────────────────────────────────────────────
+// A 2.0 install starts a NEW, empty database, so its company list, backup paths and storage folders must not follow it: initBackupOnStartup() would
+// point the periodic auto-backup at the OLD .tcdb file and overwrite it with a backup of the new empty database. What may be carried over is the account
+// level state only: the licence (key + the encrypted licence.dat, hardware-bound), the cloud-access settings, the admin-portal hash and the UI choices.
+const CARRY_CONFIG_FIELDS = ['licenseKey', 'isTrial', 'isFree', 'previousLicenseKey', 'subdomain', 'enableCloud', 'tunnelToken', 'adminPasswordHash', 'port', 'uiLang'];
+
+function pickCarryFields(config) {
+  const out = {};
+  for (const k of CARRY_CONFIG_FIELDS) if (config && config[k] !== undefined && config[k] !== null && config[k] !== '') out[k] = config[k];
+  return out;
+}
+
+/** New dir ← the account-level settings of the old one (config.json allowlist + license.dat). Never copies company/backup/storage fields. Returns what was carried. */
+function carryForwardSettings(fromDir, toDir, log = () => {}) {
+  const carried = { config: [], licenseDat: false };
+  try {
+    const old = JSON.parse(fs.readFileSync(path.join(fromDir, 'config.json'), 'utf8'));
+    const keep = pickCarryFields(old);
+    if (Object.keys(keep).length) {
+      fs.mkdirSync(toDir, { recursive: true });
+      fs.writeFileSync(path.join(toDir, 'config.json'), JSON.stringify(keep, null, 2), { mode: 0o600 });
+      carried.config = Object.keys(keep);
+    }
+  } catch { /* no/unreadable old config */ }
+  try {
+    const lic = path.join(fromDir, 'license.dat');
+    if (fs.existsSync(lic)) { fs.mkdirSync(toDir, { recursive: true }); fs.copyFileSync(lic, path.join(toDir, 'license.dat')); try { fs.chmodSync(path.join(toDir, 'license.dat'), 0o600); } catch { /* ignore */ } carried.licenseDat = true; }
+  } catch { /* none */ }
+  if (carried.config.length || carried.licenseDat) log(`[Bootstrap] carried over from the old data dir: ${carried.config.join(', ') || '(no config)'}${carried.licenseDat ? ' + license.dat' : ''}`);
+  return carried;
+}
+
+/**
+ * A config.json that stays in place (fresh / interrupted first run) but still holds a pre-2.0 company list or backup paths: keep the original beside it
+ * (config.json.pre-2.0-<stamp>, 0600) and rewrite it with the allowlisted fields only. Returns the copy's path or null when nothing needed doing.
+ */
+function sanitizeConfigInPlace(dataDir, log = () => {}, now = new Date()) {
+  const f = path.join(dataDir, 'config.json');
+  let cfg;
+  try { cfg = JSON.parse(fs.readFileSync(f, 'utf8')); } catch { return null; }
+  const extra = Object.keys(cfg || {}).filter((k) => !CARRY_CONFIG_FIELDS.includes(k) && cfg[k] !== undefined && !(Array.isArray(cfg[k]) && cfg[k].length === 0));
+  const risky = ['companies', 'storagePath', 'currentDbPath', 'tcdbPath'].some((k) => cfg[k]);
+  if (!risky) return null;
+  let copy = path.join(dataDir, `config.json.pre-2.0-${stamp(now)}`);
+  for (let i = 1; fs.existsSync(copy); i++) copy = path.join(dataDir, `config.json.pre-2.0-${stamp(now)}-${i}`);
+  fs.copyFileSync(f, copy); try { fs.chmodSync(copy, 0o600); } catch { /* ignore */ }
+  fs.writeFileSync(f, JSON.stringify(pickCarryFields(cfg), null, 2), { mode: 0o600 });
+  log(`[Bootstrap] old config.json named a company/backup location (${extra.join(', ')}) — the new empty database must not back up over it; original kept as ${copy}`);
+  return copy;
+}
+
 /**
  * Called once at startup BEFORE anything reads the data dir (secrets, config, license). Applies the policy:
  *   legacy_v18            → the WHOLE data dir is moved aside (data, config, backups, legacy secrets all stay on disk,
@@ -118,6 +169,7 @@ function prepareDataDir(dataDir, log = () => {}) {
     movedTo = moveAside(dataDir, 'v18-backup');
     fs.mkdirSync(dataDir, { recursive: true });
     log(`[Bootstrap] pre-2.0 data dir (${d.reason}) moved aside → ${movedTo} (never deleted)`);
+    carryForwardSettings(movedTo, dataDir, log);                       // the licence + cloud settings continue; the company/backup locations do not
   } else if (d.state === 'interrupted_first_run') {
     const pgdata = path.join(dataDir, 'pgdata');
     if (fs.existsSync(pgdata)) movedTo = moveAside(pgdata, 'interrupted');
@@ -126,6 +178,9 @@ function prepareDataDir(dataDir, log = () => {}) {
       if (fs.existsSync(p)) moveAside(p, 'interrupted');
     }
     log(`[Bootstrap] interrupted first run (${d.reason}) — partial cluster set aside${movedTo ? ' → ' + movedTo : ''}`);
+    sanitizeConfigInPlace(dataDir, log);
+  } else if (d.state === 'fresh') {
+    sanitizeConfigInPlace(dataDir, log);                               // a config left behind without its cluster still names the old backup file
   }
   return { ...d, movedTo };
 }
@@ -348,6 +403,7 @@ module.exports = {
   MARKER_FILE, EXPECTED_PG_MAJOR, REDACTED_FUNCTIONS, LOCAL_EXTRAS,
   readMarker, writeMarker, markerPath,
   pgMajorOf, detect, moveAside, prepareDataDir,
+  carryForwardSettings, sanitizeConfigInPlace, CARRY_CONFIG_FIELDS,
   loadPin, verifyBaselineFiles, sha256File, hbaText, hbaHasTrust, passwordSql,
   rolesSql, postBaselineSql, planRetry, loadBaseline,
   parsePsqlErrors, classifyBaselineErrors,

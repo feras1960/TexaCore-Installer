@@ -5,6 +5,8 @@
 //   A. an INTERRUPTED first run (killed mid-baseline) is recognised as such — not as legacy_v18 — set aside, and rebuilt cleanly
 //   B. a 1.x (PostgreSQL 15) data dir is moved aside WHOLE (config, backups and cluster intact), never reused, a fresh install is built
 //   C. a finished install restarts without rebuilding (firstRun=false) and keeps its data
+//   D. an UNFINISHED PostgreSQL-17 dir that still carries an old config (company list, backup paths) is sanitised — the auto-backup
+//      must never overwrite the old .tcdb — and the original config is kept
 //
 //   node scripts/e2e/states-check.js --workdir <empty dir> [--app <packaged .app>]
 // ════════════════════════════════════════════════════════════════
@@ -81,7 +83,9 @@ async function waitFor(fn, ms, what) {
     fs.mkdirSync(path.join(dB, 'pgdata'), { recursive: true });
     fs.writeFileSync(path.join(dB, 'pgdata', 'PG_VERSION'), '15\n');
     fs.writeFileSync(path.join(dB, 'pgdata', 'postgresql.conf'), '# 1.x cluster\n');
-    fs.writeFileSync(path.join(dB, 'config.json'), JSON.stringify({ licenseKey: 'LEGACY-KEY-1' }));
+    fs.writeFileSync(path.join(dB, 'config.json'), JSON.stringify({ licenseKey: 'LEGACY-KEY-1', isTrial: true, subdomain: 'legacyco', storagePath: path.join(dB, 'backups'),
+      companies: [{ name: 'Legacy Co', tcdbPath: path.join(dB, 'backups', 'old.tcdb') }] }));
+    fs.writeFileSync(path.join(dB, 'license.dat'), 'legacy-licence-blob');
     fs.writeFileSync(path.join(dB, 'secrets.json'), JSON.stringify({ legacy: true, jwtSecret: 'texacore-jwt-secret-at-least-32-characters-long' }));
     fs.mkdirSync(path.join(dB, 'backups'));
     fs.writeFileSync(path.join(dB, 'backups', 'old.tcdb'), 'precious');
@@ -99,8 +103,45 @@ async function waitFor(fn, ms, what) {
       const sec = JSON.parse(fs.readFileSync(path.join(dB, 'secrets.json'), 'utf8'));
       if (sec.jwtSecret === 'texacore-jwt-secret-at-least-32-characters-long' || sec.legacy) throw new Error('the fresh install reuses the legacy secrets');
       if (fs.readFileSync(path.join(dB, 'pgdata', 'PG_VERSION'), 'utf8').trim() !== '17') throw new Error('fresh cluster is not PG 17');
-      return `old dir kept as ${asides[0]} (cluster, config, backups intact); fresh PG 17 install with new secrets`;
+      // what the NEW install carries over: the licence and cloud settings — never the company list or a backup location
+      const cfg = JSON.parse(fs.readFileSync(path.join(dB, 'config.json'), 'utf8'));
+      if (cfg.licenseKey !== 'LEGACY-KEY-1' || cfg.isTrial !== true || cfg.subdomain !== 'legacyco') throw new Error(`licence/settings not carried over: ${JSON.stringify(Object.keys(cfg))}`);
+      if (JSON.stringify(cfg).includes('Legacy Co') || JSON.stringify(cfg).includes('old.tcdb')) throw new Error('the old company list / backup path leaked into the new config');
+      if (fs.readFileSync(path.join(dB, 'license.dat'), 'utf8') !== 'legacy-licence-blob') throw new Error('license.dat not carried over');
+      if (fs.readFileSync(path.join(moved, 'backups', 'old.tcdb'), 'utf8') !== 'precious') throw new Error('old backup changed while the new install ran');
+      if (!fs.existsSync(path.join(moved, 'license.dat'))) throw new Error('old license.dat vanished');
+      return `old dir kept as ${asides[0]} (cluster, config, backups intact); fresh PG 17 install with new secrets; licence + settings carried over, no company list`;
     } finally { await stopApp(child, uB); }
+  });
+
+  // ── D. unfinished PG17 dir with an old config ──
+  const uD = path.join(WORK, 'D', 'userdata');
+  const dD = path.join(uD, 'texacore-data');
+  const oldBk = path.join(WORK, 'D', 'old-backups');
+  await R.check('D. an unfinished PG17 dir with an old config: company list removed, the old .tcdb is never overwritten, the original config is kept', async () => {
+    fs.mkdirSync(oldBk, { recursive: true });
+    fs.writeFileSync(path.join(oldBk, 'old.tcdb'), 'precious-D');
+    fs.mkdirSync(path.join(dD, 'pgdata'), { recursive: true });
+    fs.writeFileSync(path.join(dD, 'pgdata', 'PG_VERSION'), '17\n');
+    fs.writeFileSync(path.join(dD, 'pgdata', 'postgresql.conf'), '# half-built\n');
+    const oldCfg = { licenseKey: 'LEGACY-KEY-D', isTrial: true, storagePath: oldBk, currentDbPath: path.join(oldBk, 'old.tcdb'), companies: [{ name: 'Old D Co', tcdbPath: path.join(oldBk, 'old.tcdb') }] };
+    fs.writeFileSync(path.join(dD, 'config.json'), JSON.stringify(oldCfg));
+    const d0 = bootstrap.detect(dD);
+    if (d0.state !== 'interrupted_first_run') throw new Error(`detect() says ${d0.state}`);
+    const { child, ready } = startApp({ userData: uD, logFile: path.join(WORK, 'D.log'), appBinary: binary });
+    try {
+      await ready;
+      await sleep(4000);                                                       // the backup-on-startup job has run by now
+      if (fs.readFileSync(path.join(oldBk, 'old.tcdb'), 'utf8') !== 'precious-D') throw new Error('the old .tcdb was overwritten by the new install');
+      const cfg = JSON.parse(fs.readFileSync(path.join(dD, 'config.json'), 'utf8'));
+      if (cfg.licenseKey !== 'LEGACY-KEY-D') throw new Error('licence key lost');
+      if (JSON.stringify(cfg).includes('Old D Co') || JSON.stringify(cfg).includes(oldBk)) throw new Error('the old company list / backup path survived in config.json');
+      const copies = fs.readdirSync(dD).filter((n) => n.startsWith('config.json.pre-2.0-'));
+      if (copies.length !== 1) throw new Error(`pre-2.0 config copies: ${copies.length}`);
+      if (JSON.parse(fs.readFileSync(path.join(dD, copies[0]), 'utf8')).companies[0].name !== 'Old D Co') throw new Error('the kept copy is not the original');
+      if (bootstrap.readMarker(dD).status !== 'ready') throw new Error('not ready');
+      return `old .tcdb untouched; config sanitised; original kept as ${copies[0]}`;
+    } finally { await stopApp(child, uD); }
   });
 
   fs.writeFileSync(path.join(WORK, 'results.json'), JSON.stringify({ at: new Date().toISOString(), app: APP || 'electron dev mode', summary: R.summary(), rows: R.rows }, null, 2));

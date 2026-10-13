@@ -66,7 +66,9 @@ test('prepareDataDir: a legacy dir is moved aside WHOLE, nothing deleted, a fres
   assert.ok(fs.existsSync(path.join(r.movedTo, 'pgdata', 'PG_VERSION')));
   assert.equal(fs.readFileSync(path.join(r.movedTo, 'config.json'), 'utf8'), '{"licenseKey":"K"}');
   assert.ok(fs.existsSync(path.join(r.movedTo, 'backups', 'a.tcdb')));
-  assert.ok(fs.existsSync(d) && fs.readdirSync(d).length === 0);   // fresh, empty
+  // fresh: no cluster, no backups, no secrets; only the allowlisted settings carried forward (licence key)
+  assert.deepEqual(fs.readdirSync(d).sort(), ['config.json']);
+  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(d, 'config.json'), 'utf8')), { licenseKey: 'K' });
   assert.equal(b.detect(d).state, 'fresh');
 });
 
@@ -295,4 +297,56 @@ test('a baseline with a bare "null;" statement (an object whose definition came 
   assert.deepEqual(baselineProblems('CREATE TABLE public.t (id int);\nCREATE FUNCTION f() RETURNS void AS $f$\nBEGIN\n  null;\nEND;\n$f$ LANGUAGE plpgsql;\n'), []);
   // a statement that merely CONTAINS null is fine
   assert.deepEqual(baselineProblems('CREATE TABLE public.t (a int DEFAULT null);\nSELECT null;\n'), []);
+});
+
+// ─── what a pre-2.0 dir leaves behind for the new install ───────────────────────────────────────────────────────
+test('legacy dir: moved aside whole; the NEW dir gets the licence and cloud settings but NOT the company list or any backup location', () => {
+  const d = mkdtemp('dd-');
+  fs.mkdirSync(path.join(d, 'pgdata'), { recursive: true }); fs.writeFileSync(path.join(d, 'pgdata', 'PG_VERSION'), '15\n');
+  fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify({ licenseKey: 'TRL-2026-OLD', isTrial: true, subdomain: 'acme', enableCloud: true, tunnelToken: 'T', port: 8080, dbPassword: 'old',
+    storagePath: '/old/backups', currentDbPath: '/old/backups/x.tcdb', companies: [{ name: 'Old Co', tcdbPath: '/old/backups/old.tcdb' }] }));
+  fs.writeFileSync(path.join(d, 'license.dat'), 'encrypted-licence'); fs.mkdirSync(path.join(d, 'backups')); fs.writeFileSync(path.join(d, 'backups', 'old.tcdb'), 'OLD BACKUP');
+  const r = b.prepareDataDir(d);
+  assert.equal(r.state, 'legacy_v18');
+  const cfg = JSON.parse(fs.readFileSync(path.join(d, 'config.json'), 'utf8'));
+  assert.deepEqual(cfg, { licenseKey: 'TRL-2026-OLD', isTrial: true, subdomain: 'acme', enableCloud: true, tunnelToken: 'T', port: 8080 });
+  assert.equal(fs.readFileSync(path.join(d, 'license.dat'), 'utf8'), 'encrypted-licence');
+  assert.ok(!fs.existsSync(path.join(d, 'pgdata')) && !fs.existsSync(path.join(d, 'backups')));
+  // the old dir is untouched
+  assert.equal(fs.readFileSync(path.join(r.movedTo, 'backups', 'old.tcdb'), 'utf8'), 'OLD BACKUP');
+  assert.ok(JSON.parse(fs.readFileSync(path.join(r.movedTo, 'config.json'), 'utf8')).companies);
+  assert.equal(fs.statSync(path.join(d, 'config.json')).mode & 0o777, 0o600);
+});
+
+test('legacy dir without a licence or config: nothing is invented', () => {
+  const d = mkdtemp('dd-');
+  fs.mkdirSync(path.join(d, 'pgdata'), { recursive: true }); fs.writeFileSync(path.join(d, 'pgdata', 'PG_VERSION'), '16\n');
+  const r = b.prepareDataDir(d);
+  assert.equal(r.state, 'legacy_v18'); assert.deepEqual(fs.readdirSync(d), []);
+});
+
+test('interrupted first run / fresh with an old config: the company list and backup paths are removed from config.json (the auto-backup must not overwrite the old .tcdb); the original is kept', () => {
+  for (const state of ['interrupted', 'fresh']) {
+    const d = mkdtemp('dd-');
+    if (state === 'interrupted') { fs.mkdirSync(path.join(d, 'pgdata'), { recursive: true }); fs.writeFileSync(path.join(d, 'pgdata', 'PG_VERSION'), '17\n'); }
+    const old = { licenseKey: 'TRL-2026-OLD', isTrial: true, storagePath: '/old/backups', companies: [{ name: 'Old Co', tcdbPath: '/old/backups/old.tcdb' }] };
+    fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify(old)); fs.writeFileSync(path.join(d, 'license.dat'), 'lic');
+    b.prepareDataDir(d);
+    assert.deepEqual(JSON.parse(fs.readFileSync(path.join(d, 'config.json'), 'utf8')), { licenseKey: 'TRL-2026-OLD', isTrial: true }, state);
+    const copy = fs.readdirSync(d).find((n) => n.startsWith('config.json.pre-2.0-'));
+    assert.ok(copy, state); assert.deepEqual(JSON.parse(fs.readFileSync(path.join(d, copy), 'utf8')), old);
+    assert.equal(fs.readFileSync(path.join(d, 'license.dat'), 'utf8'), 'lic');
+  }
+});
+
+test('a finished 2.0 install and a config without risky fields are left exactly as they are', () => {
+  const d = mkdtemp('dd-');
+  fs.mkdirSync(path.join(d, 'pgdata'), { recursive: true }); fs.writeFileSync(path.join(d, 'pgdata', 'PG_VERSION'), '17\n');
+  fs.writeFileSync(path.join(d, 'bootstrap.json'), JSON.stringify({ status: 'ready' }));
+  const cfg = JSON.stringify({ licenseKey: 'K', companies: [{ name: 'New Co', tcdbPath: '/new/x.tcdb' }] });
+  fs.writeFileSync(path.join(d, 'config.json'), cfg);
+  assert.equal(b.prepareDataDir(d).state, 'ready');
+  assert.equal(fs.readFileSync(path.join(d, 'config.json'), 'utf8'), cfg);
+  const e = mkdtemp('dd-'); fs.writeFileSync(path.join(e, 'config.json'), JSON.stringify({ licenseKey: 'K', port: 80 }));
+  assert.equal(b.sanitizeConfigInPlace(e), null);
 });
