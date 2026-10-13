@@ -15,6 +15,7 @@
 //   U8  the admin-portal password UI states the REAL policy (8+ characters, from the main process): placeholder and messages say 8, 7 characters are refused in the window, «admin» and licence-key-like values
 //       are refused with their own message, a good password is accepted and the SERVER then verifies it (a free licence has no default password)
 //   U9  the licence panel, every kind of status line and the subdomain checker draw SVG icons; the whole page has no emoji and every icon points at a defined symbol
+//   U11 licence row: FREE says «never expires» (no date, no 0 days); a trial shows its real end date and the days left
 //   U10 starting again: the start button's busy icon, then the running state
 //   U5  the one-time upgrade notice (the run starts over a 1.x data folder): shown with the old folder and the old company file, in Arabic RTL and English LTR; «فتح المجلد» asks the OS to open exactly that folder;
 //       the «فتح» button beside a 1.x company file is refused with the translated message; «إغلاق» dismisses it for good (still gone after a reload and after the files are re-read)
@@ -278,6 +279,29 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         if (page.emoji.length || page.undef.length || page.flat || !page.sprite || page.icons < 15) throw new Error(`page icons: ${JSON.stringify(page)}`);
         await js(`delete window.refreshStatus; refreshState()`); await sleep(800);
         return `${page.icons} icons on the page, none undefined/collapsed, no emoji in the text; status lines ${kinds.map((k) => k.cls).join('/')} painted; subdomain refusal "${dom.text}"`;
+      });
+
+      // The licence row: a licence without an end date (the free local plan) never expires — «دائمة» / "Never expires", not «ينتهي: -- (0 يوم)»; a trial shows its real end date and the days left.
+      await R.check(`U11 [${lang}] licence row: FREE says "never expires" (no date, no «0 days»); a trial shows the real end date and the days left`, async () => {
+        await js(`window.refreshStatus = async () => {}; window.scrollTo(0, 0); document.getElementById('panel-license').style.display = 'none'; document.getElementById('panel-control').style.display = 'block'`);
+        const probe = `(() => { const e = document.getElementById('badge-expires'); return { text: e.textContent, expiry: e.dataset.expiry || '', tier: document.getElementById('badge-tier').textContent, never: t('license.neverExpires'), prefix: t('license.expiresPrefix'), unit: t('common.daysUnit') }; })()`;
+        // FREE — the real licence of this run
+        const real = await js(`({ tier: (currentState.licenseInfo || {}).tier, expires: (currentState.licenseInfo || {}).expires_at || null })`);
+        if (real.tier !== 'free' || real.expires) throw new Error(`this run's licence is not a free one without an end date: ${JSON.stringify(real)}`);
+        await js(`updateControlPanel(currentState)`);
+        const free = await js(probe);
+        if (free.expiry !== 'never' || free.text !== free.never || !free.never || /\d/.test(free.text) || free.text.includes('--')) throw new Error(`FREE row: ${JSON.stringify(free)}`);
+        await js(`document.getElementById('license-badge').scrollIntoView({ block: 'center' })`);
+        await ev({ shot: `ui-${lang}-license-row-free.png`, wait: 200 });
+        // TRIAL — a licence with an end date 11.5 days away (→ 12 days left)
+        const ends = Date.now() + Math.round(11.5 * 86400000);
+        await js(`updateControlPanel(Object.assign({}, currentState, { licenseInfo: { tier: 'trial', license_key: 'TRL-UI-SHOT', expires_at: new Date(${ends}).toISOString() } }))`);
+        const trial = await js(probe);
+        const wantDate = await js(`new Intl.DateTimeFormat(({ ar: 'ar-EG', en: 'en-US', ru: 'ru-RU', uk: 'uk-UA' })[document.documentElement.lang] || 'en-US', { calendar: 'gregory', numberingSystem: 'latn', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(${ends}))`);
+        if (trial.expiry !== 'date' || trial.text !== `${trial.prefix} ${wantDate} (12 ${trial.unit})` || trial.text === trial.never) throw new Error(`TRIAL row: ${JSON.stringify(trial)} — wanted «${trial.prefix} ${wantDate} (12 ${trial.unit})»`);
+        await ev({ shot: `ui-${lang}-license-row-trial.png`, wait: 200 });
+        await js(`updateControlPanel(currentState); delete window.refreshStatus`);
+        return `FREE: "${free.text}" ; TRIAL (tier ${trial.tier}): "${trial.text}"`;
       });
     }
 

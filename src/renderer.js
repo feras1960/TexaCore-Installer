@@ -321,8 +321,15 @@ function updateControlPanel(state) {
       }).format(d);
     }
     
-    const daysLeft = li.expires_at ? Math.ceil((new Date(li.expires_at) - Date.now()) / 86400000) : 0;
-    expiresEl.textContent = `${t('license.expiresPrefix')} ${exDate} (${daysLeft} ${t('common.daysUnit')})`;
+    if (!li.expires_at) {
+      // A licence without an end date never expires (the free local plan: license-guard.validate() never marks it expired) — never «-- (0 days)».
+      expiresEl.textContent = t('license.neverExpires');
+      expiresEl.dataset.expiry = 'never';
+    } else {
+      const daysLeft = Math.ceil((new Date(li.expires_at) - Date.now()) / 86400000);
+      expiresEl.textContent = `${t('license.expiresPrefix')} ${exDate} (${daysLeft} ${t('common.daysUnit')})`;
+      expiresEl.dataset.expiry = 'date';
+    }
 
     // Support code = the full license key (for fast support / activation / extension).
     const codeEl = document.getElementById('support-code');

@@ -125,7 +125,20 @@ const get = (url, headers = {}) => new Promise((resolve, reject) => {
     await R.check('S1 clean profile, custom port: the wizard reaches the data preview', async () => {
       const ctx = await browser.newContext({ viewport: { width: 1440, height: 1000 } });
       try {
-        const r = await runWizard(await ctx.newPage(), { email: 'owner1@rsf.test', shots, shot: 'S1-preview.png' });
+        const page1 = await ctx.newPage();
+        const r = await runWizard(page1, { email: 'owner1@rsf.test', shots, shot: 'S1-preview.png' });
+        // evidence for the release report (best effort, never a failure): the preview step scrolled to its table, then the app header behind it once the dialog is closed
+        try {
+          await page1.screenshot({ path: path.join(shots, 'S1-preview-full.png'), fullPage: true });
+          await page1.waitForTimeout(2500);
+          await page1.screenshot({ path: path.join(shots, 'S1-preview-step.png') });          // by now the wizard has analysed the file: the preview step itself (counts, trial balance, date corrections)
+          // close the dialog (its ✕ is the first button of the overlay) and show the app's header on its own
+          await page1.locator('div.fixed.inset-0 button').first().click({ timeout: 5000 }).catch(() => {}); await page1.waitForTimeout(1500);
+          await page1.screenshot({ path: path.join(shots, 'S1-after-close.png') });
+          await page1.screenshot({ path: path.join(shots, 'S1-header.png'), clip: { x: 0, y: 0, width: 1440, height: 130 } });
+          await page1.goto(`${UI}/`, { waitUntil: 'domcontentloaded', timeout: 60000 }); await page1.waitForTimeout(6000);
+          await page1.screenshot({ path: path.join(shots, 'S1-home-header.png') });
+        } catch { /* evidence only */ }
         if (!r.cfg.secret) throw new Error(`the page got no admin secret (config keys: ${r.cfg.keys})`);
         if (!r.reached) throw new Error(`no preview; error "${r.error}"; page "${r.pageText}"`);
         evidence.S1 = r; return `preview reached at ${UI}: ${r.preview.slice(0, 120)}…`;
