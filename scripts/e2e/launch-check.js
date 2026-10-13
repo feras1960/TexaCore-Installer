@@ -43,6 +43,18 @@ async function pg(sql, params = []) {
   try { return await c.query(sql, params); } finally { await c.end(); }
 }
 
+/** A plan edit the way the console does it: production's plan guard refuses lowering a mirrored limit unless the transaction carries the confirmation. */
+async function pgConfirmedPlan(planId, sql, params) {
+  const c = new Client({ host: '127.0.0.1', port: PORTS.pg, database: 'postgres', user: 'postgres' });
+  await c.connect();
+  try {
+    await c.query('BEGIN');
+    await c.query(`SELECT set_config('texacore.plan_change_confirmed', $1::text, true)`, [planId]);
+    await c.query(sql, params);
+    await c.query('COMMIT');
+  } catch (e) { await c.query('ROLLBACK'); throw e; } finally { await c.end(); }
+}
+
 async function main() {
   const R = new Results();
   fs.rmSync(WORK, { recursive: true, force: true });
@@ -84,9 +96,12 @@ async function main() {
       const rows = (await pg(`SELECT n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')' AS sig, md5(p.prosrc) AS md5
                                 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
                                WHERE n.nspname IN ('public','licensing','newpost','tomgenerators') AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid=p.oid AND d.deptype='e')`)).rows;
-      const c = bootstrap.compareFunctionInventory(inv.functions_md5, rows);
+      const mk = bootstrap.readMarker(dataDir) || {};
+      const c = bootstrap.compareFunctionInventory(inv.functions_md5, rows, mk.patchedFunctions || {});
+      const patchedNote = Object.keys(mk.patchedFunctions || {}).length ? `; patched on purpose (import exemption): ${Object.keys(mk.patchedFunctions).join(', ')}` : '';
+      if ((mk.patchesSkipped || []).length) throw new Error(`a function patch was skipped: ${JSON.stringify(mk.patchesSkipped)}`);
       if (!c.ok) throw new Error(`missing ${c.missing.length} extra ${c.extra.length} differ ${c.mismatched.length}: ${[...c.missing, ...c.extra, ...c.mismatched].slice(0, 3).join(' | ')}`);
-      return `${c.expected} functions compared`;
+      return `${c.expected} functions compared${patchedNote}`;
     });
     await R.check('1.5 extensions usable as extensions.* (uuid-ossp, pgcrypto); the rest of the baseline\'s extension list accounted for', async () => {
       const r = (await pg(`SELECT extensions.uuid_generate_v4() IS NOT NULL u, length(extensions.gen_salt('bf'))>0 c, encode(extensions.digest('a','sha256'),'hex') h`)).rows[0];
@@ -395,7 +410,8 @@ async function main() {
           if (cfg.text.includes(secrets.serviceKey) || cfg.text.includes(secrets.jwtSecret) || cfg.text.includes(secrets.dbPassword)) throw new Error(`${label}: config.js leaks a server secret`);
         }
         for (const [method, p, bodyObj] of [['GET', '/api/companies'], ['GET', '/api/backup-status'], ['GET', '/api/tunnel-status'], ['POST', '/api/create-local-company', body({ adminEmail: 'x@lan.test' })],
-          ['POST', '/api/delete-company', { companyId: '00000000-0000-0000-0000-000000000000' }], ['POST', '/api/backup', {}], ['POST', '/api/restore-tcdb', ''], ['POST', '/api/update/install', {}], ['GET', '/api/open-tcdb']]) {
+          ['POST', '/api/delete-company', { companyId: '00000000-0000-0000-0000-000000000000' }], ['POST', '/api/backup', {}], ['POST', '/api/restore-tcdb', ''], ['POST', '/api/update/install', {}], ['GET', '/api/open-tcdb'],
+          ['GET', `/api/employee-roles?companyId=${A.companyId}`], ['POST', '/api/invite-employee', { companyId: A.companyId, roleId: '00000000-0000-0000-0000-000000000000', email: 'x@lan.test', fullName: 'x' }]]) {
           const r = await request(method, `${base}${p}`, { headers: { ...hdr, ...H }, body: bodyObj });
           if (r.status !== 403) throw new Error(`${label}: ${method} ${p} WITH the admin secret → ${r.status} (want 403)`);
         }
@@ -412,7 +428,7 @@ async function main() {
         if (ui) throw new Error('the UI server is NOT reachable on the LAN address — office PCs could not use the ERP');
         rawNote = `LAN address ${lanIp}: UI port open; API gateway / admin / PostgREST / GoTrue / PostgreSQL ports refuse connections`;
       }
-      return `${notes.length} caller shapes × 3 config.js variants (secret never served) × 9 admin calls with the REAL secret (all 403), ping 200; ${rawNote}`;
+      return `${notes.length} caller shapes × 3 config.js variants (secret never served) × 11 admin calls (incl. the employee-invite routes) with the REAL secret (all 403), ping 200; ${rawNote}`;
     });
     await R.check('4.9b the same LAN PC still USES the ERP: anon sees nothing, the admin logs in through /_supabase and reads only their tenant under RLS', async () => {
       const base = lanIp ? `http://${lanIp}:${PORTS.ui}` : UI;
@@ -494,6 +510,66 @@ async function main() {
       const after = (await pg('SELECT (SELECT count(*) FROM public.tenants)::int t, (SELECT count(*) FROM auth.users)::int u')).rows[0];
       if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error(`a refused company creation left rows behind: ${JSON.stringify(before)} → ${JSON.stringify(after)}`);
       return `${attempts.length} hostile uploads → 400 each; nothing written anywhere (checked ${wouldBe.length} escape targets + the restore folder); without the secret → 401; 4 hostile dbFileName values refused before any write`;
+    });
+
+    await R.check('4.12 local employee invite: server-side account, one-time password, plan max_users respected, the employee uses the ERP from the LAN and sees only their company', async () => {
+      const roles = await request('GET', `${UI}/api/employee-roles?companyId=${A.companyId}`, { headers: H });
+      if (roles.status !== 200 || !roles.json.success || !roles.json.roles.length) throw new Error(`employee-roles → ${roles.status} ${roles.text.slice(0, 160)}`);
+      const role = roles.json.roles.find((r) => !/owner|admin/i.test(r.code)) || roles.json.roles[0];
+      if (roles.json.roles.some((r) => /^(platform|super)/i.test(r.code))) throw new Error(`the owner is offered a platform/super role: ${roles.json.roles.map((r) => r.code).join(',')}`);
+      const counts = async () => (await pg('SELECT (SELECT count(*) FROM auth.users)::int u, (SELECT count(*) FROM public.user_profiles)::int p, (SELECT count(*) FROM public.tenant_users)::int tu, (SELECT count(*) FROM public.company_membership_requests)::int req')).rows[0];
+      const emp = { companyId: A.companyId, roleId: role.id, email: 'staff1@e2e.test', fullName: 'Staff One' };
+      if (LICENSE === 'free') {
+        // the free plan has 1 user (the owner): the second one is refused BEFORE anything is created
+        const before = await counts();
+        const r = await request('POST', `${UI}/api/invite-employee`, { headers: H, body: emp });
+        if (r.status !== 402 || r.json.code !== 'PLAN_LIMIT_EXCEEDED' || !/users \(1\/1\)/.test(r.json.error)) throw new Error(`free plan invite → ${r.status} ${r.text.slice(0, 200)}`);
+        if (JSON.stringify(await counts()) !== JSON.stringify(before)) throw new Error('a refused invite left rows behind');
+        return `free plan (1 user): refused with "${r.json.error}", nothing created; roles offered: ${roles.json.roles.map((x) => x.code).join(', ')}`;
+      }
+      const planMax = (await pg(`SELECT sp.id, sp.max_users FROM public.tenant_subscriptions ts JOIN public.subscription_plans sp ON sp.id = ts.plan_id WHERE ts.tenant_id = $1 AND ts.status IN ('trial','active') ORDER BY ts.created_at DESC LIMIT 1`, [A.tenantId])).rows[0];
+      const ok = await request('POST', `${UI}/api/invite-employee`, { headers: H, body: emp });
+      if (ok.status !== 200 || !ok.json.success || !ok.json.oneTimePassword) throw new Error(`invite → ${ok.status} ${ok.text.slice(0, 240)}`);
+      const otp = ok.json.oneTimePassword;
+      if (!/^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$/.test(otp)) throw new Error(`odd one-time password shape`);
+      // the password is shown once and never written to a log
+      for (const f of [logFile, path.join(userData, 'logs', 'heartbeat.log')]) if (fs.existsSync(f) && fs.readFileSync(f, 'utf8').includes(otp)) throw new Error(`the one-time password is in ${path.basename(f)}`);
+      // server-side facts
+      const prof = (await pg(`SELECT up.tenant_id, up.company_id, up.is_tenant_admin, up.is_active FROM public.user_profiles up WHERE up.id = $1`, [ok.json.userId])).rows[0];
+      const mem = (await pg(`SELECT (SELECT count(*) FROM public.tenant_users WHERE user_id=$1 AND tenant_id=$2 AND is_active)::int tu, (SELECT count(*) FROM public.user_roles WHERE user_id=$1 AND role_id=$3 AND is_active)::int ur,
+                                    (SELECT status FROM public.company_membership_requests WHERE email=$4 ORDER BY created_at DESC LIMIT 1) req`, [ok.json.userId, A.tenantId, role.id, emp.email])).rows[0];
+      if (!prof || prof.tenant_id !== A.tenantId || prof.is_tenant_admin !== false || prof.is_active !== true) throw new Error(`profile ${JSON.stringify(prof)}`);
+      if (mem.tu !== 1 || mem.ur < 1 || mem.req !== 'accepted') throw new Error(`membership ${JSON.stringify(mem)}`);
+      // the employee works from the LAN address (anon key + RLS through /_supabase, no admin secret anywhere)
+      const base = lanIp ? `http://${lanIp}:${PORTS.ui}` : UI;
+      const lanHdr = lanIp ? {} : { Host: `192.168.77.20:${PORTS.ui}` };
+      const login = await request('POST', `${base}/_supabase/auth/v1/token?grant_type=password`, { headers: { ...lanHdr, apikey: secrets.anonKey }, body: { email: emp.email, password: otp } });
+      if (login.status !== 200 || !login.json.access_token) throw new Error(`employee LAN login → ${login.status} ${login.text.slice(0, 160)}`);
+      const eh = { ...lanHdr, apikey: secrets.anonKey, Authorization: `Bearer ${login.json.access_token}` };
+      const cos = await request('GET', `${base}/_supabase/rest/v1/companies?select=id,tenant_id`, { headers: eh });
+      if (cos.status !== 200 || cos.json.length !== 1 || cos.json[0].id !== A.companyId) throw new Error(`employee sees companies ${cos.text.slice(0, 200)}`);
+      const other = await request('GET', `${base}/_supabase/rest/v1/companies?select=id&id=eq.${B.companyId}`, { headers: eh });
+      if (other.status === 200 && other.json.length) throw new Error('the employee sees tenant B');
+      const upd = await request('PATCH', `${base}/_supabase/rest/v1/companies?id=eq.${B.companyId}`, { headers: { ...eh, Prefer: 'return=representation' }, body: { name: 'EMP-HACK' } });
+      if (upd.status < 300 && upd.json && upd.json.length) throw new Error('the employee modified tenant B');
+      const adm = await request('GET', `${base}/api/companies`, { headers: lanHdr });
+      if (adm.status !== 403) throw new Error(`employee LAN /api/companies → ${adm.status}`);
+      const gadmin = await request('GET', `${base}/_supabase/auth/v1/admin/users`, { headers: eh });
+      if (gadmin.status < 400) throw new Error('the employee reached the GoTrue admin API');
+      const su = await request('POST', `${base}/_supabase/auth/v1/signup`, { headers: { ...lanHdr, apikey: secrets.anonKey }, body: { email: 'stranger2@evil.test', password: 'Passw0rd!stranger' } });
+      if (su.status < 400) throw new Error('signup is open');
+      // duplicate → EMAIL_EXISTS, nothing written
+      const before = await counts();
+      const dup = await request('POST', `${UI}/api/invite-employee`, { headers: H, body: emp });
+      if (dup.status !== 409 || dup.json.code !== 'EMAIL_EXISTS' || JSON.stringify(await counts()) !== JSON.stringify(before)) throw new Error(`duplicate invite → ${dup.status} ${dup.text.slice(0, 160)}`);
+      // the plan's max_users is respected on a PAID plan too (the database trigger only enforces the free plan): owner + employee = 2 → cap at 2
+      await pgConfirmedPlan(planMax.id, 'UPDATE public.subscription_plans SET max_users = 2 WHERE id = $1', [planMax.id]);
+      let limited;
+      try { limited = await request('POST', `${UI}/api/invite-employee`, { headers: H, body: { ...emp, email: 'staff2@e2e.test', fullName: 'Staff Two' } }); }
+      finally { await pgConfirmedPlan(planMax.id, 'UPDATE public.subscription_plans SET max_users = $2 WHERE id = $1', [planMax.id, planMax.max_users]); }
+      if (limited.status !== 402 || limited.json.code !== 'PLAN_LIMIT_EXCEEDED' || !/users \(2\/2\)/.test(limited.json.error)) throw new Error(`user limit → ${limited.status} ${limited.text.slice(0, 200)}`);
+      if (JSON.stringify(await counts()) !== JSON.stringify(before)) throw new Error('the refused (limit) invite left rows behind');
+      return `${emp.email} added as ${role.code} (profile in the tenant, not an admin, tenant_users+role+accepted request), one-time password not in any log; from ${lanIp || 'LAN-style Host'}: logs in, sees 1 company (own) and nothing of tenant B, admin API 403, signup refused; duplicate → 409 EMAIL_EXISTS; paid-plan max_users 2/2 → 402 PLAN_LIMIT_EXCEEDED, nothing created`;
     });
 
     // ── 5. the web UI ──

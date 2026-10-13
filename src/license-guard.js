@@ -412,7 +412,7 @@ class LicenseGuard {
     if (!license) return false;
     const fields = ['tier', 'expires_at', 'activated_at', 'max_users', 'max_companies',
       'max_warehouses', 'max_storage_gb', 'enabled_modules', 'modules_admin_set', 'custom_branding',
-      'cloud_backup', 'api_access'];
+      'cloud_backup', 'api_access', 'plan_code', 'custom_limits'];
     let changed = false;
     for (const f of fields) {
       if (state[f] === undefined || state[f] === null) continue;

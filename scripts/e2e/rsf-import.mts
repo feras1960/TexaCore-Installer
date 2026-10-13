@@ -92,6 +92,29 @@ const accountsAll = (await q(`SELECT count(*)::int n FROM public.chart_of_accoun
 const cs = (await q(`SELECT cas.base_currency, c.default_currency, c.status FROM public.companies c JOIN public.company_accounting_settings cas ON cas.company_id=c.id WHERE c.id=$1`, [cid]))[0];
 const bal = (await q(`SELECT round(sum(l.debit)::numeric,2) d, round(sum(l.credit)::numeric,2) c, count(*)::int lines FROM public.journal_entry_lines l JOIN public.journal_entries e ON e.id=l.entry_id WHERE e.company_id=$1 AND COALESCE(e.is_deleted,false)=false`, [cid]))[0];
 const parties = (await q(`SELECT (SELECT count(*) FROM public.customers WHERE company_id=$1)::int customers, (SELECT count(*) FROM public.suppliers WHERE company_id=$1)::int suppliers`, [cid]))[0];
+// ── the plan's limits AFTER the import (owner decision 2026-10-13: an import is never limited; the limits apply to what users create afterwards) ──
+const planRow = (await q(`SELECT sp.code, sp.plan_type, sp.max_customers, sp.max_warehouses, sp.max_products, sp.max_invoices_monthly, sp.max_documents
+                            FROM public.tenant_subscriptions ts JOIN public.subscription_plans sp ON sp.id = ts.plan_id
+                           WHERE ts.tenant_id = $1 AND ts.status IN ('trial','active','grace') ORDER BY ts.created_at DESC LIMIT 1`, [co.tenantId]))[0];
+const have = (await q(`SELECT (SELECT count(*) FROM public.customers WHERE tenant_id=$1)::int customers, (SELECT count(*) FROM public.warehouses WHERE tenant_id=$1)::int warehouses,
+                              (SELECT count(*) FROM public.products WHERE tenant_id=$1)::int products, (SELECT count(*) FROM public.sales_transactions WHERE tenant_id=$1)::int invoices,
+                              (SELECT count(*) FROM public.journal_entries WHERE company_id=$2)::int journal_entries`, [co.tenantId, cid]))[0];
+const branch = (await q(`SELECT id FROM public.branches WHERE company_id=$1 ORDER BY created_at LIMIT 1`, [cid]))[0];
+const stamp = String(Date.now());
+const probes: Record<string, string> = {};
+const rc = await sb.from('customers').insert({ tenant_id: co.tenantId, company_id: cid, code: 'LP-' + stamp, name_ar: 'Limit probe' }).select('id');
+probes.customer = rc.error ? rc.error.message : 'created';
+const rw = await sb.from('warehouses').insert({ tenant_id: co.tenantId, company_id: cid, branch_id: branch?.id, code: 'LP' + stamp.slice(-6), name: 'Limit probe' }).select('id');
+probes.warehouse = rw.error ? rw.error.message : 'created';
+await q(`DELETE FROM public.customers WHERE company_id=$1 AND code=$2`, [cid, 'LP-' + stamp]);
+await q(`DELETE FROM public.warehouses WHERE company_id=$1 AND code=$2`, [cid, 'LP' + stamp.slice(-6)]);
+const enforced = planRow.plan_type === 'free';
+const mustRefuse = (have0: number, max: number) => enforced && max >= 0 && have0 >= max;
+const limitsOk = (mustRefuse(have.customers, planRow.max_customers) ? /PLAN_LIMIT_EXCEEDED: customers/.test(probes.customer) : probes.customer === 'created')
+  && (mustRefuse(have.warehouses, planRow.max_warehouses) ? /PLAN_LIMIT_EXCEEDED: warehouses/.test(probes.warehouse) : probes.warehouse === 'created');
+const limitsNote = `plan ${planRow.code}/${planRow.plan_type}: after the import customers ${have.customers}/${planRow.max_customers}, warehouses ${have.warehouses}/${planRow.max_warehouses}, invoices ${have.invoices}/${planRow.max_invoices_monthly}/month, documents(max ${planRow.max_documents}, enforced by nothing); `
+  + `the import itself was not refused; a NEW customer → ${probes.customer}; a NEW warehouse → ${probes.warehouse}`;
+log({ phase: 'limits', plan: planRow, have, probes });
 await pool.end();
 const srcD = Math.round(data.journalEntries.reduce((a: number, e: any) => a + (Number(e.totalDebit) || 0), 0) * 100) / 100;
 const srcC = Math.round(data.journalEntries.reduce((a: number, e: any) => a + (Number(e.totalCredit) || 0), 0) * 100) / 100;
@@ -107,4 +130,5 @@ if (r1.counts?.accounts !== leafExpected || r1.counts?.externalChartAccounts !==
 // header totals are rounded per entry, lines per account (the known one-cent carry): allow 2 cents over ~191 million
 if (Math.abs(Number(bal.d) - srcD) > 0.02 || Math.abs(Number(bal.c) - srcC) > 0.02) fail(`imported ledger totals ${bal.d}/${bal.c} differ from the file's ${srcD}/${srcC}`);
 if (cs.status !== 'active') fail(`company status ${cs.status} after completion`);
-console.log(`Rashid import OK: ${entries}/${parsed.entries} entries, ${r1.counts.accounts}/${leafExpected} accounts matched, base ${cs.base_currency}, ledger debit ${bal.d} credit ${bal.c} (= the file's ${srcD}/${srcC}), ${r1.counts.customers ?? ''} customers ${r1.counts.suppliers ?? ''} suppliers, ${sec}s`);
+if (!limitsOk) fail(`plan limits after the import are not enforced as expected: ${limitsNote}`);
+console.log(`Rashid import OK: ${entries}/${parsed.entries} entries, ${r1.counts.accounts}/${leafExpected} accounts matched, base ${cs.base_currency}, ledger debit ${bal.d} credit ${bal.c} (= the file's ${srcD}/${srcC}), ${r1.counts.customers ?? ''} customers ${r1.counts.suppliers ?? ''} suppliers, ${sec}s; ${limitsNote}`);

@@ -11,7 +11,9 @@
 --   capability_catalog (136)                              the ERP lab catalogue lab_1018_tpl (mirrors production through 2026-10-12)
 --   business_type_catalog (15)                           migration 20260915a_g2_company_setup_contract.sql
 --   modules / system_modules (34)                        src/config/modules.ts STATIC_MODULES (the canonical vocabulary)
---   roles (4 global), saas_products, subscription_plans  installer-owned defaults (plans are re-written from the license by plan-sync.js)
+--   roles (4 global), saas_products, subscription_plans  the production plan rows as of this release (owner-provided 2026-10-13): the app runs on
+--     them fully offline from the first launch; plan-sync.js replaces them with the control panel's catalogue whenever the cloud is reachable and never
+--     writes plan limits from code
 --
 -- Regenerate / extend: run the ERP's scripts/schema/export-reference-data.mjs against production (read-only) at the baseline
 -- re-cut and drop the output into supabase/baseline/reference_data.sql — scripts/sync-baseline.js pins and ships it.
@@ -230,14 +232,14 @@ SELECT 'texacore', 'TexaCore ERP', 'تيكساكور', ARRAY[]::text[], true
 WHERE NOT EXISTS (SELECT 1 FROM public.saas_products WHERE code = 'texacore');
 
 INSERT INTO public.subscription_plans (product_id, code, name_ar, name_en, plan_type, max_users, max_companies, max_branches, max_warehouses, max_products, max_invoices_monthly, max_customers, max_documents, max_images, max_records, storage_gb, included_modules, price_monthly, is_active, trial_days)
-SELECT (SELECT id FROM public.saas_products WHERE code = 'texacore'), 'free', 'مجاني إلى الأبد', 'Free Forever', 'free', 1, 1, 1, -1, -1, -1, -1, -1, -1, -1, -1, ARRAY['fabric', 'ai_analytics', 'general_trade', 'contracts']::text[], 0, true, 0
+SELECT (SELECT id FROM public.saas_products WHERE code = 'texacore'), 'free', 'مجاني إلى الأبد', 'Free Forever', 'free', 1, 1, 1, 1, -1, 200, 200, 500, -1, -1, 1, ARRAY['fabric', 'ai_analytics', 'general_trade', 'contracts']::text[], 0, true, 0
 WHERE NOT EXISTS (SELECT 1 FROM public.subscription_plans WHERE code = 'free');
 INSERT INTO public.subscription_plans (product_id, code, name_ar, name_en, plan_type, max_users, max_companies, max_branches, max_warehouses, max_products, max_invoices_monthly, max_customers, max_documents, max_images, max_records, storage_gb, included_modules, price_monthly, is_active, trial_days)
-SELECT (SELECT id FROM public.saas_products WHERE code = 'texacore'), 'texa-starter', 'الباقة الأساسية', 'Basic Plan', 'paid', 3, 1, 1, 2, 500, 500, -1, -1, -1, -1, 15, ARRAY['fabric', 'ai_analytics', 'general_trade', 'contracts', 'pbx']::text[], 19, true, 14
+SELECT (SELECT id FROM public.saas_products WHERE code = 'texacore'), 'texa-starter', 'الباقة الأساسية', 'Basic Plan', 'paid', 3, 1, 1, 2, 2000, 1000, -1, -1, -1, -1, 15, ARRAY['fabric', 'ai_analytics', 'general_trade', 'contracts', 'pbx']::text[], 19, true, 14
 WHERE NOT EXISTS (SELECT 1 FROM public.subscription_plans WHERE code = 'texa-starter');
 INSERT INTO public.subscription_plans (product_id, code, name_ar, name_en, plan_type, max_users, max_companies, max_branches, max_warehouses, max_products, max_invoices_monthly, max_customers, max_documents, max_images, max_records, storage_gb, included_modules, price_monthly, is_active, trial_days)
-SELECT (SELECT id FROM public.saas_products WHERE code = 'texacore'), 'texa-professional', 'الباقة الاحترافية', 'Professional Plan', 'paid', 10, 3, 5, 10, 5000, 500, -1, -1, -1, -1, 100, ARRAY['fabric', 'ai_analytics', 'general_trade', 'contracts', 'pbx', 'hr', 'manufacturing', 'e-commerce', 'exchange', 'website', 'gold', 'vehicles', 'doctors', 'restaurant']::text[], 29, true, 14
+SELECT (SELECT id FROM public.saas_products WHERE code = 'texacore'), 'texa-professional', 'الباقة الاحترافية', 'Professional Plan', 'paid', 10, 3, 5, 10, 20000, 5000, -1, -1, -1, -1, 100, ARRAY['fabric', 'ai_analytics', 'general_trade', 'contracts', 'pbx', 'hr', 'manufacturing', 'e-commerce', 'exchange', 'website', 'gold', 'vehicles', 'doctors', 'restaurant']::text[], 29, true, 14
 WHERE NOT EXISTS (SELECT 1 FROM public.subscription_plans WHERE code = 'texa-professional');
 INSERT INTO public.subscription_plans (product_id, code, name_ar, name_en, plan_type, max_users, max_companies, max_branches, max_warehouses, max_products, max_invoices_monthly, max_customers, max_documents, max_images, max_records, storage_gb, included_modules, price_monthly, is_active, trial_days)
-SELECT (SELECT id FROM public.saas_products WHERE code = 'texacore'), 'texa-enterprise', 'باقة المؤسسات', 'Enterprise Plan', 'paid', -1, -1, -1, -1, -1, 500, -1, -1, -1, -1, 300, ARRAY['fabric', 'ai_analytics', 'general_trade', 'contracts', 'pbx', 'hr', 'manufacturing', 'e-commerce', 'exchange', 'website', 'gold', 'vehicles', 'doctors', 'restaurant', 'growth-ai', 'inspiration_studio', 'component_lab']::text[], 49, true, 14
+SELECT (SELECT id FROM public.saas_products WHERE code = 'texacore'), 'texa-enterprise', 'باقة المؤسسات', 'Enterprise Plan', 'paid', -1, -1, -1, -1, -1, -1, -1, -1, -1, -1, 300, ARRAY['fabric', 'ai_analytics', 'general_trade', 'contracts', 'pbx', 'hr', 'manufacturing', 'e-commerce', 'exchange', 'website', 'gold', 'vehicles', 'doctors', 'restaurant', 'growth-ai', 'inspiration_studio', 'component_lab']::text[], 49, true, 14
 WHERE NOT EXISTS (SELECT 1 FROM public.subscription_plans WHERE code = 'texa-enterprise');

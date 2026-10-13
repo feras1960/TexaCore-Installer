@@ -62,7 +62,7 @@ function request(method, url, { headers = {}, body, timeout = 120000 } = {}) {
 }
 
 /** Start the installer headless in dev mode; resolves { child, ready } once E2E_READY is printed. */
-function startApp({ userData, license = 'free', logFile, appBinary = '' }) {
+function startApp({ userData, license = 'free', logFile, appBinary = '', extraEnv = {} }) {
   fs.mkdirSync(userData, { recursive: true });
   const out = fs.openSync(logFile, 'a');
   // appBinary = the PACKAGED app's executable (…/TexaCore ERP.app/Contents/MacOS/TexaCore ERP); otherwise Electron dev mode on this checkout
@@ -71,7 +71,7 @@ function startApp({ userData, license = 'free', logFile, appBinary = '' }) {
     env: {
       ...process.env,
       TEXACORE_HEADLESS: '1', TEXACORE_PORT_BASE: String(PORT_BASE), TEXACORE_USER_DATA: userData,
-      TEXACORE_TCDB_DIR: path.join(path.dirname(userData), 'restore-tcdb'), TEXACORE_STUB_TUNNEL: '1', TEXACORE_STUB_MDM: '1', TEXACORE_E2E_AUTOSTART: '1', TEXACORE_E2E_LICENSE: license,
+      TEXACORE_TCDB_DIR: path.join(path.dirname(userData), 'restore-tcdb'), TEXACORE_STUB_TUNNEL: '1', TEXACORE_STUB_MDM: '1', TEXACORE_E2E_AUTOSTART: '1', TEXACORE_E2E_LICENSE: license, ...extraEnv,
     },
   });
   const ready = new Promise((resolve, reject) => {

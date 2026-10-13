@@ -16,6 +16,7 @@ const { PORTS, harnessAllowed } = require('./ports');
 const bootstrap = require('./bootstrap');
 const { validateAdminPassword } = require('./admin-password');
 const netGuard = require('./net-guard');
+const functionPatches = require('./function-patches');
 
 // ─── Ports (defaults — TEXACORE_PORT_BASE moves the whole block; see ports.js) ───
 const PG_PORT = PORTS.pg;
@@ -408,6 +409,21 @@ class ServiceManager {
     finally { try { await client.end(); } catch { /* ignore */ } }
   }
 
+  /** fn(query) inside ONE transaction on one connection (BEGIN … COMMIT, ROLLBACK on error). */
+  async pgTransaction(fn) {
+    const { Client } = require('pg');
+    const client = new Client({ host: '127.0.0.1', port: PG_PORT, database: 'postgres', user: 'postgres' });
+    await client.connect();
+    try {
+      await client.query('BEGIN');
+      try {
+        const out = await fn((text, params = []) => client.query(text, params));
+        await client.query('COMMIT');
+        return out;
+      } catch (e) { try { await client.query('ROLLBACK'); } catch { /* connection gone */ } throw e; }
+    } finally { try { await client.end(); } catch { /* ignore */ } }
+  }
+
   // ─── Build the database (first run) ──────────────────────────
   // roles → GoTrue migrate (owns `auth`) → storage stubs → production baseline (2 passes) → installer extras →
   // reference data → verification → marker "ready". Grants and RLS stay exactly as the baseline creates them.
@@ -464,6 +480,14 @@ class ServiceManager {
     }
     await this.psqlExec(bootstrap.postBaselineSql());
 
+    // The import exemption (owner decision 2026-10-13) — the one sanctioned difference from the baseline's function bodies (see function-patches.js).
+    step('Applying the import exemption');
+    // (a negative-control run of the release check may switch the patch off — an isolated harness run only; never in a normal install)
+    const skipPatches = process.env.TEXACORE_SKIP_FUNCTION_PATCHES === '1' && harnessAllowed(require('electron').app.isPackaged);
+    const patches = skipPatches ? { applied: {}, already: [], skipped: [{ signature: '*', why: 'switched off for a control run' }] }
+      : await functionPatches.applyFunctionPatches((t, p) => this.pgQuery(t, p), (m) => console.log(m));
+    bootstrap.writeMarker(this.dataDir, { patchedFunctions: patches.applied, patchesSkipped: patches.skipped });
+
     step('Verifying the database');
     const v = await this.verifyBaselineInstall();
     if (!v.ok) {
@@ -499,7 +523,8 @@ class ServiceManager {
       SELECT n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')' AS sig, md5(p.prosrc) AS md5
         FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
        WHERE n.nspname = ANY($1) AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid=p.oid AND d.deptype='e')`, [schemas]);
-    const cmp = bootstrap.compareFunctionInventory(inv.functions_md5, fn.rows);
+    const patched = (bootstrap.readMarker(this.dataDir) || {}).patchedFunctions || {};
+    const cmp = bootstrap.compareFunctionInventory(inv.functions_md5, fn.rows, patched);
     if (!cmp.ok) {
       problems.push(`functions: ${cmp.missing.length} missing, ${cmp.extra.length} extra, ${cmp.mismatched.length} differ (e.g. ${[...cmp.missing, ...cmp.extra, ...cmp.mismatched][0]})`);
     }

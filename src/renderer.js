@@ -105,6 +105,7 @@ async function refreshStatus() {
     // The employee link's company-id fetch can miss on first paint (before the DB
     // is up). While the cloud box is shown and the link is still the bare fallback
     // (no ?c=), re-resolve it each poll until the short code lands, then stop.
+    refreshEmployeesBox(state);
     const empEl = document.getElementById('employee-url');
     if (state.config && state.config.subdomain && empEl && !String(empEl.dataset.url || '').includes('?c=')) {
       setEmployeeLink(state.config.subdomain);
@@ -642,6 +643,101 @@ async function copyEmployeeUrl() {
     btn.textContent = t('cloud.copied');
     setTimeout(() => { btn.textContent = t('cloud.copyLink'); }, 1500);
   }
+}
+
+
+// ─── Employees (LAN link + add an employee on this machine) ──────────────────
+let _empCompanies = [];
+let _empRefreshing = false;
+let _empLast = 0;
+function lanEmployeeLink(state, companyId) {
+  const ip = state && state.localIp;
+  if (!ip || !companyId) return '';
+  const port = (state.config && state.config.port) || 80;
+  return `http://${ip}${port === 80 ? '' : ':' + port}/login?c=${String(companyId).split('-')[0]}`;
+}
+async function refreshEmployeesBox(state) {
+  const box = document.getElementById('employees-box');
+  if (!box || _empRefreshing) return;
+  if (_empCompanies.length && Date.now() - _empLast < 30000) return;     // the company list rarely changes; the poll runs every ~5 s
+  _empRefreshing = true;
+  _empLast = Date.now();
+  try {
+    const r = await window.texacore.listLocalCompanies();
+    const companies = (r && r.success && r.companies) || [];
+    if (!companies.length) { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    const sel = document.getElementById('emp-company');
+    const sameList = JSON.stringify(companies.map((c) => c.id)) === JSON.stringify(_empCompanies.map((c) => c.id));
+    if (!sameList) {
+      _empCompanies = companies;
+      const keep = sel.value;
+      sel.innerHTML = '';
+      for (const c of companies) { const o = document.createElement('option'); o.value = c.id; o.textContent = c.name; sel.appendChild(o); }
+      if (keep && companies.some((c) => c.id === keep)) sel.value = keep;
+      await loadEmployeeRoles();
+    }
+    const url = lanEmployeeLink(state || currentState, sel.value);
+    const a = document.getElementById('lan-employee-url');
+    a.textContent = url || '—'; a.dataset.url = url;
+  } catch { /* services may be down */ } finally { _empRefreshing = false; }
+}
+async function loadEmployeeRoles() {
+  const sel = document.getElementById('emp-role');
+  const cid = document.getElementById('emp-company').value;
+  sel.innerHTML = '';
+  if (!cid) return;
+  const r = await window.texacore.listEmployeeRoles(cid);
+  const lang = (typeof CURRENT_LANG === 'string' && CURRENT_LANG) || 'en';
+  const roles = (r && r.roles) || [];
+  const hint = document.getElementById('emp-roles-hint');
+  if (hint) hint.style.display = roles.some((x) => !/^(company_owner|tenant_owner|tenant_admin)$/.test(x.code)) ? 'none' : 'block';
+  for (const role of roles) {
+    const o = document.createElement('option'); o.value = role.id;
+    o.textContent = (lang === 'ar' ? role.name_ar : role.name_en) || role.name_en || role.name_ar || role.code;
+    sel.appendChild(o);
+  }
+}
+async function onEmployeeCompanyChange() { await loadEmployeeRoles(); await refreshEmployeesBox(currentState); }
+function openLanEmployeeUrl() { const u = document.getElementById('lan-employee-url')?.dataset.url; if (u) texacore.openBrowser(u); }
+async function copyText(text) {
+  try { await navigator.clipboard.writeText(text); } catch {
+    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+  }
+}
+async function copyLanEmployeeUrl() {
+  const u = document.getElementById('lan-employee-url')?.dataset.url;
+  if (!u) return;
+  await copyText(u);
+  const btn = document.getElementById('copy-lan-employee-url');
+  if (btn) { btn.textContent = t('emp.copied'); setTimeout(() => { btn.textContent = t('emp.copy'); }, 1500); }
+}
+async function addEmployee() {
+  const out = document.getElementById('emp-result');
+  const btn = document.getElementById('btn-add-employee');
+  const data = {
+    companyId: document.getElementById('emp-company').value, roleId: document.getElementById('emp-role').value,
+    fullName: document.getElementById('emp-name').value.trim(), email: document.getElementById('emp-email').value.trim(),
+  };
+  const show = (html, color) => { out.style.display = 'block'; out.style.color = color || 'inherit'; out.innerHTML = html; };
+  const esc = (v) => String(v).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
+  if (!data.companyId) { show(esc(t('emp.noCompany')), 'var(--danger)'); return; }
+  btn.disabled = true;
+  try {
+    const r = await window.texacore.inviteEmployee(data);
+    if (!r || !r.success) {
+      const msg = r && r.code === 'PLAN_LIMIT_EXCEEDED' ? t('emp.errLimit') : (r && r.code === 'EMAIL_EXISTS' ? t('emp.errExists') : `${t('emp.errGeneric')} ${esc((r && r.error) || '')}`);
+      show(esc(msg), 'var(--danger)');
+      return;
+    }
+    const link = lanEmployeeLink(currentState, r.companyId);
+    show(`<div style="font-weight:700; color:#16a34a;">${esc(t('emp.created'))}: ${esc(r.fullName)} — ${esc(r.email)}</div>
+      <div style="margin-top:6px;">${esc(t('emp.otp'))}</div>
+      <div style="font-family:monospace; font-size:18px; font-weight:700; letter-spacing:1px; user-select:all;" dir="ltr">${esc(r.oneTimePassword)}</div>
+      <div style="color:var(--text-muted); margin-top:4px;">${esc(t('emp.otpHint'))}</div>
+      ${link ? `<div style="margin-top:6px; font-family:monospace; word-break:break-all;" dir="ltr">${esc(link)}</div>` : ''}`);
+    document.getElementById('emp-name').value = ''; document.getElementById('emp-email').value = '';
+  } catch (e) { show(`${esc(t('emp.errGeneric'))} ${esc(e.message)}`, 'var(--danger)'); } finally { btn.disabled = false; }
 }
 
 // ─── Cloud Logic ─────────────────────────────────────────────

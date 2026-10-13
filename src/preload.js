@@ -7,6 +7,8 @@ contextBridge.exposeInMainWorld('texacore', {
   // The secret the local admin API (127.0.0.1) requires on every call but /api/ping
   getLocalApiSecret: () => ipcRenderer.sendSync('get-local-api-secret'),
   listLocalCompanies: () => ipcRenderer.invoke('list-local-companies'),
+  inviteEmployee: (data) => ipcRenderer.invoke('invite-employee', data),
+  listEmployeeRoles: (companyId) => ipcRenderer.invoke('list-employee-roles', companyId),
 
   // Version
   getVersion: () => ipcRenderer.invoke('get-version'),

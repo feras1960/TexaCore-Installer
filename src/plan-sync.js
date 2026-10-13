@@ -1,20 +1,29 @@
 'use strict';
 // ════════════════════════════════════════════════════════════════
-// plan-sync — align the LOCAL database to the license: plan row → tenant subscription → (trigger) tenant_modules.
+// plan-sync — the LOCAL database follows the plan the control panel manages: plan row → tenant subscription → (trigger) tenant_modules.
 //
-// What 1.x got wrong (both found on real installs):
-//   * It only UPDATEd subscription_plans WHERE code = <tier> and returned silently when the row was missing — a fresh
-//     install seeds just 'free', so a trial/pro license changed nothing.
-//   * It called public.apply_tenant_plan(), which has never existed on this schema — so NO plan gating ever worked.
-// 2.0.0: the plan row for the license's tier is INSERTed or UPDATEd from the license (cloud row when online — the heartbeat
-// has already written it to the cached license — or the cached copy offline), then every tenant's subscription is pointed at it.
-// The server does the rest: trg_tenant_sub_modules_sync → sync_tenant_plan_modules() rebuilds tenant_modules from the plan's
-// included_modules + the registry's core modules. A trial gets the Professional plan with a real end date (the countdown).
+// Where plan LIMITS and MODULES come from (owner decision 2026-10-13: never hard-coded in this program):
+//   1. first run     — the plan rows bundled with the installer (src/bootstrap/reference_seed.sql: the production subscription_plans as of the
+//                      release). The app installs and runs fully OFFLINE from the first launch on these.
+//   2. every sync    — when the cloud is reachable, the control panel's plan catalogue (public subscription_plans, anon read) is UPSERTed
+//                      into the local table: changed limits/modules AND plans the licence points to that the local copy has never seen.
+//   3. offline later — nothing is written: the local rows ARE the last synced values (they live in the install's own database), so an
+//                      offline start can never fall back to anything older.
+//   Enforcement is the server's own: the same triggers/functions production runs (enforce_plan_limit → check_plan_limits) read these
+//   rows. This module only keeps the rows (and the tenant's subscription) equal to the control panel.
+//
+// Per-licence settings the control panel can also set (licensing_get_license_state): `plan_code` (the plan the licence points at BY NAME),
+// `custom_limits` (this licence's own max_users/max_companies/max_warehouses/max_storage_gb apply instead of the plan's) and
+// `modules_admin_set` + `enabled_modules` (an explicit module grant). Anything else about limits comes from the plan.
+//
+// What 1.x got wrong (both found on real installs): it only UPDATEd subscription_plans WHERE code = <tier> and returned silently when the
+// row was missing, and it called public.apply_tenant_plan(), which has never existed on this schema — so NO plan gating ever worked.
 //
 // Pure SQL-building and decisions live here (testable); the caller supplies pgQuery.
 // ════════════════════════════════════════════════════════════════
 
-/** licensing tier → plan code. Mirrors licensing.fn_plan_code_for_tier() on production (unknown → free, never fail open). */
+/** licensing tier → plan code. Mirrors licensing.fn_plan_code_for_tier() on production (unknown → free, never fail open). Used only when
+ *  the licence carries no plan_code (older licences). */
 function planCodeForTier(tier) {
   switch (tier) {
     case 'free': return 'free';
@@ -27,68 +36,104 @@ function planCodeForTier(tier) {
   }
 }
 
-// Module sets by plan. Core modules (dashboard, accounting, inventory, sales, purchases, crm, …) come from the registry
-// (modules.is_core) and are always on; these are the NON-core ones each plan adds. 'fabric' is in every plan: a Rashid
-// fabric import writes materials/rolls through it (a materials import is refused with 403 without it).
-const FREE_MODULES = ['fabric', 'ai_analytics', 'general_trade', 'contracts'];
-const STARTER_MODULES = [...FREE_MODULES, 'pbx'];
-const PRO_MODULES = [...STARTER_MODULES, 'hr', 'manufacturing', 'e-commerce', 'exchange', 'website', 'gold', 'vehicles', 'doctors', 'restaurant'];
-const ENTERPRISE_MODULES = [...PRO_MODULES, 'growth-ai', 'inspiration_studio', 'component_lab'];
-
-const PLAN_DEFAULTS = {
-  free: { name_ar: 'مجاني إلى الأبد', name_en: 'Free Forever', plan_type: 'free', price_monthly: 0, trial_days: 0,
-    // 2.0.0: free is limited by WHO uses it (1 user, 1 company, 1 branch), not by how much data one company holds. The free-plan
-    // triggers (enforce_plan_limit) count rows, and a Rashid import writes thousands of invoices / materials / customers and
-    // several warehouses at once — a "200 invoices, 1 warehouse" cap made the first import fail half-way (PLAN_LIMIT_EXCEEDED:
-    // warehouses 1/1, inventory opening movements never written). See FREE_IMPORT_FLOOR.
-    limits: { max_users: 1, max_companies: 1, max_branches: 1, max_warehouses: -1, max_products: -1, max_invoices_monthly: -1, max_customers: -1, max_documents: -1, max_images: -1, max_records: -1, storage_gb: -1 },
-    modules: FREE_MODULES },
-  'texa-starter': { name_ar: 'الباقة الأساسية', name_en: 'Basic Plan', plan_type: 'paid', price_monthly: 19, trial_days: 14,
-    limits: { max_users: 3, max_companies: 1, max_branches: 1, max_warehouses: 2, max_products: 500, max_invoices_monthly: 500, max_customers: -1, max_documents: -1, max_images: -1, max_records: -1, storage_gb: 15 },
-    modules: STARTER_MODULES },
-  'texa-professional': { name_ar: 'الباقة الاحترافية', name_en: 'Professional Plan', plan_type: 'paid', price_monthly: 29, trial_days: 14,
-    limits: { max_users: 10, max_companies: 3, max_branches: 5, max_warehouses: 10, max_products: 5000, max_invoices_monthly: 500, max_customers: -1, max_documents: -1, max_images: -1, max_records: -1, storage_gb: 100 },
-    modules: PRO_MODULES },
-  'texa-enterprise': { name_ar: 'باقة المؤسسات', name_en: 'Enterprise Plan', plan_type: 'paid', price_monthly: 49, trial_days: 14,
-    limits: { max_users: -1, max_companies: -1, max_branches: -1, max_warehouses: -1, max_products: -1, max_invoices_monthly: 500, max_customers: -1, max_documents: -1, max_images: -1, max_records: -1, storage_gb: 300 },
-    modules: ENTERPRISE_MODULES },
-};
-
-// Whatever the license or the cloud package says, a FREE install never caps the volume of data a company can hold below what an import needs.
-// (users / companies / branches still follow the license and the cloud package.) -1 = unlimited.
-const FREE_IMPORT_FLOOR = ['max_warehouses', 'max_products', 'max_invoices_monthly', 'max_customers', 'max_documents'];
-
-const LIMIT_COLS = ['max_users', 'max_companies', 'max_branches', 'max_warehouses', 'max_products', 'max_invoices_monthly', 'max_customers', 'max_documents', 'max_images', 'max_records', 'storage_gb'];
+const PLAN_CODE = /^[A-Za-z0-9_-]{1,50}$/;
 const MODULE_CODE = /^[a-zA-Z0-9_-]{1,50}$/;
 
-const int = (v) => { const n = Number.parseInt(v, 10); return Number.isFinite(n) ? n : null; };
+// The columns of subscription_plans the control panel manages (a whitelist: column NAMES go into SQL text, values are bound).
+const LIMIT_COLS = ['max_users', 'max_companies', 'max_branches', 'max_warehouses', 'max_products', 'max_invoices_monthly', 'max_customers',
+  'max_documents', 'max_images', 'max_records', 'max_extensions', 'max_ai_agents', 'storage_gb'];
+const INT_COLS = [...LIMIT_COLS, 'trial_days', 'display_order', 'grace_period_days'];
+const NUMERIC_COLS = ['price_monthly', 'price_yearly'];
+const TEXT_COLS = ['name_ar', 'name_en', 'description', 'description_ar', 'plan_type', 'currency'];
+const BOOL_COLS = ['is_active', 'is_popular'];
+const PLAN_COLS = [...TEXT_COLS, ...INT_COLS, ...NUMERIC_COLS, ...BOOL_COLS, 'included_modules', 'features'];
+
+const toInt = (v) => {
+  if (v === null || v === undefined || v === '') return null;
+  const n = Number(v);
+  return Number.isInteger(n) && n >= -1 && n <= 2147483647 ? n : null;
+};
+const toNum = (v) => { if (v === null || v === undefined || v === '') return null; const n = Number(v); return Number.isFinite(n) && n >= 0 && n < 1e8 ? n : null; };
+
+/** A cloud subscription_plans row → { code, cols } of validated values, or null when it cannot be a plan row. Unknown/invalid fields are dropped. */
+function normalizeCloudPlan(row) {
+  if (!row || typeof row !== 'object' || typeof row.code !== 'string' || !PLAN_CODE.test(row.code)) return null;
+  const cols = {};
+  for (const k of INT_COLS) { const n = toInt(row[k]); if (n !== null) cols[k] = n; }
+  for (const k of NUMERIC_COLS) { const n = toNum(row[k]); if (n !== null) cols[k] = n; }
+  for (const k of TEXT_COLS) if (typeof row[k] === 'string' && row[k].length <= 2000) cols[k] = row[k];
+  for (const k of BOOL_COLS) if (typeof row[k] === 'boolean') cols[k] = row[k];
+  if (Array.isArray(row.included_modules)) cols.included_modules = [...new Set(row.included_modules.filter((m) => typeof m === 'string' && MODULE_CODE.test(m)))];
+  if (row.features && typeof row.features === 'object' && !Array.isArray(row.features)) cols.features = row.features;
+  if (!cols.name_ar) cols.name_ar = cols.name_en || row.code;      // NOT NULL on the table
+  if (cols.plan_type && cols.plan_type.length > 20) delete cols.plan_type;
+  if (cols.currency && cols.currency.length > 3) delete cols.currency;
+  return { code: row.code, cols };
+}
 
 /**
- * The plan row for this license.
- *   license  — the (cloud or cached) license object: tier, max_users, max_companies, max_warehouses, max_storage_gb,
- *              enabled_modules + modules_admin_set (an admin's explicit per-license module grant)
- *   cloudPlan — optional: the cloud package row for the same code (fills the limits a license does not carry)
- * Precedence per limit: license value → cloud package → built-in default. A license value of null/undefined is "not set".
+ * Run fn(query) so that a write to an EXISTING plan row carries the control panel's confirmation. Production guards subscription_plans
+ * (licensing.trg_plan_guard): lowering a mirrored limit or deactivating a plan in use is refused unless the transaction carries
+ * `texacore.plan_change_confirmed = <that plan's id>` (what console_update_subscription_plan sets after the operator confirmed). A change that
+ * arrives from the control panel HAS been confirmed there; this local copy simply follows it. Same transaction, bound to that one plan id.
  */
-function buildPlanSpec({ tier, license = null, cloudPlan = null }) {
-  const code = planCodeForTier(tier);
-  const base = PLAN_DEFAULTS[code];
-  const limits = { ...base.limits };
-  if (cloudPlan) for (const k of LIMIT_COLS) { const n = int(cloudPlan[k]); if (n !== null) limits[k] = n; }
-  if (license) {
+async function confirmedPlanWrite(tx, planCode, fn) {
+  return tx(async (q) => {
+    const ex = await q('SELECT id FROM public.subscription_plans WHERE code = $1', [planCode]);
+    if (ex.rowCount) await q(`SELECT set_config('texacore.plan_change_confirmed', $1::text, true)`, [ex.rows[0].id]);
+    return fn(q);
+  });
+}
+const asTx = (pgQuery, pgTx) => pgTx || (async (fn) => fn(pgQuery));
+
+/** Insert-or-update ONE plan row from a normalised cloud plan. Only the columns the cloud row carried are written. Returns the plan id. */
+async function upsertCloudPlan(pgQuery, plan, pgTx) {
+  const names = Object.keys(plan.cols);
+  for (const n of names) if (!PLAN_COLS.includes(n)) throw new Error(`plan column not allowed: ${n}`);
+  const params = [plan.code];
+  const ph = (v, cast = '') => { params.push(v); return `$${params.length}${cast}`; };
+  const values = names.map((n) => (n === 'included_modules' ? ph(plan.cols[n], '::text[]') : n === 'features' ? ph(JSON.stringify(plan.cols[n]), '::jsonb') : ph(plan.cols[n])));
+  const sets = names.map((n) => `${n} = EXCLUDED.${n}`);
+  const r = await confirmedPlanWrite(asTx(pgQuery, pgTx), plan.code, (q) => q(
+    `INSERT INTO public.subscription_plans (product_id, code${names.length ? ', ' + names.join(', ') : ''})
+     VALUES ((SELECT id FROM public.saas_products WHERE code = 'texacore' LIMIT 1), $1${values.length ? ', ' + values.join(', ') : ''})
+     ON CONFLICT (code) DO UPDATE SET ${[...sets, 'updated_at = now()'].join(', ')}
+     RETURNING id`, params));
+  return r.rows[0].id;
+}
+
+/** The local plan row for a code (limits + modules), or null. */
+async function readPlan(pgQuery, code) {
+  const r = await pgQuery(
+    `SELECT id, code, plan_type, ${LIMIT_COLS.join(', ')}, included_modules FROM public.subscription_plans WHERE code = $1 LIMIT 1`, [code]);
+  return r.rows[0] || null;
+}
+
+/**
+ * Per-licence settings applied on top of the plan row (the control panel sets them per licence):
+ *   custom_limits === true → this licence's own max_users / max_companies / max_warehouses / max_storage_gb replace the plan's
+ *   modules_admin_set === true → the licence's enabled_modules replace the plan's included_modules
+ * Re-applied on every sync (idempotent) and reset to the plan's values by the next catalogue sync that no longer carries them.
+ */
+async function applyLicenseOverrides(pgQuery, planId, license, pgTx) {
+  if (!license) return [];
+  const sets = []; const params = [planId]; const applied = [];
+  if (license.custom_limits === true) {
     for (const [lk, pk] of [['max_users', 'max_users'], ['max_companies', 'max_companies'], ['max_warehouses', 'max_warehouses'], ['max_storage_gb', 'storage_gb']]) {
-      const n = int(license[lk]); if (n !== null) limits[pk] = n;
+      const n = toInt(license[lk]);
+      if (n !== null) { params.push(n); sets.push(`${pk} = $${params.length}`); applied.push(pk); }
     }
   }
-  if (code === 'free') for (const k of FREE_IMPORT_FLOOR) limits[k] = -1;
-  let modules = base.modules;
-  let moduleSource = 'plan-default';
-  if (cloudPlan && Array.isArray(cloudPlan.included_modules) && cloudPlan.included_modules.length) { modules = cloudPlan.included_modules; moduleSource = 'cloud-plan'; }
-  if (license && license.modules_admin_set === true && Array.isArray(license.enabled_modules) && license.enabled_modules.length) {
-    modules = license.enabled_modules; moduleSource = 'admin-grant';
+  if (license.modules_admin_set === true && Array.isArray(license.enabled_modules) && license.enabled_modules.length) {
+    const mods = [...new Set(license.enabled_modules.filter((m) => typeof m === 'string' && MODULE_CODE.test(m)))];
+    if (mods.length) { params.push(mods); sets.push(`included_modules = $${params.length}::text[]`); applied.push('included_modules'); }
   }
-  modules = [...new Set(modules.filter((m) => typeof m === 'string' && MODULE_CODE.test(m)))];
-  return { code, tier, ...base, limits, modules, moduleSource };
+  if (!sets.length) return [];
+  await asTx(pgQuery, pgTx)(async (q) => {
+    await q(`SELECT set_config('texacore.plan_change_confirmed', $1::text, true)`, [planId]);
+    return q(`UPDATE public.subscription_plans SET ${sets.join(', ')}, updated_at = now() WHERE id = $1`, params);
+  });
+  return applied;
 }
 
 /** The subscription row's status and dates for a tier. `today` is injectable for tests (ISO date). */
@@ -111,28 +156,6 @@ function subscriptionDates({ tier, license, today = new Date().toISOString().sli
     : { status: 'active', start_date: startFixed, end_date: exp, trial_end_date: null };
 }
 
-/** Insert-or-update the plan row. Returns the plan id. */
-async function upsertPlan(pgQuery, spec) {
-  const L = spec.limits;
-  const r = await pgQuery(
-    `INSERT INTO public.subscription_plans
-       (product_id, code, name_ar, name_en, plan_type, max_users, max_companies, max_branches, max_warehouses, max_products,
-        max_invoices_monthly, max_customers, max_documents, max_images, max_records, storage_gb, included_modules, price_monthly,
-        is_active, trial_days)
-     VALUES ((SELECT id FROM public.saas_products WHERE code = 'texacore' LIMIT 1), $1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11, $12, $13, $14, $15,
-             $16::text[], $17, true, $18)
-     ON CONFLICT (code) DO UPDATE SET
-       plan_type = EXCLUDED.plan_type, max_users = EXCLUDED.max_users, max_companies = EXCLUDED.max_companies,
-       max_branches = EXCLUDED.max_branches, max_warehouses = EXCLUDED.max_warehouses, max_products = EXCLUDED.max_products,
-       max_invoices_monthly = EXCLUDED.max_invoices_monthly, max_customers = EXCLUDED.max_customers,
-       max_documents = EXCLUDED.max_documents, max_images = EXCLUDED.max_images, max_records = EXCLUDED.max_records,
-       storage_gb = EXCLUDED.storage_gb, included_modules = EXCLUDED.included_modules, is_active = true, updated_at = now()
-     RETURNING id`,
-    [spec.code, spec.name_ar, spec.name_en, spec.plan_type, L.max_users, L.max_companies, L.max_branches, L.max_warehouses, L.max_products,
-      L.max_invoices_monthly, L.max_customers, L.max_documents, L.max_images, L.max_records, L.storage_gb, spec.modules, spec.price_monthly, spec.trial_days]);
-  return r.rows[0].id;
-}
-
 /** Point a tenant's live subscription at the plan (update the newest live row, else insert). The module trigger does the rest. */
 async function pointTenantAtPlan(pgQuery, tenantId, planId, dates) {
   const up = await pgQuery(
@@ -151,23 +174,42 @@ async function pointTenantAtPlan(pgQuery, tenantId, planId, dates) {
 }
 
 /**
- * The whole sync. deps: { pgQuery, log }.  input: { tier, license, cloudPlan, tenantId? (default: every tenant) }.
- * Each step is its own statement (no swallowed failure hides the next one); it THROWS when the plan cannot be written —
- * callers decide whether that is fatal (company creation: yes; a heartbeat: log and retry next beat).
+ * The whole sync. deps: { pgQuery, log }.
+ * input: { tier, license, cloudPlans, tenantId? (default: every tenant), forceTier?, today? }
+ *   cloudPlans — the control panel's plan rows when the cloud answered, else null/[] (offline: the local rows are used as they are)
+ *   forceTier  — plan by tier only, ignoring the licence's plan_code/custom_limits (the user chose Free: a cloud 'trial' must not override it)
+ * Throws when no plan row exists at all; callers decide whether that is fatal (company creation: yes; a heartbeat: log and retry).
  */
-async function syncActivePlan({ pgQuery, log = () => {} }, { tier, license = null, cloudPlan = null, tenantId = null, today }) {
-  const spec = buildPlanSpec({ tier, license, cloudPlan });
-  const planId = await upsertPlan(pgQuery, spec);
+async function syncActivePlan({ pgQuery, pgTx, log = () => {} }, { tier, license = null, cloudPlans = null, tenantId = null, today, forceTier = false }) {
+  let catalogue = 0;
+  if (Array.isArray(cloudPlans)) {
+    for (const row of cloudPlans) {
+      const plan = normalizeCloudPlan(row);
+      if (!plan) continue;
+      try { await upsertCloudPlan(pgQuery, plan, pgTx); catalogue += 1; } catch (e) { log(`[Plan] catalogue row "${plan.code}" skipped: ${e.message}`); }
+    }
+  }
+  const lic = forceTier ? null : license;
+  const wanted = (lic && typeof lic.plan_code === 'string' && PLAN_CODE.test(lic.plan_code)) ? lic.plan_code : planCodeForTier(tier);
+  let code = wanted;
+  let plan = await readPlan(pgQuery, wanted);
+  if (!plan) {
+    log(`[Plan] the licence points at "${wanted}" which this copy has not synced yet — using the free plan until it can`);
+    code = 'free';
+    plan = await readPlan(pgQuery, 'free');
+    if (!plan) throw new Error('no free plan row in this database');
+  }
+  const overrides = await applyLicenseOverrides(pgQuery, plan.id, forceTier ? null : license, pgTx);
   const dates = subscriptionDates({ tier, license, today });
   const tenants = tenantId
     ? [{ id: tenantId }]
     : (await pgQuery('SELECT id FROM public.tenants WHERE deleted_at IS NULL')).rows;
-  for (const t of tenants) await pointTenantAtPlan(pgQuery, t.id, planId, dates);
-  log(`[Plan] tier=${tier} → ${spec.code} (${spec.moduleSource}), ${tenants.length} tenant(s), subscription ${dates.status}${dates.trial_end_date ? ' until ' + dates.trial_end_date : ''}`);
-  return { planId, code: spec.code, dates, tenants: tenants.length, modules: spec.modules, limits: spec.limits };
+  for (const t of tenants) await pointTenantAtPlan(pgQuery, t.id, plan.id, dates);
+  log(`[Plan] tier=${tier} → ${code}${code !== wanted ? ` (wanted ${wanted})` : ''}; catalogue ${Array.isArray(cloudPlans) ? `synced ${catalogue}/${cloudPlans.length}` : 'offline (last synced values kept)'}${overrides.length ? '; licence overrides: ' + overrides.join(',') : ''}; ${tenants.length} tenant(s), subscription ${dates.status}${dates.trial_end_date ? ' until ' + dates.trial_end_date : ''}`);
+  return { planId: plan.id, code, wanted, dates, tenants: tenants.length, catalogue, overrides, online: Array.isArray(cloudPlans) };
 }
 
 module.exports = {
-  planCodeForTier, buildPlanSpec, subscriptionDates, upsertPlan, pointTenantAtPlan, syncActivePlan,
-  PLAN_DEFAULTS, FREE_MODULES, FREE_IMPORT_FLOOR, LIMIT_COLS,
+  planCodeForTier, normalizeCloudPlan, upsertCloudPlan, readPlan, applyLicenseOverrides, subscriptionDates, pointTenantAtPlan, syncActivePlan,
+  LIMIT_COLS, PLAN_COLS,
 };

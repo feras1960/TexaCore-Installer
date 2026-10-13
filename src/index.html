@@ -184,6 +184,32 @@
         <input type="number" id="input-port" value="80" class="input input-small" dir="ltr" min="1" max="65535">
       </div>
 
+      <!-- Employees: the LAN link + add an employee on this machine (local admin only; the one-time password is shown once) -->
+      <div class="cloud-box" id="employees-box" style="display:none; margin-bottom:16px;">
+        <div class="cloud-header">
+          <div>
+            <h3 data-i18n="emp.title">👥 الموظفون</h3>
+            <p data-i18n="emp.subtitle">أضف موظفاً على هذا الجهاز؛ يدخل من شبكتك المحلية بالرابط أدناه.</p>
+          </div>
+        </div>
+        <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-top:12px;">
+          <div style="font-size:11px; color:var(--text-muted); margin-bottom:6px; font-weight:600;" data-i18n="emp.lanLink">رابط الموظفين داخل الشبكة المحلية:</div>
+          <div style="display:flex; align-items:center; gap:8px; justify-content:center; flex-wrap:wrap;">
+            <a href="#" id="lan-employee-url" style="color:#16a34a; font-family:monospace; font-size:13px; font-weight:bold; text-decoration:none; word-break:break-all;" onclick="openLanEmployeeUrl(); return false;" dir="ltr">—</a>
+            <button id="copy-lan-employee-url" onclick="copyLanEmployeeUrl()" style="flex-shrink:0; background:var(--accent); color:#fff; border:none; border-radius:6px; padding:5px 12px; font-size:11px; font-weight:600; cursor:pointer;" data-i18n="emp.copy">نسخ</button>
+          </div>
+        </div>
+        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:12px;">
+          <select id="emp-company" class="input input-small" style="height:38px;" onchange="onEmployeeCompanyChange()"></select>
+          <select id="emp-role" class="input input-small" style="height:38px;"></select>
+          <input type="text" id="emp-name" class="input input-small" style="height:38px;" placeholder="الاسم الكامل" data-i18n-ph="emp.name">
+          <input type="email" id="emp-email" class="input input-small" style="height:38px;" dir="ltr" placeholder="name@company.com">
+        </div>
+        <div id="emp-roles-hint" style="display:none; font-size:11px; color:var(--text-muted); margin-top:6px;" data-i18n="emp.rolesHint"></div>
+        <button class="btn btn-primary" id="btn-add-employee" style="margin-top:10px; width:100%; height:40px; font-size:13px;" onclick="addEmployee()" data-i18n="emp.add">إضافة الموظف</button>
+        <div id="emp-result" style="display:none; margin-top:10px; font-size:12px;"></div>
+      </div>
+
       <!-- Cloud config -->
       <div class="cloud-box" id="cloud-box">
         <div class="cloud-header">

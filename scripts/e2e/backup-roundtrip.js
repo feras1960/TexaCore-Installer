@@ -34,7 +34,8 @@ const integrity = async () => {
   const inv = JSON.parse(fs.readFileSync(path.join(ROOT, 'baseline', 'production_baseline.inventory.json'), 'utf8'));
   const rows = (await pg(`SELECT n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')' AS sig, md5(p.prosrc) AS md5 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
                            WHERE n.nspname IN ('public','licensing','newpost','tomgenerators') AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid=p.oid AND d.deptype='e')`)).rows;
-  const fn = bootstrap.compareFunctionInventory(inv.functions_md5, rows);
+  const marker = JSON.parse(fs.readFileSync(path.join(userData, 'texacore-data', 'bootstrap.json'), 'utf8'));
+  const fn = bootstrap.compareFunctionInventory(inv.functions_md5, rows, marker.patchedFunctions || {});
   const rls = (await pg(`SELECT count(*)::int n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('public','licensing','newpost','tomgenerators') AND c.relkind IN ('r','p') AND c.relrowsecurity`)).rows[0].n;
   const open = (await pg(`SELECT count(*)::int n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity AND has_table_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE,DELETE')`)).rows[0].n;
   const anonGrants = (await pg(`SELECT count(*)::int n FROM information_schema.role_table_grants WHERE grantee='anon' AND table_schema='public'`)).rows[0].n;

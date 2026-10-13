@@ -14,6 +14,7 @@ const { MacUpdater, applyUpdateEvent } = require('./mac-updater');
 const ServiceManager = require('./service-manager');
 const LicenseGuard = require('./license-guard');
 const netGuard = require('./net-guard');
+const cloudClient = require('./cloud-client');
 const BackupManager = require('./backup-manager');
 const { RsfReader, detectFileType } = require('./rsf-reader');
 const { RsfExporter, RsfSyncManager } = require('./rsf-exporter');
@@ -65,6 +66,8 @@ process.on('unhandledRejection', (reason) => {
 // ─── Constants ───────────────────────────────────────────────
 const LICENSING_URL = 'https://wzkklenfsaepegymfxfz.supabase.co/functions/v1';
 const SUPABASE_URL = 'wzkklenfsaepegymfxfz.supabase.co';
+// Where "the cloud" is for this process: production, a loopback MOCK (isolated harness runs only), or off (headless harness without a mock).
+const CLOUD = cloudClient.resolveTarget({ harnessOk: HARNESS_OK, headless: process.env.TEXACORE_HEADLESS === '1', env: process.env, prod: { hostname: SUPABASE_URL } });
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6a2tsZW5mc2FlcGVneW1meGZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg3NTIxNzcsImV4cCI6MjA4NDMyODE3N30.ATYSK_WvOfbqEaInbg5nKau-wgixF0lIGaue3m8AJtI';
 const APP_PORT = PORTS.custom ? PORTS.ui : 8080;
 
@@ -347,24 +350,10 @@ function httpPost(url, data) {
 // POST to a cloud PostgREST RPC (adds the anon-key headers that httpPost omits).
 // Used to tag/prune cloud backups per company after an upload.
 function httpPostRpc(rpcName, data) {
-  return new Promise((resolve, reject) => {
-    const base = LICENSING_URL.replace('/functions/v1', '/rest/v1/rpc/');
-    const urlObj = new URL(base + rpcName);
-    const payload = JSON.stringify(data);
-    const req = https.request({
-      hostname: urlObj.hostname, port: 443, path: urlObj.pathname, method: 'POST',
-      headers: {
-        'Content-Type': 'application/json',
-        'apikey': SUPABASE_ANON_KEY,
-        'Authorization': `Bearer ${SUPABASE_ANON_KEY}`,
-        'Content-Length': Buffer.byteLength(payload),
-      }, timeout: 15000,
-    }, (res) => { let b = ''; res.on('data', c => b += c); res.on('end', () => resolve(b)); });
-    req.on('error', reject);
-    req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
-    req.write(payload);
-    req.end();
-  });
+  return cloudClient.request(CLOUD, {
+    method: 'POST', path: `/rest/v1/rpc/${rpcName}`, timeout: 15000, body: data,
+    headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
+  }).then((r) => r.text);
 }
 
 // Read real counts from the embedded local PG (companies / users / invoices /
@@ -1679,7 +1668,7 @@ function initBackupOnStartup() {
 const DESTRUCTIVE_API = new Set([
   '/api/delete-company', '/api/restore-tcdb', '/api/import-rsf', '/api/import-rsf-path',
   '/api/create-local-company', '/api/backup', '/api/open-tcdb', '/api/tunnel-fix', '/api/tunnel-restart',
-  '/api/update/install',
+  '/api/update/install', '/api/invite-employee',
 ]);
 // 2.0.0: every admin-API call except /api/ping must carry this install's secret (secrets.json → /config.js, same-origin only;
 // the Electron window gets it over IPC). It keeps other local programs and foreign web pages — which CORS "*" and a loopback
@@ -1711,6 +1700,18 @@ async function listLocalCompanies() {
     return null;
   }).filter(c => c !== null);
 }
+// Local employee invites (provisioning.inviteLocalEmployee): the admin, on this machine, adds an employee; the one-time password is in the reply only.
+async function handleInviteEmployee(data) {
+  if (!svcManager || !svcManager.isRunning()) return { success: false, code: 'SERVICES_DOWN', error: 'الخدمات غير شغّالة. يرجى تشغيل النظام أولاً.' };
+  return provisioning.inviteLocalEmployee(provisioningDeps(), data);
+}
+async function handleListEmployeeRoles(companyId) {
+  if (!svcManager || !svcManager.isRunning()) return { success: false, code: 'SERVICES_DOWN', error: 'services are not running' };
+  return provisioning.listGrantableRoles(provisioningDeps(), companyId);
+}
+ipcMain.handle('invite-employee', async (_, data) => handleInviteEmployee(data));
+ipcMain.handle('list-employee-roles', async (_, companyId) => handleListEmployeeRoles(companyId));
+
 // The installer window (file://) asks over IPC instead of fetch()ing the admin port: no CORS, no secret on the wire.
 ipcMain.handle('list-local-companies', async () => {
   try { return { success: true, companies: await listLocalCompanies() }; }
@@ -2408,6 +2409,28 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ success: false, error: err.message }));
     }
 
+  } else if (req.method === 'GET' && (req.url || '').startsWith('/api/employee-roles')) {
+    (async () => {
+      const companyId = new URL(req.url, 'http://127.0.0.1').searchParams.get('companyId') || '';
+      const r = await handleListEmployeeRoles(companyId);
+      res.writeHead(r.success ? 200 : 400, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify(r));
+    })().catch((e) => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, error: e.message })); });
+
+  } else if (req.method === 'POST' && req.url === '/api/invite-employee') {
+    let body = '';
+    req.on('data', (c) => { if (body.length < 20000) body += c.toString(); });
+    req.on('end', async () => {
+      try {
+        const r = await handleInviteEmployee(JSON.parse(body || '{}'));
+        res.writeHead(r.success ? 200 : (r.code === 'PLAN_LIMIT_EXCEEDED' ? 402 : r.code === 'EMAIL_EXISTS' ? 409 : 400), { 'Content-Type': 'application/json', 'Cache-Control': 'no-store' });
+        res.end(JSON.stringify(r));
+      } catch (e) {
+        res.writeHead(400, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: e.message }));
+      }
+    });
+
   } else if (req.method === 'POST' && req.url === '/api/restore-tcdb') {
     
     // Upload TCDB file via multipart, restore DB, and set backup path
@@ -2608,6 +2631,7 @@ ipcMain.handle('start-erp', async (_, { licenseKey, dbPassword, port, enableClou
     // limits so flipping the license (or landing off an expired trial) takes
     // effect on the next launch. apply_tenant_plan rebuilds tenant_modules.
     await syncActivePlan();
+    startPlanSyncLoop();
 
     return { success: true, ready: true, port: port || APP_PORT, migrations: result.migrations };
   } catch (err) {
@@ -2729,7 +2753,6 @@ ipcMain.handle('start-trial', async () => {
 // hardware-bound free license (no expires_at → never expires). The 200/200/1
 // smart limits are enforced by local DB triggers reading subscription_plans(free),
 // and refreshed from the cloud opportunistically on heartbeat when online.
-const FREE_MODULES = planSync.FREE_MODULES;
 
 // Register/refresh this device's FREE license in the cloud (anon RPC). Returns the
 // license {license_key, status, ...} — a STABLE FREE-2026 number, 1 per device — or
@@ -2779,7 +2802,7 @@ ipcMain.handle('start-free', async () => {
       max_companies: 1,
       max_warehouses: 1,
       max_storage_gb: -1,           // unlimited disk locally
-      enabled_modules: FREE_MODULES,
+      enabled_modules: [],
       custom_branding: false,
       cloud_backup: true,           // free copies back up to our cloud (1 GB)
       api_access: false,
@@ -2825,7 +2848,7 @@ function landTrialToFree() {
       max_companies: 1,
       max_warehouses: 1,
       max_storage_gb: -1,
-      enabled_modules: FREE_MODULES,
+      enabled_modules: [],
       custom_branding: false,
       cloud_backup: false,
       api_access: false,
@@ -2852,53 +2875,6 @@ function landTrialToFree() {
 }
 
 // ─── Free plan limit sync (heartbeat, online) ────────────────
-// Free is offline-first with BAKED limits. When online we opportunistically pull
-// the Free plan's current limits from the cloud (anon REST read of the public
-// subscription_plans row, code='free') and update the LOCAL row — the enforcement
-// triggers read that row, so an admin's change in /saas/platforms propagates to
-// every free copy on its next online heartbeat. Best-effort: silently no-ops
-// offline or when services aren't running.
-// NB: storage_gb is intentionally NOT synced — cloud free caps storage at 1 GB,
-// but the LOCAL free install has unlimited disk (the local plan keeps storage_gb=-1).
-const FREE_LIMIT_COLS = ['max_users', 'max_companies', 'max_branches', 'max_warehouses', 'max_products', 'max_invoices_monthly', 'max_customers', 'max_documents'];
-async function syncFreePlanLimits() {
-  try {
-    const cloud = await new Promise((resolve) => {
-      const req = https.request({
-        hostname: SUPABASE_URL, port: 443, method: 'GET',
-        path: `/rest/v1/subscription_plans?code=eq.free&is_active=eq.true&select=${FREE_LIMIT_COLS.join(',')}&limit=1`,
-        headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
-        timeout: 10000,
-      }, (res) => {
-        let b = '';
-        res.on('data', c => b += c);
-        res.on('end', () => { try { const a = JSON.parse(b); resolve(Array.isArray(a) && a[0] ? a[0] : null); } catch { resolve(null); } });
-      });
-      req.on('error', () => resolve(null));
-      req.on('timeout', () => { req.destroy(); resolve(null); });
-      req.end();
-    });
-    if (!cloud) return false; // offline / no row
-
-    // Whitelisted columns + integer-coerced values → injection-proof UPDATE.
-    const allowed = new Set(FREE_LIMIT_COLS);
-    const sets = [];
-    for (const [k, v] of Object.entries(cloud)) {
-      if (!allowed.has(k) || v === null || v === undefined) continue;
-      const n = parseInt(v, 10);
-      if (Number.isNaN(n)) continue;
-      sets.push(`${k} = ${n}`);
-    }
-    if (!sets.length) return false;
-    await psqlExec(`UPDATE public.subscription_plans SET ${sets.join(', ')} WHERE code = 'free';`);
-    fileLog('[Heartbeat] 🔁 Free plan limits synced from cloud:', sets.join(', '));
-    return true;
-  } catch (e) {
-    fileLog('[Heartbeat] syncFreePlanLimits skipped:', e.message);
-    return false;
-  }
-}
-
 // ─── Active-plan sync (heartbeat + company creation + start) ──────────────────
 // The plan for this install's license tier is INSERTed/UPDATEd from the license (cloud row when online — the heartbeat has
 // just written it into the cached license — else the cached copy), every tenant's subscription is pointed at it, and the
@@ -2914,24 +2890,57 @@ function currentEffectiveTier() {
 
 function planCodeForTier(tier) { return planSync.planCodeForTier(tier); }
 
-// The cloud package row for a plan code (limits + modules the license does not carry). null when offline.
-function fetchCloudPlan(code) {
-  return new Promise((resolve) => {
-    const cols = [...planSync.LIMIT_COLS, 'included_modules'].join(',');
-    const req = https.request({
-      hostname: SUPABASE_URL, port: 443, method: 'GET',
-      path: `/rest/v1/subscription_plans?code=eq.${encodeURIComponent(code)}&is_active=eq.true&select=${cols}&limit=1`,
-      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
-      timeout: 10000,
-    }, (res) => {
-      let b = '';
-      res.on('data', c => b += c);
-      res.on('end', () => { try { const a = JSON.parse(b); resolve(Array.isArray(a) && a[0] ? a[0] : null); } catch { resolve(null); } });
-    });
-    req.on('error', () => resolve(null));
-    req.on('timeout', () => { req.destroy(); resolve(null); });
-    req.end();
-  });
+// The control panel's plan catalogue (public subscription_plans, anon read): every active plan, plus the plan the licence points at by name
+// when that one is not among them. null when the cloud cannot be reached (offline / blocked) — the caller then keeps the last synced rows.
+async function fetchCloudPlans(licensePlanCode) {
+  const get = async (query) => {
+    const r = await cloudClient.request(CLOUD, { method: 'GET', path: `/rest/v1/subscription_plans?${query}`, timeout: 4000,
+      headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` } });
+    if (r.status !== 200) throw new Error(`catalogue HTTP ${r.status}`);
+    const a = JSON.parse(r.text);
+    if (!Array.isArray(a)) throw new Error('catalogue is not a list');
+    return a;
+  };
+  try {
+    const plans = await get('select=*&is_active=eq.true&limit=200');
+    if (licensePlanCode && /^[A-Za-z0-9_-]{1,50}$/.test(licensePlanCode) && !plans.some((p) => p && p.code === licensePlanCode)) {
+      try { plans.push(...await get(`select=*&code=eq.${encodeURIComponent(licensePlanCode)}&limit=1`)); } catch { /* the licence's plan stays unsynced */ }
+    }
+    return plans;
+  } catch (e) {
+    fileLog('[Plan] cloud catalogue unreachable (offline?) — last synced plan values stay in force:', e.message);
+    return null;
+  }
+}
+
+// Pull the licence state (plan_code, custom_limits, tier/expiry, module grant) from the cloud and cache it in the local licence. Best-effort.
+async function refreshLicenseFromCloud() {
+  try {
+    const config = loadConfig();
+    if (!config || !config.licenseKey || !licenseGuard) return false;
+    const raw = await httpPostRpc('licensing_get_license_state', { p_license_key: config.licenseKey });
+    const state = typeof raw === 'string' ? (raw ? JSON.parse(raw) : null) : raw;
+    if (!state || !state.tier) return false;
+    if (config.isFree === true) state.tier = 'free';      // the user's explicit Free choice is never flipped by a sync
+    licenseGuard.applyCloudState(state);
+    return true;
+  } catch { return false; }
+}
+
+// Whenever the network is there, the plan catalogue and the licence's plan are pulled and applied; offline ticks change nothing.
+let _planLoop = null;
+function startPlanSyncLoop() {
+  if (_planLoop || CLOUD.kind === 'off') return;
+  const every = (HARNESS_OK && Number(process.env.TEXACORE_PLAN_SYNC_MS) > 0) ? Number(process.env.TEXACORE_PLAN_SYNC_MS) : 15 * 60 * 1000;
+  const tick = async () => {
+    try {
+      if (!svcManager || !svcManager.isRunning()) return;
+      await refreshLicenseFromCloud();
+      await syncActivePlan();
+    } catch (e) { fileLog('[Plan] sync tick:', e.message); }
+  };
+  _planLoop = setInterval(tick, every);
+  if (_planLoop.unref) _planLoop.unref();
 }
 
 let _planSyncChain = Promise.resolve();
@@ -2944,16 +2953,13 @@ async function syncActivePlan(tierOverride, { tenantId = null, throwOnError = fa
     try { license = licenseGuard ? licenseGuard.loadLicense() : null; } catch { /* no license yet */ }
     if (!tier) tier = (licenseGuard && licenseGuard.effectiveTier) ? currentEffectiveTier() : null;
     tier = tier || 'free';                       // unknown / no license → the free plan (restrictive, never fail open)
-    const code = planCodeForTier(tier);
 
-    let cloudPlan = null;
-    if (!DEV_HARNESS) { try { cloudPlan = await fetchCloudPlan(code); } catch (e) { fileLog('[Plan] fetchCloudPlan:', e.message); } }
-
+    const cloudPlans = CLOUD.kind === 'off' ? null : await fetchCloudPlans(tierOverride ? null : (license && license.plan_code));
     const res = await planSync.syncActivePlan(
-      { pgQuery: (t, p) => svcManager.pgQuery(t, p), log: fileLog },
-      { tier, license, cloudPlan, tenantId });
+      { pgQuery: (t, p) => svcManager.pgQuery(t, p), pgTx: (fn) => svcManager.pgTransaction(fn), log: fileLog },
+      { tier, license, cloudPlans, tenantId, forceTier: !!tierOverride });
     try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('modules-updated'); } catch (e) {}
-    fileLog(`[Plan] ✅ active plan synced: tier=${tier} → ${res.code}`);
+    fileLog(`[Plan] ✅ active plan synced: tier=${tier} → ${res.code}${res.online ? ' (cloud catalogue applied)' : ' (offline: last synced values)'}`);
     return true;
   };
   const p = _planSyncChain.then(run, run);
@@ -3209,7 +3215,7 @@ function mintHarnessLicense(kind) {
     ? { tier: 'trial', status: 'active', license_key: 'TRL-E2E-0000', plan_type: 'trial', max_users: 10, max_companies: 3, max_warehouses: 10, max_storage_gb: -1,
         enabled_modules: [], activated_at: new Date().toISOString(), expires_at: new Date(Date.now() + 14 * day).toISOString() }
     : { tier: 'free', status: 'active', license_key: 'FREE-LOCAL', plan_type: 'free', max_users: 1, max_companies: 1, max_warehouses: 1, max_storage_gb: -1,
-        enabled_modules: FREE_MODULES, custom_branding: false, cloud_backup: false, api_access: false, features: {} };
+        enabled_modules: [], custom_branding: false, cloud_backup: false, api_access: false, features: {} };
   licenseGuard.saveLicense(lic);
   const cfg = loadConfig();
   cfg.licenseKey = lic.license_key; cfg.isTrial = kind === 'trial'; cfg.isFree = kind !== 'trial';
@@ -3243,7 +3249,7 @@ app.whenReady().then(() => {
           fileLog(`[E2E] license minted (${kind}); starting services…`);
           const result = await svcManager.startAll({ port: PORTS.ui, onMigrationProgress: (step, total, name) => fileLog(`[E2E] boot ${step}/${total} ${name}`) });
           fileLog('[E2E] startAll →', JSON.stringify({ success: result.success, error: result.error, firstRun: result.firstRun }));
-          if (result.success) await syncActivePlan();
+          if (result.success) { await syncActivePlan(); startPlanSyncLoop(); }
           fileLog('E2E_READY', JSON.stringify({ ok: !!result.success, error: result.error || null, ports: PORTS, userData: app.getPath('userData') }));
           // optional: exercise the stop → start path in-process (what a license change does via restartEnginesForLicenseChange)
           const cycles = parseInt(process.env.TEXACORE_E2E_RESTART_CYCLES || '0', 10);
