@@ -23,11 +23,12 @@ exports.default = async function afterPack(context) {
       appCodeDir: path.join(resourcesDir, 'app'),
       repoRoot: path.join(__dirname, '..'),
       platform: context.electronPlatformName === 'darwin' ? 'darwin' : 'win32',
+      scanRoot: isMac ? path.join(context.appOutDir, appName) : context.appOutDir,
     });
     if (problems.length) {
       throw new Error(`afterPack: the packaged app is incomplete —\n  - ${problems.join('\n  - ')}`);
     }
-    console.log('  • afterPack: bootstrap files verified against BASELINE_PIN.json ✅');
+    console.log('  • afterPack: encrypted baseline container verified against BASELINE_PIN.json, no plaintext SQL in the package ✅');
   }
 
   // Determine the correct node_modules path based on platform

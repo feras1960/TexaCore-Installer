@@ -2,10 +2,12 @@
 // ════════════════════════════════════════════════════════════════
 // verify-packed — the afterPack gate. Given the packaged Resources dir of a freshly packed app, prove that everything a
 // FIRST RUN needs is in it and is exactly what the build pinned:
-//   * every file listed in baseline/BASELINE_PIN.json exists in <resources>/baseline with the pinned size + sha256
+//   * <resources>/baseline carries the ENCRYPTED container (baseline.bin) + PACKED.json + the pin; the blob's sha256 matches, and the key module
+//     AS PACKAGED opens it and every file listed in BASELINE_PIN.json inside has the pinned size + sha256
 //     (1.9.0's first trial died because the pin was not packaged; a build that cannot bootstrap must not be produced)
 //   * the pin that was packaged is byte-identical to the repo's pin
-//   * the installer-owned bootstrap SQL is in the app code
+//   * NO plaintext database DDL anywhere in the package (outside PostgreSQL's own share files): no production_baseline.*, no src/bootstrap/*.sql,
+//     no "CREATE TABLE public." / "CREATE FUNCTION public." … in any file
 //   * the web bundle is there and carries package.json's version; local fonts are there
 //   * the bundled PostgreSQL / GoTrue / PostgREST binaries are there
 //   * no 1.x migrations manifest rides along
@@ -23,38 +25,51 @@ const sha256File = (f) => crypto.createHash('sha256').update(fs.readFileSync(f))
  * @param {string} o.appCodeDir    where src/ landed (<resourcesDir>/app with asar:false)
  * @param {string} o.repoRoot      the installer repo (to compare the pin and read package.json)
  * @param {'darwin'|'win32'} o.platform
+ * @param {string} [o.scanRoot]    the whole packaged app (default: resourcesDir) — scanned for plaintext database DDL
  * @returns {string[]} problems (empty = OK)
  */
-function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform }) {
+function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform, scanRoot }) {
   const problems = [];
   const exe = (n) => (platform === 'win32' ? `${n}.exe` : n);
 
-  // ── baseline vs pin ──
+  // ── the baseline container (encrypted) vs the pin ──
+  const bdir = path.join(resourcesDir, 'baseline');
   const repoPinPath = path.join(repoRoot, 'baseline', 'BASELINE_PIN.json');
-  const packedPinPath = path.join(resourcesDir, 'baseline', 'BASELINE_PIN.json');
+  const packedPinPath = path.join(bdir, 'BASELINE_PIN.json');
   if (!fs.existsSync(repoPinPath)) problems.push('repo baseline/BASELINE_PIN.json is missing');
-  if (!fs.existsSync(packedPinPath)) {
-    problems.push('baseline/BASELINE_PIN.json was NOT packaged (extraResources "baseline")');
-  } else {
+  for (const f of ['baseline.bin', 'PACKED.json', 'BASELINE_PIN.json']) {
+    if (!fs.existsSync(path.join(bdir, f))) problems.push(`baseline/${f} was NOT packaged (extraResources "baseline" ← build/baseline-pack, written by scripts/pack-baseline.js)`);
+  }
+  if (fs.existsSync(path.join(bdir, 'baseline.bin')) && fs.existsSync(path.join(bdir, 'PACKED.json')) && fs.existsSync(packedPinPath)) {
     if (fs.existsSync(repoPinPath) && sha256File(repoPinPath) !== sha256File(packedPinPath)) problems.push('packaged BASELINE_PIN.json differs from the repo pin');
-    let pin = null;
-    try { pin = JSON.parse(fs.readFileSync(packedPinPath, 'utf8')); } catch (e) { problems.push(`packaged pin unreadable: ${e.message}`); }
-    if (pin && pin.files) {
-      for (const [name, meta] of Object.entries(pin.files)) {
-        const f = path.join(resourcesDir, 'baseline', name);
-        if (!fs.existsSync(f)) { problems.push(`baseline/${name} was NOT packaged`); continue; }
-        const st = fs.statSync(f);
-        if (st.size !== meta.bytes) problems.push(`baseline/${name}: ${st.size} bytes packaged, pin says ${meta.bytes}`);
-        else if (sha256File(f) !== meta.sha256) problems.push(`baseline/${name}: sha256 differs from the pin`);
-      }
-      if (!pin.files['production_baseline.sql']) problems.push('pin does not list production_baseline.sql');
-    } else if (pin) problems.push('packaged pin has no "files"');
+    let pin = null; let meta = null;
+    try { pin = JSON.parse(fs.readFileSync(packedPinPath, 'utf8')); meta = JSON.parse(fs.readFileSync(path.join(bdir, 'PACKED.json'), 'utf8')); } catch (e) { problems.push(`packaged pin/PACKED.json unreadable: ${e.message}`); }
+    const blob = fs.readFileSync(path.join(bdir, 'baseline.bin'));
+    if (meta && (blob.length !== meta.blobBytes || crypto.createHash('sha256').update(blob).digest('hex') !== meta.blobSha256)) problems.push('baseline/baseline.bin: size/sha256 differ from PACKED.json');
+    // decrypt it with the key module AS PACKAGED (obfuscated or not): proves the shipped code opens the shipped container, and that every
+    // pinned file inside is exactly what the pin says
+    const keyFile = path.join(appCodeDir, 'src', 'baseline-key.generated.js');
+    if (!fs.existsSync(keyFile)) problems.push('src/baseline-key.generated.js is missing from the app code (the container could not be opened at first run)');
+    else if (pin && pin.files) {
+      try {
+        const { unpack } = require('../../src/baseline-pack');
+        delete require.cache[require.resolve(keyFile)];
+        const entries = unpack(blob, require(keyFile)());
+        for (const [name, m] of Object.entries(pin.files)) {
+          const d = entries.get(name);
+          if (!d) problems.push(`baseline container lacks ${name}`);
+          else if (d.length !== m.bytes || crypto.createHash('sha256').update(d).digest('hex') !== m.sha256) problems.push(`baseline container: ${name} differs from the pin`);
+        }
+        if (!pin.files['production_baseline.sql']) problems.push('pin does not list production_baseline.sql');
+        for (const f of ['local_extras.sql', 'reference_seed.sql', 'storage_stubs.sql', 'production_baseline.inventory.json']) if (!entries.has(f)) problems.push(`baseline container lacks ${f}`);
+      } catch (e) { problems.push(`the packaged key module cannot open the baseline container: ${e.message}`); }
+    }
   }
-
-  // ── installer-owned bootstrap SQL (inside the app code) ──
-  for (const f of ['local_extras.sql', 'reference_seed.sql']) {
-    if (!fs.existsSync(path.join(appCodeDir, 'src', 'bootstrap', f))) problems.push(`src/bootstrap/${f} is missing from the app code`);
-  }
+  // no plaintext SQL anywhere: neither the baseline files nor the installer-owned SQL, nor any DDL text in code or data files
+  const bootDir = path.join(appCodeDir, 'src', 'bootstrap');
+  if (fs.existsSync(bootDir) && fs.readdirSync(bootDir).some((f) => f.endsWith('.sql'))) problems.push('plain SQL files are in the app code (src/bootstrap/*.sql) — they belong in the encrypted container');
+  if (fs.existsSync(bdir) && fs.readdirSync(bdir).some((f) => /\.(sql|json)$/.test(f) && !['BASELINE_PIN.json', 'PACKED.json'].includes(f))) problems.push('plain baseline files are in the package (baseline/)');
+  problems.push(...scanForPlaintextSql(scanRoot || resourcesDir, resourcesDir));
 
   // ── web bundle ──
   const fe = path.join(resourcesDir, 'frontend');
@@ -88,4 +103,30 @@ function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform }) {
   return problems;
 }
 
-module.exports = { verifyPacked, sha256File };
+
+// ─── plaintext-DDL scan ─────────────────────────────────────────────────────
+// PostgreSQL's own share/*.sql (information_schema, extension scripts) legitimately contain DDL, so bin/pg is skipped; everything else — app code,
+// data files, the web bundle, the other binaries — must carry none of the production schema's text.
+const DDL_LITERALS = ['CREATE OR REPLACE FUNCTION public.', 'CREATE FUNCTION public.', 'CREATE TABLE public.', 'CREATE TRIGGER trg_', 'ALTER TABLE ONLY public.', 'CREATE POLICY ']
+  .map((x) => Buffer.from(x));
+function scanForPlaintextSql(root, resourcesDir) {
+  const problems = [];
+  const pgDir = path.join(resourcesDir, 'bin', 'pg') + path.sep;
+  const walk = (d) => {
+    for (const e of fs.readdirSync(d, { withFileTypes: true })) {
+      const f = path.join(d, e.name);
+      if (e.isSymbolicLink()) continue;
+      if (e.isDirectory()) { if ((f + path.sep).startsWith(pgDir)) continue; walk(f); continue; }
+      if (/^production_baseline\./.test(e.name)) { problems.push(`plain baseline file in the package: ${path.relative(root, f)}`); continue; }
+      const st = fs.statSync(f);
+      if (st.size === 0 || st.size > 400e6) continue;
+      const buf = fs.readFileSync(f);
+      const hit = DDL_LITERALS.find((l) => buf.indexOf(l) >= 0);
+      if (hit) problems.push(`plaintext database DDL ("${hit.toString()}…") in ${path.relative(root, f)}`);
+    }
+  };
+  walk(root);
+  return problems;
+}
+
+module.exports = { verifyPacked, sha256File, scanForPlaintextSql };

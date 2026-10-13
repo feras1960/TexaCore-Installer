@@ -17,6 +17,7 @@ const bootstrap = require('./bootstrap');
 const { validateAdminPassword } = require('./admin-password');
 const netGuard = require('./net-guard');
 const functionPatches = require('./function-patches');
+const { openBaselineStore } = require('./baseline-store');
 
 // ─── Ports (defaults — TEXACORE_PORT_BASE moves the whole block; see ports.js) ───
 const PG_PORT = PORTS.pg;
@@ -82,6 +83,8 @@ class ServiceManager {
     // The pinned production baseline (scripts/sync-baseline.js) and the installer-owned SQL beside this file.
     this.baselineDir = isPackaged ? path.join(process.resourcesPath, 'baseline') : path.join(__dirname, '..', 'baseline');
     this.bootstrapSqlDir = path.join(__dirname, 'bootstrap');
+    // The packaged app carries the baseline + installer SQL as ONE encrypted container (baseline-store.js); development reads the plain files.
+    this.baselineStore = openBaselineStore({ baselineDir: this.baselineDir, bootstrapDir: this.bootstrapSqlDir });
 
     // Ensure directories
     for (const dir of [this.dataDir, this.logDir]) {
@@ -382,6 +385,30 @@ class ServiceManager {
     });
   }
 
+  /**
+   * Run SQL held in memory (a Buffer) with psql, fed over stdin — the decrypted baseline never touches the disk. stopOnError=false is for the
+   * baseline's two passes (errors are collected, not fatal). The SQL text is never logged; only psql's error LINES are returned.
+   */
+  runPsqlSql(sqlBuf, { stopOnError = true, dbName = 'postgres' } = {}) {
+    return new Promise((resolve, reject) => {
+      const psqlExe = this.isWindows ? 'psql.exe' : 'psql';
+      const psql = spawn(path.join(this.pgBin, psqlExe), [
+        '-X', '-q',
+        '-p', String(PG_PORT), '-h', '127.0.0.1', '-U', 'postgres', '-d', dbName,
+        '-v', `ON_ERROR_STOP=${stopOnError ? 1 : 0}`,
+        '-f', '-',
+      ], { env: this._pgEnv() });
+      let errOut = '';
+      let stdOut = '';
+      psql.stdout.on('data', d => { stdOut += d.toString(); });
+      psql.stderr.on('data', d => { errOut += d.toString(); });
+      psql.stdin.on('error', () => { /* psql stopped reading (ON_ERROR_STOP): its exit code tells */ });
+      psql.on('error', err => reject(new Error(`psql spawn error: ${err.message}`)));
+      psql.on('close', code => resolve({ code, stdout: stdOut, stderr: errOut }));
+      psql.stdin.end(sqlBuf);
+    });
+  }
+
   /** Run a .sql file with psql. stopOnError=false is for the baseline's two passes (errors are collected, not fatal). */
   runPsqlFile(file, { stopOnError = true, dbName = 'postgres' } = {}) {
     return new Promise((resolve, reject) => {
@@ -433,11 +460,11 @@ class ServiceManager {
     let n = 0;
     const step = (name) => { n += 1; console.log(`[Bootstrap] (${n}/${total}) ${name}`); progress(n, total, name); };
 
-    const fileProblems = bootstrap.verifyBaselineFiles(this.baselineDir);
+    const pin = bootstrap.loadPin(this.baselineDir);
+    const fileProblems = this.baselineStore.verify(pin);
     if (fileProblems.length) {
       throw new Error(`The database baseline is missing or damaged in this build (${fileProblems.join('; ')}). Reinstall TexaCore.`);
     }
-    const pin = bootstrap.loadPin(this.baselineDir);
     bootstrap.writeMarker(this.dataDir, { status: 'schema_loading', baselineSha256: pin.files['production_baseline.sql'].sha256, baselineCut: pin.cutTimestamp });
 
     step('Creating database roles');
@@ -447,14 +474,14 @@ class ServiceManager {
     await this.runGoTrueMigrations();
 
     step('Creating the storage schema');
-    const storage = path.join(this.baselineDir, 'storage_stubs.sql');
-    for (let pass = 1; pass <= 2; pass++) await this.runPsqlFile(storage, { stopOnError: false });
+    const storage = this.baselineStore.read('storage_stubs.sql');
+    for (let pass = 1; pass <= 2; pass++) await this.runPsqlSql(storage, { stopOnError: false });
 
     step('Loading the production schema');
-    const baselineSql = path.join(this.baselineDir, 'production_baseline.sql');
+    const baselineSql = this.baselineStore.read('production_baseline.sql');     // decrypted in memory, fed to psql over stdin, never written down
     const summary = [];
     for (let pass = 1; pass <= 2; pass++) {
-      const r = await this.runPsqlFile(baselineSql, { stopOnError: false });
+      const r = await this.runPsqlSql(baselineSql, { stopOnError: false });
       const errs = bootstrap.parsePsqlErrors(r.stderr);
       const cls = bootstrap.classifyBaselineErrors(errs, { second: pass === 2 });
       summary.push({ pass, errors: errs.length, expected: cls.expected.length, unexpected: cls.unexpected.length });
@@ -465,19 +492,18 @@ class ServiceManager {
     fs.writeFileSync(path.join(this.logDir, 'baseline-load.json'), JSON.stringify(summary, null, 2));
 
     step('Installing local extras');
-    await this.runPsqlFile(path.join(this.bootstrapSqlDir, 'local_extras.sql'), { stopOnError: true })
-      .then((r) => { if (r.code !== 0) throw new Error(`local_extras.sql failed: ${r.stderr.slice(-600)}`); });
+    await this.runPsqlSql(this.baselineStore.read('local_extras.sql'), { stopOnError: true })
+      .then((r) => { if (r.code !== 0) throw new Error(`local_extras.sql failed: ${r.stderr.slice(-300)}`); });
 
     step('Loading reference data');
     // production's own export first (optional — written at the baseline re-cut), then the installer's defaults fill any gap
     // (both are ON CONFLICT DO NOTHING / NOT EXISTS, so the first writer of a row wins).
     const seeds = [];
-    const exported = path.join(this.baselineDir, 'reference_data.sql');
-    if (fs.existsSync(exported)) seeds.push(exported);
-    seeds.push(path.join(this.bootstrapSqlDir, 'reference_seed.sql'));
-    for (const f of seeds) {
-      const r = await this.runPsqlFile(f, { stopOnError: true });
-      if (r.code !== 0) throw new Error(`${path.basename(f)} failed: ${r.stderr.slice(-600)}`);
+    if (this.baselineStore.has('reference_data.sql')) seeds.push('reference_data.sql');
+    seeds.push('reference_seed.sql');
+    for (const name of seeds) {
+      const r = await this.runPsqlSql(this.baselineStore.read(name), { stopOnError: true });
+      if (r.code !== 0) throw new Error(`${name} failed: ${r.stderr.slice(-300)}`);
     }
     await this.psqlExec(bootstrap.postBaselineSql());
 
@@ -497,13 +523,14 @@ class ServiceManager {
     }
 
     step('Database ready');
+    this.baselineStore.release();                                              // the decrypted baseline leaves memory
     bootstrap.writeMarker(this.dataDir, { status: 'ready', readyAt: new Date().toISOString(), verified: v.stats });
     return { baseline: summary, verified: v.stats };
   }
 
   /** Counts + every function body against the inventory that ships with the baseline. */
   async verifyBaselineInstall() {
-    const inv = JSON.parse(fs.readFileSync(path.join(this.baselineDir, 'production_baseline.inventory.json'), 'utf8'));
+    const inv = JSON.parse(this.baselineStore.read('production_baseline.inventory.json').toString('utf8'));
     const problems = [];
     const schemas = inv.app_schemas || ['public', 'licensing', 'newpost', 'tomgenerators'];
     const q = await this.pgQuery(`

@@ -16,16 +16,16 @@
     "prepare:pg:mac": "bash scripts/prepare-pg-mac.sh",
     "prepare:pg:win": "node scripts/prepare-pg-win.js",
     "check:build": "node scripts/prebuild-checks.js",
-    "build:mac": "node scripts/prebuild-checks.js --platform mac && electron-builder --mac",
-    "build:win": "node scripts/prebuild-checks.js --platform win && electron-builder --win",
-    "build:all": "node scripts/prebuild-checks.js --platform all && electron-builder --mac --win",
+    "build:mac": "node scripts/prebuild-checks.js --platform mac && node scripts/pack-baseline.js && electron-builder --mac",
+    "build:win": "node scripts/prebuild-checks.js --platform win && node scripts/pack-baseline.js && electron-builder --win",
+    "build:all": "node scripts/prebuild-checks.js --platform all && node scripts/pack-baseline.js && electron-builder --mac --win",
     "build": "node scripts/prebuild-checks.js --platform all && electron-builder",
     "release:patch": "./release.sh patch",
     "release:minor": "./release.sh minor",
     "release:major": "./release.sh major",
-    "publish:mac": "node scripts/prebuild-checks.js --platform mac && electron-builder --mac --publish always",
-    "publish:win": "node scripts/prebuild-checks.js --platform win && electron-builder --win --publish always",
-    "publish": "node scripts/prebuild-checks.js --platform all && electron-builder --mac --win --publish always"
+    "publish:mac": "node scripts/prebuild-checks.js --platform mac && node scripts/pack-baseline.js && electron-builder --mac --publish always",
+    "publish:win": "node scripts/prebuild-checks.js --platform win && node scripts/pack-baseline.js && electron-builder --win --publish always",
+    "publish": "node scripts/prebuild-checks.js --platform all && node scripts/pack-baseline.js && electron-builder --mac --win --publish always"
   },
   "dependencies": {
     "call-bind-apply-helpers": "^1.0.2",
@@ -70,13 +70,14 @@
     "compression": "maximum",
     "files": [
       "src/**/*",
+      "!src/bootstrap/*.sql",
       "assets/**/*",
       "node_modules/**/*",
       "!node_modules/.cache"
     ],
     "extraResources": [
       {
-        "from": "baseline",
+        "from": "build/baseline-pack",
         "to": "baseline",
         "filter": [
           "**/*"
