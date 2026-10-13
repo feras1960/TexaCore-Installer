@@ -54,6 +54,7 @@ contextBridge.exposeInMainWorld('texacore', {
   onUpdateAvailable: (cb) => ipcRenderer.on('update-available', (_, d) => cb(d)),
   onUpdateProgress: (cb) => ipcRenderer.on('update-progress', (_, d) => cb(d)),
   onUpdateDownloaded: (cb) => ipcRenderer.on('update-downloaded', () => cb()),
+  onUpdateNotAvailable: (cb) => ipcRenderer.on('update-not-available', () => cb()),
 
   // Browser
   openBrowser: (port) => ipcRenderer.invoke('open-browser', port),

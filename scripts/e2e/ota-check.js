@@ -287,6 +287,38 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
       await stop(app); await mock.close(); mock = null;
     }
 
+    // ════════ tamper2: the 2.0.0 client refuses a modified 2.0.1-test download AND stops saying "downloading" ════════
+    if (HOPS.includes('tamper2')) {
+      if (!CLIENT200) throw new Error('--client200 is required for hop tamper2');
+      const dir = path.join(WORK, 'hop-tamper2'); fs.mkdirSync(dir, { recursive: true });
+      const next = makeNextRelease(CLIENT200, path.join(dir, 'release-201'), '2.0.1-test');
+      const appPath = path.join(dir, 'TexaCore ERP.app'); const userData = path.join(dir, 'userdata');
+      ditto(CLIENT200, appPath); wrapClient(appPath);
+      const rel = releaseFiles(next);
+      for (const k of Object.keys(rel.files)) if (k.endsWith('.zip')) rel.files[k].tamper = true;
+      mock = createMockGithub({ port: MOCK_PORT, releases: { 'v2.0.1-test': { files: rel.files } }, latest: 'v2.0.1-test' });
+      await mock.listen();
+      const env = { TEXACORE_HEADLESS: '1', TEXACORE_PORT_BASE: '47391', TEXACORE_USER_DATA: userData, TEXACORE_STUB_TUNNEL: '1', TEXACORE_STUB_MDM: '1', TEXACORE_E2E_AUTOSTART: '1', TEXACORE_E2E_LICENSE: 'free',
+        TEXACORE_UPDATE_TEST: '1', TEXACORE_UI_SMOKE: '1', TEXACORE_SHOT_DIR: shots };
+      app = launch(appPath, { userData, tag: 'tamper2', env });
+      await R.check('T2 TAMPERED FILE REFUSED by 2.0.0, and the "downloading…" notice is withdrawn (installer window and the ERP page status both back to idle)', async () => {
+        await until(() => /E2E_READY/.test(fs.readFileSync(path.join(WORK, 'app-tamper2.log'), 'utf8')), 240000, '2.0.0 to be ready', 1000);
+        const secrets = JSON.parse(fs.readFileSync(path.join(userData, 'texacore-data', 'secrets.json'), 'utf8'));
+        const H = { 'x-texacore-local-secret': secrets.localApiSecret };
+        await until(() => /sha512 mismatch/.test(logOf(userData)), 240000, 'the sha512 mismatch', 1000);
+        await sleep(1500);
+        if (fs.existsSync(path.join(userData, 'updates', 'staged.json'))) throw new Error('a staged.json exists');
+        const u = await request('GET', `http://127.0.0.1:${PORTS.admin}/api/ui-update?shot=tamper2-after-refusal.png`, { headers: H });
+        const st = await request('GET', `http://127.0.0.1:${PORTS.admin}/api/update/status`, { headers: H });
+        if (!u.json || !u.json.ok) throw new Error(`ui-update ${u.text.slice(0, 200)}`);
+        if (u.json.widget.shown) throw new Error(`the installer window still shows the widget: ${JSON.stringify(u.json.widget)}`);
+        if (st.json.state !== 'idle') throw new Error(`update status is ${st.text}`);
+        evidence.tamper2 = { widget: u.json.widget, status: st.json };
+        return `sha512 mismatch logged; no staged.json; installer-window widget hidden; GET /api/update/status → ${st.text}`;
+      });
+      await stop(app); await mock.close(); mock = null;
+    }
+
     // ════════ hop b: 2.0.0 → 2.0.1-test ════════
     if (HOPS.includes('b')) {
       if (!CLIENT200) throw new Error('--client200 is required for hop b');

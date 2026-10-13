@@ -262,6 +262,9 @@ class MacUpdater {
       return { success: true, version };
     } catch (e) {
       this.log('download/stage failed:', e.message);
+      // Nothing was staged: reset the shared status (the ERP page's pill) and the installer widget, which would otherwise keep saying
+      // "downloading…" for a download that was refused (hash mismatch) or cut. The next scheduled check (6 h) tries again.
+      if (!fs.existsSync(this.stateFile)) { try { this.opts.emit('update-not-available'); } catch { /* noop */ } }   // an already staged update keeps its notice
       return { success: false, error: e.message };
     } finally {
       this._downloading = false;

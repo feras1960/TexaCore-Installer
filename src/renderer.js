@@ -1001,6 +1001,13 @@ document.addEventListener('keydown', (e) => {
     render();
   });
 
+  // a download that was refused or cut (nothing staged) — or no update at all: the "downloading…" notice must not stay
+  window.texacore.onUpdateNotAvailable?.(() => {
+    if (updState === 'ready') return;                 // an already staged update is not withdrawn by a later failed attempt
+    updState = 'idle';
+    render();
+  });
+
   restartBtn?.addEventListener('click', () => {
     restartBtn.disabled = true;
     window.texacore.installUpdate();
