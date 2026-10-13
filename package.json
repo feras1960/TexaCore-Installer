@@ -148,6 +148,13 @@
           "filter": [
             "**/*"
           ]
+        },
+        {
+          "from": "build/vcredist",
+          "to": "vcredist",
+          "filter": [
+            "*.exe"
+          ]
         }
       ],
       "target": [
@@ -161,6 +168,7 @@
       "artifactName": "TexaCore-ERP-Setup-${version}.${ext}"
     },
     "nsis": {
+      "include": "build/installer.nsh",
       "oneClick": true,
       "perMachine": true,
       "allowToChangeInstallationDirectory": false,

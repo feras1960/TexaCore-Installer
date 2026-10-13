@@ -54,6 +54,19 @@ npm test                                                                        
 node scripts/check-rpc-coverage.js --erp $ERP                                                   # does the baseline contain every RPC the ERP calls?
 ```
 
+### Plan limits, offline-first sync, import exemption, employee invites
+* **Plan limits are never in the program.** The bundled plan rows (`src/bootstrap/reference_seed.sql`) are the production `subscription_plans` as of the release; the app runs
+  fully offline on them. Whenever the cloud answers, the control panel's catalogue (+ the licence's `plan_code` / `custom_limits` / module grant) is applied (`src/plan-sync.js`,
+  every 15 min and on each heartbeat); offline nothing is written, so the last synced values stay (also across restarts). Lowering a limit passes production's plan guard because the
+  write carries the confirmation the guard asks for (bound to that plan id).
+* **An import is never refused by a plan limit** — `src/function-patches.js` applies the owner's rule to `enforce_plan_limit()` (the cloud change is described exactly in
+  `docs/proposed-cloud/enforce_plan_limit_import_exempt.md`); it becomes a no-op once the baseline carries the same change.
+* **Local employee invites** (`provisioning.inviteLocalEmployee`, the *Employees* box in the installer): same server functions as the cloud's invite path, one-time password shown once.
+* `node scripts/e2e/plan-sync-check.js --workdir <dir> --app <.app> --erp <ERP> --rsf <file.rsf>` proves: network blocked first run → network returns with changed limits → offline again
+  (and after a restart) → import over the limits → a licence pointing at a new plan. `--control` runs the same import with the exemption switched off and expects the plan to refuse it.
+* Windows: `node scripts/prepare-pg-win.js <zip>` (pinned by sha256), optional `node scripts/prepare-vcredist.js <vc_redist.x64.exe>`, `npm run build:win`, then
+  `node scripts/verify-win-build.js` (static) and `docs/WINDOWS_SMOKE_CHECKLIST.md` (a real PC).
+
 ### What the launch check proves about the network (4.9–4.11)
 The UI server listens on 0.0.0.0 on purpose (office PCs open the ERP from it). Everything administrative is therefore decided by
 `src/net-guard.js` — loopback Host + loopback TCP peer + no proxy/CDN header — never by "not a *.texacore.ai host". The check runs

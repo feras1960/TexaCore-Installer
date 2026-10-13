@@ -48,6 +48,10 @@ function checkPg(platform, problems) {
     if (!fs.existsSync(marker)) { problems.push('win: bin/windows-x64/pg has no PG_BUNDLE_VERSION — run scripts/prepare-pg-win.js with the EDB 17.6 zip'); return; }
     const v = fs.readFileSync(marker, 'utf8').trim();
     if (!/^17\./.test(v)) problems.push(`win: bundled PostgreSQL is ${v}, expected 17.x`);
+    if (!fs.existsSync(path.join(ROOT, 'build', 'vcredist', 'vc_redist.x64.exe'))) {
+      console.warn('  WARNING (win): build/vcredist/vc_redist.x64.exe is not present — the installer will NOT bring the Visual C++ runtime that PostgreSQL needs;\n'
+        + '                 a PC without the VC++ 2015-2022 x64 Redistributable cannot start the database. (node scripts/prepare-vcredist.js <vc_redist.x64.exe>)');
+    }
   }
 }
 

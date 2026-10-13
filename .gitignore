@@ -163,3 +163,6 @@ baseline/*
 /frontend/
 /bin/macos-arm64/pg/
 /bin/windows-x64/pg/
+
+# Windows build: Microsoft Visual C++ redistributable (never committed; see build/vcredist/README.txt)
+/build/vcredist/*.exe

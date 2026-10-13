@@ -237,7 +237,8 @@ class ServiceManager {
             "timezone = 'UTC'",
             "log_timezone = 'UTC'",
             "listen_addresses = '127.0.0.1'",
-            "unix_socket_directories = ''",
+            // (Windows has no /tmp socket directory to collide with; the setting is left at the server's own default there)
+            ...(this.isWindows ? [] : ["unix_socket_directories = ''"]),
             '',
           ].join('\n'));
           resolve();
