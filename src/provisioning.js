@@ -243,10 +243,28 @@ async function createLocalCompany(deps, rawInput) {
  */
 async function cleanup(deps, created, log) {
   if (created.userId) {
+    // 1. What hangs off THIS user id. Production's role guards refuse a cascade delete coming from GoTrue's session (no JWT claims, not a
+    //    trusted maintenance role) — GoTrue answers 500 "unrecognized write context" if the user holds a role row — so those rows go first,
+    //    from the installer's own maintenance session, scoped to the id we created.
+    await withClient(deps, async (c) => {
+      await c.query('BEGIN');
+      try {
+        await c.query(`SELECT set_config('app.is_registering', 'true', true)`);
+        await c.query('DELETE FROM public.user_role_assignments WHERE user_id = $1', [created.userId]);
+        await c.query('DELETE FROM public.user_roles WHERE user_id = $1', [created.userId]);
+        await c.query('DELETE FROM public.user_profiles WHERE id = $1', [created.userId]);
+        await c.query('COMMIT');
+      } catch (e) { await c.query('ROLLBACK'); log(`[Provision] cleanup: profile rows of ${created.userId} not removed: ${e.message}`); }
+    });
+    // 2. the auth user itself (admin API, by the id we were handed)
     const r = await httpJson('DELETE', `${deps.gotrueUrl}/admin/users/${created.userId}`, {
       headers: { apikey: deps.serviceKey, Authorization: `Bearer ${deps.serviceKey}` },
     });
     log(`[Provision] cleanup: auth user ${created.userId} → ${r.status}`);
+    if (r.status >= 300) {   // still there? remove exactly that row — by id, never by email
+      await withClient(deps, async (c) => { await c.query('DELETE FROM auth.users WHERE id = $1', [created.userId]); });
+      log(`[Provision] cleanup: auth user ${created.userId} removed directly`);
+    }
   }
   if (created.tenantId) {
     await withClient(deps, async (c) => {

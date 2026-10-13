@@ -5,21 +5,23 @@ const http = require('http');
 const { createLocalCompany, healTenantOwners, normaliseInput } = require('../src/provisioning');
 
 // ── fakes: a GoTrue + PostgREST on loopback and a recording pg client ─────────────────────────────
-async function harness({ emailTaken = false, gotrueCreate = 'ok', companyRpc = 'ok', existingUsers = [{ id: 'someone-elses', email: 'other@x.test' }] } = {}) {
+async function harness({ emailTaken = false, gotrueCreate = 'ok', companyRpc = 'ok', gotrueDelete = 200, existingUsers = [{ id: 'someone-elses', email: 'other@x.test' }] } = {}) {
   const http_ = []; // {method, path, body}
   const queries = [];
+  const order = []; // interleaved log of SQL and HTTP, to assert ordering
   const server = http.createServer((req, res) => {
     let body = '';
     req.on('data', (c) => { body += c; });
     req.on('end', () => {
       const b = body ? JSON.parse(body) : null;
       http_.push({ method: req.method, path: req.url, body: b, auth: req.headers.authorization });
+      order.push(`http:${req.method} ${req.url.split('?')[0]}`);
       const send = (status, obj) => { res.writeHead(status, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(obj)); };
       if (req.method === 'GET' && req.url.startsWith('/admin/users')) return send(200, { users: existingUsers });   // the page of ALL users, whatever the query says
       if (req.method === 'POST' && req.url === '/admin/users') {
         return gotrueCreate === 'ok' ? send(200, { id: 'user-new', email: b.email }) : send(422, { error_code: 'email_exists', msg: 'exists' });
       }
-      if (req.method === 'DELETE' && req.url.startsWith('/admin/users/')) return send(200, {});
+      if (req.method === 'DELETE' && req.url.startsWith('/admin/users/')) return send(gotrueDelete, {});
       if (req.method === 'POST' && req.url.startsWith('/token')) return send(200, { access_token: 'AT', refresh_token: 'RT' });
       if (req.method === 'POST' && req.url === '/rpc/fn_provision_new_company') {
         return companyRpc === 'ok' ? send(200, { success: true, company_id: 'co-1' }) : send(400, { message: 'quota' });
@@ -39,6 +41,7 @@ async function harness({ emailTaken = false, gotrueCreate = 'ok', companyRpc = '
     connect: async () => ({
       query: async (text, params) => {
         queries.push({ text, params });
+        if (/DELETE FROM public\.user_roles/.test(text)) order.push('sql:user_roles');
         if (/FROM auth\.users WHERE lower\(email\)/.test(text)) return { rowCount: emailTaken ? 1 : 0, rows: emailTaken ? [{ id: 'x' }] : [] };
         if (/FROM public\.companies WHERE tenant_id/.test(text)) return { rowCount: 0, rows: [] };
         return { rowCount: 1, rows: [] };
@@ -46,7 +49,7 @@ async function harness({ emailTaken = false, gotrueCreate = 'ok', companyRpc = '
       end: async () => {},
     }),
   };
-  return { deps, http_, queries, close: () => server.close() };
+  return { deps, http_, queries, order, close: () => server.close() };
 }
 const input = (o = {}) => ({ companyName: 'Acme', adminEmail: 'Owner@Acme.Test', adminPassword: 'secret1', localCurrency: 'uah', mainCurrency: 'usd', country: 'ua', ...o });
 
@@ -132,7 +135,7 @@ test('NEVER lists users through GoTrue; a GoTrue email_exists race removes only 
   } finally { h.close(); }
 });
 
-test('a failure after the user exists deletes exactly the user id this call was handed — not "the newest user"', async () => {
+test('a failure after the user exists deletes exactly the user id this call was handed — not "the newest user" — dependents first', async () => {
   const h = await harness({ companyRpc: 'fail', existingUsers: [{ id: 'victim-1' }, { id: 'victim-2' }, { id: 'user-new' }] });
   try {
     const r = await createLocalCompany(h.deps, input());
@@ -142,6 +145,21 @@ test('a failure after the user exists deletes exactly the user id this call was 
     assert.deepEqual(dels.map((c) => c.path), ['/admin/users/user-new']);
     assert.ok(!h.http_.some((c) => c.method === 'GET'));
     assert.ok(h.queries.some((q) => /DELETE FROM public\.tenants/.test(q.text)));
+    // production's role guards refuse a cascade from GoTrue's session: the role rows of THIS user go before the GoTrue delete
+    const roleDel = h.queries.find((q) => /DELETE FROM public\.user_roles WHERE user_id/.test(q.text));
+    const profDel = h.queries.find((q) => /DELETE FROM public\.user_profiles WHERE id/.test(q.text));
+    assert.deepEqual(roleDel.params, ['user-new']);
+    assert.deepEqual(profDel.params, ['user-new']);
+    assert.ok(h.order.indexOf('sql:user_roles') < h.order.indexOf('http:DELETE /admin/users/user-new'), 'dependents are deleted before the GoTrue call');
+  } finally { h.close(); }
+});
+
+test('if GoTrue still refuses the delete, exactly that id is removed from auth.users by SQL', async () => {
+  const h = await harness({ companyRpc: 'fail', gotrueDelete: 500 });
+  try {
+    await createLocalCompany(h.deps, input());
+    const direct = h.queries.find((q) => /DELETE FROM auth\.users WHERE id = \$1/.test(q.text));
+    assert.deepEqual(direct.params, ['user-new']);
   } finally { h.close(); }
 });
 

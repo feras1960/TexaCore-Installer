@@ -188,6 +188,20 @@ async function main() {
       B = r.json;
       return `company ${B.companyId.slice(0, 8)}…`;
     });
+    await R.check('3.6b a company creation that FAILS after the admin exists leaves no tenant, auth user, profile or role behind (live cleanup)', async () => {
+      const counts = async () => (await pg(`SELECT (SELECT count(*) FROM tenants)::int t, (SELECT count(*) FROM auth.users)::int u, (SELECT count(*) FROM user_profiles)::int p, (SELECT count(*) FROM user_roles)::int r`)).rows[0];
+      const before = await counts();
+      await pg('REVOKE EXECUTE ON FUNCTION public.fn_provision_new_company(uuid, jsonb, text) FROM authenticated');
+      let r;
+      try { r = await request('POST', `${ADMIN}/api/create-local-company`, { headers: H, body: body({ companyName: 'Boom', adminEmail: 'boom@e2e.test' }) }); }
+      finally { await pg('GRANT EXECUTE ON FUNCTION public.fn_provision_new_company(uuid, jsonb, text) TO authenticated'); }
+      if (!r.json || r.json.success !== false || r.json.code !== 'COMPANY_FAILED') throw new Error(`expected COMPANY_FAILED, got ${r.text.slice(0, 200)}`);
+      const after = await counts();
+      if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error(`leftovers: ${JSON.stringify(before)} → ${JSON.stringify(after)}`);
+      const again = await request('POST', `${ADMIN}/api/create-local-company`, { headers: H, body: body({ companyName: 'Boom', adminEmail: 'boom@e2e.test', adminPassword: 'E2ePass#2026' }) });
+      if (!again.json || !again.json.success) throw new Error(`the same email could not be used again after the failure: ${again.text.slice(0, 160)}`);
+      return `refused cleanly (${JSON.stringify(after)} unchanged); the same email registers fine afterwards`;
+    });
     await R.check('3.7 plan sync: subscription, plan and modules follow the license', async () => {
       const r = (await pg(`SELECT sp.code, ts.status, ts.trial_end_date::text tend, ts.end_date::text endd, (SELECT count(*)::int FROM tenant_modules tm WHERE tm.tenant_id=ts.tenant_id AND tm.is_active) mods,
                                   EXISTS (SELECT 1 FROM tenant_modules tm WHERE tm.tenant_id=ts.tenant_id AND tm.is_active AND tm.module_code='fabric') fabric,
