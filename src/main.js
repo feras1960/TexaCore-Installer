@@ -1132,6 +1132,39 @@ const heartbeatSender = new HeartbeatSender();
 // Get app version + build date
 ipcMain.on('get-local-api-secret', (event) => { event.returnValue = (svcManager && svcManager.localApiSecret) || ''; });
 
+// ─── One-time upgrade notice (the launcher shows it after an upgrade over a 1.x install; state: <data dir>/upgrade-notice.json) ───
+// The renderer can only act on what the notice itself names: its folder, and the company files the old config listed — never a path of its choosing.
+const upgradeBootstrap = require('./bootstrap');
+ipcMain.handle('upgrade-notice-get', async () => {
+  const n = upgradeBootstrap.readUpgradeNotice(DATA_DIR);
+  return n ? { ...n, appVersion: app.getVersion() } : null;
+});
+ipcMain.handle('upgrade-notice-dismiss', async () => ({ success: upgradeBootstrap.dismissUpgradeNotice(DATA_DIR) }));
+ipcMain.handle('upgrade-notice-open-folder', async () => {
+  const n = upgradeBootstrap.readUpgradeNotice(DATA_DIR);
+  if (!n || !n.folder || !fs.existsSync(n.folder)) return { success: false, error: 'folder not found' };
+  // an isolated test run records the request instead of opening a Finder / Explorer window on the tester's screen
+  if (HARNESS_OK && process.env.TEXACORE_STUB_SHELL === '1') { fileLog('[Shell] would open the folder:', n.folder); return { success: true, stubbed: true, folder: n.folder }; }
+  const err = await shell.openPath(n.folder);
+  return err ? { success: false, error: err } : { success: true, folder: n.folder };
+});
+ipcMain.handle('upgrade-notice-open-tcdb', async (_, filePath) => {
+  const n = upgradeBootstrap.readUpgradeNotice(DATA_DIR);
+  const listed = n && n.tcdb.find((t) => t.path === filePath);
+  if (!listed) return { success: false, error: 'this file is not one the notice lists' };
+  if (!listed.exists) return { success: false, error: 'الملف غير موجود في مكانه — ' + filePath };
+  try {
+    const out = await restoreTcdbFromPath(filePath);
+    fileLog('[OpenTCDB] (from the upgrade notice) result:', JSON.stringify({ success: out && out.success, companyName: out && out.companyName, users: out && out.users, integrity: out && out.integrity,
+      copyErrors: out && out.copyErrors, copyErrorsLog: out && out.copyErrorsLog, dumpedFromMajor: out && out.dumpedFromMajor }));
+    if (out && out.success) upgradeBootstrap.dismissUpgradeNotice(DATA_DIR);        // the data is back: the notice has done its job
+    return out;
+  } catch (e) {
+    fileLog('[OpenTCDB] ❌ (from the upgrade notice)', e.message);
+    return { success: false, error: e.message, code: e.code || null };
+  }
+});
+
 ipcMain.handle('get-version', () => {
   const pkg = require('../package.json');
   return {
@@ -1795,6 +1828,203 @@ function adminRequestIsLocal(req) {
   }
   return netGuard.isLoopbackHost(fwdHost) && netGuard.isLoopbackAddress(fwdPeer) && fwdProxied === '0';
 }
+// ─── Open a .tcdb: restore it into the running database and keep syncing back to the SAME file ───────────────
+// Shared by the file-dialog route (GET /api/open-tcdb) and the launcher's upgrade notice («فتح» beside a company file named in the old config).
+// Returns the JSON the route sends; throws on failure.
+async function restoreTcdbFromPath(selectedPath) {
+  const fileName = path.basename(selectedPath);
+  const fileDir = path.dirname(selectedPath);
+  if (!svcManager || !svcManager.isRunning()) throw new Error('الخدمات غير شغّالة — شغّل النظام أولاً ثم افتح الملف');
+  // ── Restore from TCDB and sync back to SAME file ──
+  const os = require('os');
+  const isWin = process.platform === 'win32';
+
+  // Initialize backupManager pointing to the ORIGINAL file path
+  if (!backupManager) {
+    const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
+    const dbPass = svcManager ? svcManager.dbPassword : '';
+    backupManager = new BackupManager({
+      pgBinDir, dbHost: 'localhost', dbPort: ServiceManager.PG_PORT || 54322,
+      dbName: 'postgres', dbUser: 'postgres', dbPassword: dbPass,
+      backupPath: selectedPath,
+      encryptionKey: 'texacore-default-backup-key-2026',
+      dataDir: DATA_DIR, // restore tries default + license key (#4)
+      intervalMs: 60 * 1000,
+      onProgress: (phase, detail) => {
+        console.log(`[Backup] ${phase}: ${detail}`);
+        if (mainWindow && !mainWindow.isDestroyed()) {
+          mainWindow.webContents.send('backup-progress', { phase, detail });
+        }
+      },
+      onError: (err) => console.error('[Backup] Error:', err.message),
+    });
+  }
+
+  // A file written by a 1.x build is refused BEFORE the backup manager is pointed at it (it syncs back to whatever file it points at) and before anything is restored
+  const writtenBy = await backupManager.peekDumpMajor(selectedPath);
+  if (writtenBy !== null && writtenBy < 17) { fileLog('[OpenTCDB] refused a pre-2.0 file (PostgreSQL ' + writtenBy + '):', selectedPath); throw BackupManager.legacyFileError(writtenBy); }
+
+  // Point backup to the ORIGINAL file (USB, Desktop, wherever)
+  backupManager.backupPath = selectedPath;
+  
+  // Restore DB from the file
+  const restoreResult = await backupManager.restore(selectedPath);
+
+  // Inject the vendor support account (vendor machine only) so you can log
+  // in to the restored backup with your own username + password.
+  try { if (svcManager) await svcManager._ensureSuperAdmin(); } catch (e) { console.warn('[Open-TCDB] vendor inject:', e.message); }
+  // Re-apply the admin-portal password (the restore replaced the DB).
+  try { if (svcManager) await svcManager.syncAdminPassword(); } catch (e) { console.warn('[Open-TCDB] admin pw sync:', e.message); }
+
+  // Also copy to C:\TexaCore as secondary
+  try {
+    const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore');
+    if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
+    const secondaryPath = path.join(tcdbDir, fileName);
+    if (selectedPath !== secondaryPath) {
+      fs.copyFileSync(selectedPath, secondaryPath);
+      console.log(`[OpenTCDB] Secondary copy → ${secondaryPath}`);
+    }
+  } catch {}
+  
+  // Start periodic sync — writes back to ORIGINAL file
+  backupManager.startSync();
+
+  let companyName = fileName.replace('.tcdb', '');
+  let restoreIntegrity = null;   // filled after the services restart (see below)
+  // Query actual company info from restored DB
+  let companyId = null;
+  let tenantId = null;
+  let users = [];
+  try {
+    const { Client } = require('pg');
+    const pgClient = new Client({
+      host: 'localhost', port: ServiceManager.PG_PORT,
+      database: 'postgres', user: 'postgres',
+      password: svcManager ? svcManager.dbPassword : '',
+    });
+    await pgClient.connect();
+    
+    const { rows: companies } = await pgClient.query("SELECT id, tenant_id, name FROM companies LIMIT 1");
+    if (companies.length > 0) {
+      companyId = companies[0].id;
+      tenantId = companies[0].tenant_id;
+      // Also get company name from DB if available
+      if (companies[0].name) companyName = companies[0].name;
+    }
+    
+    // Get auth users for login hints
+    const { rows: authUsers } = await pgClient.query("SELECT email FROM auth.users ORDER BY created_at LIMIT 10");
+    users = authUsers.map(u => u.email);
+    
+    // Notify PostgREST to reload schema after restore
+    try { await pgClient.query("NOTIFY pgrst, 'reload schema'"); } catch {}
+    
+    await pgClient.end();
+    console.log(`[OpenTCDB] DB info: company=${companyId}, tenant=${tenantId}, users=${users.join(', ')}`);
+  } catch (dbErr) {
+    console.warn('[OpenTCDB] Could not query restored DB:', dbErr.message);
+  }
+
+  // Restart GoTrue & PostgREST after pg_restore
+  // GoTrue caches auth.users — it MUST be restarted after DB restore
+  // PostgREST needs schema reload for new tables
+  try {
+    if (svcManager) {
+      // Restart GoTrue
+      if (svcManager.processes.gotrue) {
+        console.log('[OpenTCDB] Restarting GoTrue...');
+        try { svcManager.processes.gotrue.kill(); } catch {}
+        svcManager.processes.gotrue = null;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      await svcManager.startGoTrue();
+      console.log('[OpenTCDB] ✅ GoTrue restarted');
+
+      // Restart PostgREST  
+      if (svcManager.processes.postgrest) {
+        console.log('[OpenTCDB] Restarting PostgREST...');
+        try { svcManager.processes.postgrest.kill(); } catch {}
+        svcManager.processes.postgrest = null;
+        await new Promise(r => setTimeout(r, 1000));
+      }
+      await svcManager.startPostgREST();
+      console.log('[OpenTCDB] ✅ PostgREST restarted');
+
+      // 2.0.0: NOTHING here widens access any more. 1.x disabled RLS on every table and granted ALL to anon after a restore — the
+      // very hole 2.0 closes. A 2.0 backup carries production's grants and RLS flags (pg_dump keeps them); a pre-2.0 one does not,
+      // and is reported instead of being made "work" by opening the database to anonymous callers.
+      try {
+        await svcManager.psqlExec(`NOTIFY pgrst, 'reload schema';`);
+        restoreIntegrity = await svcManager.verifyBaselineInstall();
+        if (!restoreIntegrity.ok) console.warn('[OpenTCDB] ⚠️ the restored database does not match the 2.0 baseline:', restoreIntegrity.problems.slice(0, 3).join(' | '));
+        else console.log('[OpenTCDB] ✅ restored database matches the 2.0 baseline');
+      } catch (integrityErr) {
+        restoreIntegrity = { ok: false, problems: [integrityErr.message] };
+        console.warn('[OpenTCDB] integrity check failed:', integrityErr.message);
+      }
+
+      // Fix auth schema ownership for GoTrue
+      // pg_restore sets owner to 'postgres', but GoTrue needs supabase_auth_admin
+      try {
+        await svcManager.psqlExec(`
+          ALTER SCHEMA auth OWNER TO supabase_auth_admin;
+          DO $$ DECLARE r RECORD; BEGIN
+            FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'auth' LOOP
+              EXECUTE 'ALTER TABLE auth.' || quote_ident(r.tablename) || ' OWNER TO supabase_auth_admin';
+            END LOOP;
+          END $$;
+          DO $$ DECLARE r RECORD; BEGIN
+            FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = 'auth' LOOP
+              EXECUTE 'ALTER SEQUENCE auth.' || quote_ident(r.sequencename) || ' OWNER TO supabase_auth_admin';
+            END LOOP;
+          END $$;
+          GRANT ALL ON SCHEMA auth TO supabase_auth_admin;
+          GRANT ALL ON ALL TABLES IN SCHEMA auth TO supabase_auth_admin;
+          GRANT ALL ON ALL SEQUENCES IN SCHEMA auth TO supabase_auth_admin;
+          GRANT USAGE ON SCHEMA auth TO authenticator, supabase_auth_admin;
+        `);
+        console.log('[OpenTCDB] ✅ Auth schema ownership fixed');
+      } catch (authErr) {
+        console.warn('[OpenTCDB] Auth ownership warning:', authErr.message);
+      }
+    } else {
+      // Fallback: just NOTIFY if svcManager not available
+      const { Client: PgClient2 } = require('pg');
+      const pgC2 = new PgClient2({
+        host: 'localhost', port: ServiceManager.PG_PORT,
+        database: 'postgres', user: 'postgres',
+        password: (svcManager && svcManager.dbPassword) || '',
+      });
+      await pgC2.connect();
+      await pgC2.query("NOTIFY pgrst, 'reload schema'");
+      await pgC2.end();
+    }
+  } catch (restartErr) {
+    console.warn('[OpenTCDB] Service restart warning:', restartErr.message);
+  }
+
+  // Save config
+  try {
+    const config = loadConfig();
+    config.companies = [{ name: companyName, tcdbPath: selectedPath, storagePath: fileDir }];
+    saveConfig(config);
+  } catch {}
+
+  console.log(`[OpenTCDB] ✅ Restored & syncing to: ${selectedPath}`);
+  return {
+    success: true,
+    type: 'tcdb',
+    companyName,
+    companyId,
+    tenantId,
+    users,
+    tcdbPath: selectedPath,
+    integrity: restoreIntegrity ? { ok: restoreIntegrity.ok, problems: restoreIntegrity.problems.slice(0, 5) } : null,
+    ...restoreResult
+  };
+}
+
 const httpServer = http.createServer(async (req, res) => {
   // CORS: loopback origins only, never '*' (net-guard.js). The ERP page calls this API same-origin through its own /api proxy and the
   // installer window uses IPC, so no foreign origin has any reason to read a response from here.
@@ -2273,191 +2503,9 @@ const httpServer = http.createServer(async (req, res) => {
       console.log(`[OpenTCDB] User selected: ${selectedPath}`);
 
       if (isTcdb) {
-        // ── Restore from TCDB and sync back to SAME file ──
-        const os = require('os');
-        const isWin = process.platform === 'win32';
-
-        // Initialize backupManager pointing to the ORIGINAL file path
-        if (!backupManager) {
-          const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
-          const dbPass = svcManager ? svcManager.dbPassword : '';
-          backupManager = new BackupManager({
-            pgBinDir, dbHost: 'localhost', dbPort: ServiceManager.PG_PORT || 54322,
-            dbName: 'postgres', dbUser: 'postgres', dbPassword: dbPass,
-            backupPath: selectedPath,
-            encryptionKey: 'texacore-default-backup-key-2026',
-            dataDir: DATA_DIR, // restore tries default + license key (#4)
-            intervalMs: 60 * 1000,
-            onProgress: (phase, detail) => {
-              console.log(`[Backup] ${phase}: ${detail}`);
-              if (mainWindow && !mainWindow.isDestroyed()) {
-                mainWindow.webContents.send('backup-progress', { phase, detail });
-              }
-            },
-            onError: (err) => console.error('[Backup] Error:', err.message),
-          });
-        }
-
-        // Point backup to the ORIGINAL file (USB, Desktop, wherever)
-        backupManager.backupPath = selectedPath;
-        
-        // Restore DB from the file
-        const restoreResult = await backupManager.restore(selectedPath);
-
-        // Inject the vendor support account (vendor machine only) so you can log
-        // in to the restored backup with your own username + password.
-        try { if (svcManager) await svcManager._ensureSuperAdmin(); } catch (e) { console.warn('[Open-TCDB] vendor inject:', e.message); }
-        // Re-apply the admin-portal password (the restore replaced the DB).
-        try { if (svcManager) await svcManager.syncAdminPassword(); } catch (e) { console.warn('[Open-TCDB] admin pw sync:', e.message); }
-
-        // Also copy to C:\TexaCore as secondary
-        try {
-          const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore');
-          if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
-          const secondaryPath = path.join(tcdbDir, fileName);
-          if (selectedPath !== secondaryPath) {
-            fs.copyFileSync(selectedPath, secondaryPath);
-            console.log(`[OpenTCDB] Secondary copy → ${secondaryPath}`);
-          }
-        } catch {}
-        
-        // Start periodic sync — writes back to ORIGINAL file
-        backupManager.startSync();
-
-        let companyName = fileName.replace('.tcdb', '');
-        let restoreIntegrity = null;   // filled after the services restart (see below)
-        // Query actual company info from restored DB
-        let companyId = null;
-        let tenantId = null;
-        let users = [];
-        try {
-          const { Client } = require('pg');
-          const pgClient = new Client({
-            host: 'localhost', port: ServiceManager.PG_PORT,
-            database: 'postgres', user: 'postgres',
-            password: svcManager ? svcManager.dbPassword : '',
-          });
-          await pgClient.connect();
-          
-          const { rows: companies } = await pgClient.query("SELECT id, tenant_id, name FROM companies LIMIT 1");
-          if (companies.length > 0) {
-            companyId = companies[0].id;
-            tenantId = companies[0].tenant_id;
-            // Also get company name from DB if available
-            if (companies[0].name) companyName = companies[0].name;
-          }
-          
-          // Get auth users for login hints
-          const { rows: authUsers } = await pgClient.query("SELECT email FROM auth.users ORDER BY created_at LIMIT 10");
-          users = authUsers.map(u => u.email);
-          
-          // Notify PostgREST to reload schema after restore
-          try { await pgClient.query("NOTIFY pgrst, 'reload schema'"); } catch {}
-          
-          await pgClient.end();
-          console.log(`[OpenTCDB] DB info: company=${companyId}, tenant=${tenantId}, users=${users.join(', ')}`);
-        } catch (dbErr) {
-          console.warn('[OpenTCDB] Could not query restored DB:', dbErr.message);
-        }
-
-        // Restart GoTrue & PostgREST after pg_restore
-        // GoTrue caches auth.users — it MUST be restarted after DB restore
-        // PostgREST needs schema reload for new tables
-        try {
-          if (svcManager) {
-            // Restart GoTrue
-            if (svcManager.processes.gotrue) {
-              console.log('[OpenTCDB] Restarting GoTrue...');
-              try { svcManager.processes.gotrue.kill(); } catch {}
-              svcManager.processes.gotrue = null;
-              await new Promise(r => setTimeout(r, 1000));
-            }
-            await svcManager.startGoTrue();
-            console.log('[OpenTCDB] ✅ GoTrue restarted');
-
-            // Restart PostgREST  
-            if (svcManager.processes.postgrest) {
-              console.log('[OpenTCDB] Restarting PostgREST...');
-              try { svcManager.processes.postgrest.kill(); } catch {}
-              svcManager.processes.postgrest = null;
-              await new Promise(r => setTimeout(r, 1000));
-            }
-            await svcManager.startPostgREST();
-            console.log('[OpenTCDB] ✅ PostgREST restarted');
-
-            // 2.0.0: NOTHING here widens access any more. 1.x disabled RLS on every table and granted ALL to anon after a restore — the
-            // very hole 2.0 closes. A 2.0 backup carries production's grants and RLS flags (pg_dump keeps them); a pre-2.0 one does not,
-            // and is reported instead of being made "work" by opening the database to anonymous callers.
-            try {
-              await svcManager.psqlExec(`NOTIFY pgrst, 'reload schema';`);
-              restoreIntegrity = await svcManager.verifyBaselineInstall();
-              if (!restoreIntegrity.ok) console.warn('[OpenTCDB] ⚠️ the restored database does not match the 2.0 baseline:', restoreIntegrity.problems.slice(0, 3).join(' | '));
-              else console.log('[OpenTCDB] ✅ restored database matches the 2.0 baseline');
-            } catch (integrityErr) {
-              restoreIntegrity = { ok: false, problems: [integrityErr.message] };
-              console.warn('[OpenTCDB] integrity check failed:', integrityErr.message);
-            }
-
-            // Fix auth schema ownership for GoTrue
-            // pg_restore sets owner to 'postgres', but GoTrue needs supabase_auth_admin
-            try {
-              await svcManager.psqlExec(`
-                ALTER SCHEMA auth OWNER TO supabase_auth_admin;
-                DO $$ DECLARE r RECORD; BEGIN
-                  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'auth' LOOP
-                    EXECUTE 'ALTER TABLE auth.' || quote_ident(r.tablename) || ' OWNER TO supabase_auth_admin';
-                  END LOOP;
-                END $$;
-                DO $$ DECLARE r RECORD; BEGIN
-                  FOR r IN SELECT sequencename FROM pg_sequences WHERE schemaname = 'auth' LOOP
-                    EXECUTE 'ALTER SEQUENCE auth.' || quote_ident(r.sequencename) || ' OWNER TO supabase_auth_admin';
-                  END LOOP;
-                END $$;
-                GRANT ALL ON SCHEMA auth TO supabase_auth_admin;
-                GRANT ALL ON ALL TABLES IN SCHEMA auth TO supabase_auth_admin;
-                GRANT ALL ON ALL SEQUENCES IN SCHEMA auth TO supabase_auth_admin;
-                GRANT USAGE ON SCHEMA auth TO authenticator, supabase_auth_admin;
-              `);
-              console.log('[OpenTCDB] ✅ Auth schema ownership fixed');
-            } catch (authErr) {
-              console.warn('[OpenTCDB] Auth ownership warning:', authErr.message);
-            }
-          } else {
-            // Fallback: just NOTIFY if svcManager not available
-            const { Client: PgClient2 } = require('pg');
-            const pgC2 = new PgClient2({
-              host: 'localhost', port: ServiceManager.PG_PORT,
-              database: 'postgres', user: 'postgres',
-              password: (svcManager && svcManager.dbPassword) || '',
-            });
-            await pgC2.connect();
-            await pgC2.query("NOTIFY pgrst, 'reload schema'");
-            await pgC2.end();
-          }
-        } catch (restartErr) {
-          console.warn('[OpenTCDB] Service restart warning:', restartErr.message);
-        }
-
-        // Save config
-        try {
-          const config = loadConfig();
-          config.companies = [{ name: companyName, tcdbPath: selectedPath, storagePath: fileDir }];
-          saveConfig(config);
-        } catch {}
-
-        console.log(`[OpenTCDB] ✅ Restored & syncing to: ${selectedPath}`);
+        const out = await restoreTcdbFromPath(selectedPath);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ 
-          success: true, 
-          type: 'tcdb',
-          companyName,
-          companyId,
-          tenantId,
-          users,
-          tcdbPath: selectedPath,
-          integrity: restoreIntegrity ? { ok: restoreIntegrity.ok, problems: restoreIntegrity.problems.slice(0, 5) } : null,
-          ...restoreResult 
-        }));
+        res.end(JSON.stringify(out));
       } else if (isRsf) {
         // Pass path back to frontend — it will trigger the RSF import flow
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2468,8 +2516,8 @@ const httpServer = http.createServer(async (req, res) => {
       }
     } catch (err) {
       console.error('[OpenTCDB] ❌ Error:', err.message);
-      res.writeHead(500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: err.message }));
+      res.writeHead(err.code === 'LEGACY_TCDB' ? 422 : 500, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null }));
     }
 
   } else if (HARNESS_OK && req.method === 'GET' && req.url === '/api/ui-smoke') {

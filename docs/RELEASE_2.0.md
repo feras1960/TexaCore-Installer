@@ -36,6 +36,22 @@ packaged web bundle is not this version, if fonts/binaries/bootstrap SQL are mis
 - **After the mac build run `node scripts/verify-mac-build.js`** (zip + dmg + latest-mac.yml, signature validity of the extracted zip and the mounted dmg). Earlier builds shipped an invalid signature and the launch checks did not notice, because they run the inner binary.
 - Update check: `node scripts/e2e/ota-check.js` (hops a, tamper, tamper2, b; mock GitHub with the real redirect chain, outside the product) and `node scripts/e2e/ui-shots.js` (launcher window, Arabic RTL + English LTR).
 
+## Opening a 1.x company file (.tcdb) in 2.0 — measured 2026-10-13, and what 2.0 does about it
+**Result: it cannot work, so 2.0 refuses it before touching anything.** A real 1.8.0 file (PostgreSQL 15, plain `pg_dump` of the 1.x local schema, written by the 1.8.0 build `c05be42` in a lab run with 4 companies / 6 entries / 6 customers)
+was opened in the packaged 2.0 through the launcher's «فتح» button with the old flow unguarded:
+- the flow reported success, but 621 statements failed: every table whose columns differ between the 1.x local schema and the production-derived 2.0 schema failed **as a whole** (90 "column … does not exist", 26 foreign-key column mismatches,
+  `journal_entry_lines.is_fund_line` NULL against a NOT NULL, array literals) — companies 4→0, tenants 4→0, customers 6→0, journal lines 12→0, user_profiles, branches, warehouses, roles, plans, modules… came back empty; only some entries and the login survived;
+- the "replace" step had already truncated the 2.0 tables, the dump's CREATE statements added ~38 tables / ~60 functions to the 2.0 database (integrity: 796 tables vs 758 expected; **38 of them anon-readable without row security**), and the sync would then have overwritten the 1.x file;
+- the signed-in 1.x admin saw no company.
+So `BackupManager.peekDumpMajor()` reads the dump header ("-- Dumped from database version N") and a file written by PostgreSQL < 17 is refused with `LEGACY_TCDB` before the backup manager is pointed at it and before any statement runs
+(`scripts/e2e/legacy-tcdb-check.js`: file byte-identical after a minute, database unchanged, hardening intact). The old data stays safe: the whole 1.x data folder is kept (`texacore-data.v18-backup-<time>`), and so is every .tcdb.
+The launcher's upgrade notice says so (and tells the user to create the company again or import from the Rashid file). A real migration of 1.x data needs a purpose-built converter (restore the dump into a scratch database and copy the common columns into the 2.0 schema,
+company data only) — not in 2.0.0.
+
+How the 1.x file was produced (lab only, never the product tree): a worktree of `c05be42`; its bundled PostgreSQL 15.17 restored from git; `scripts/e2e/lab-180-migrations.js` restores the 195 migration files the repo does not track (`migrations/` is ignored) from the ERP git history
+(3 installer-only `20260713L/M/N_local_*` files do not exist anywhere readable, so 299 of 333 migrations applied); every hard-coded service port in that copy moved into the 47391–47399 block — **including the literal `54322` in `main.js`, `migration-runner.js` and `backup-manager.js`, which
+would otherwise have talked to an installed app's database** — and the run was wrapped in `sandbox-exec` denying outbound 80/443/8080/8443 and the installed app's ports. Then: create a company through the admin API, add rows with SQL, `POST /api/backup`.
+
 ## Re-cutting the baseline (the only thing that changes)
 
 1. ERP: `scripts/schema/build-baseline.sh` (see `supabase/baseline/BASELINE.md`), copy the stub file as it says, commit.

@@ -114,7 +114,11 @@ async function waitFor(fn, ms, what) {
       if (JSON.stringify(cfg).includes('Legacy Co') || JSON.stringify(cfg).includes('old.tcdb')) throw new Error('the old company list / backup path leaked into the new config');
       if (fs.readFileSync(path.join(moved, 'backups', 'old.tcdb'), 'utf8') !== 'precious') throw new Error('old backup changed while the new install ran');
       if (fs.readFileSync(path.join(moved, 'license.dat'), 'utf8') !== 'legacy-licence-blob') throw new Error('the old license.dat changed or vanished');
-      return `old dir kept as ${asides[0]} (cluster, config, backups intact); fresh PG 17 install with new secrets; carry-over logged (${carriedLine}); no company list`;
+      // the one-time notice: where the old data is, the company file(s) the old config named (here: one that lived inside the moved folder), not dismissed
+      const note = JSON.parse(fs.readFileSync(path.join(dB, 'upgrade-notice.json'), 'utf8'));
+      if (note.kind !== 'legacy' || note.folder !== moved || note.dismissedAt) throw new Error(`upgrade notice: ${JSON.stringify(note)}`);
+      if (note.tcdb.length !== 1 || note.tcdb[0].path !== path.join(moved, 'backups', 'old.tcdb') || !fs.existsSync(note.tcdb[0].path)) throw new Error(`upgrade notice files: ${JSON.stringify(note.tcdb)}`);
+      return `old dir kept as ${asides[0]} (cluster, config, backups intact); fresh PG 17 install with new secrets; carry-over logged (${carriedLine}); no company list; upgrade notice written (folder + 1 company file)`;
     } finally { await stopApp(child, uB); }
   });
 

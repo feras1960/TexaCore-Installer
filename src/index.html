@@ -92,6 +92,27 @@
       </div>
     </div>
 
+    <!-- One-time notice after an upgrade over a 1.x install: where the previous data is, how to bring the companies back (hidden until the main process says there is one) -->
+    <div class="upgrade-notice" id="upgrade-notice" role="region" aria-labelledby="upgrade-notice-title" style="display:none;">
+      <div class="upgrade-notice-head">
+        <span class="upgrade-notice-icon" aria-hidden="true">ℹ️</span>
+        <strong id="upgrade-notice-title" data-i18n="upgrade.title">تمّ التحديث</strong>
+        <button type="button" class="upgrade-close" id="upgrade-close" data-i18n-aria="upgrade.dismiss" aria-label="إغلاق">×</button>
+      </div>
+      <p class="upgrade-line" id="upgrade-line-a"></p>
+      <code class="upgrade-folder" id="upgrade-folder" dir="ltr"></code>
+      <p class="upgrade-line" id="upgrade-line-b"></p>
+      <div class="upgrade-files" id="upgrade-files" style="display:none;">
+        <div class="upgrade-files-title" data-i18n="upgrade.filesTitle">ملفات الشركات القديمة (من إعدادك السابق):</div>
+        <ul id="upgrade-file-list"></ul>
+      </div>
+      <div class="upgrade-actions">
+        <button type="button" class="btn btn-ghost" id="upgrade-open-folder" data-i18n="upgrade.openFolder">فتح المجلد</button>
+        <button type="button" class="btn btn-ghost" id="upgrade-dismiss" data-i18n="upgrade.dismiss">فهمت، إغلاق</button>
+      </div>
+      <div class="upgrade-status" id="upgrade-status" role="status" aria-live="polite"></div>
+    </div>
+
     <!-- panel-no-docker removed — no longer needed -->
     <div id="panel-no-docker" style="display:none;"></div>
 

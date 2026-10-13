@@ -11,8 +11,10 @@
 //       replaced by a recorder, so the owner's real clipboard is never touched) and the button says so
 //   U3  the stop button only ASKS, inside the window (no native dialog): nothing stops until «yes»; Cancel and Esc withdraw the question
 //   U4  «yes» stops the services
+//   U5  the one-time upgrade notice (the run starts over a 1.x data folder): shown with the old folder and the old company file, in Arabic RTL and English LTR; «فتح المجلد» asks the OS to open exactly that folder;
+//       the «فتح» button beside a 1.x company file is refused with the translated message; «إغلاق» dismisses it for good (still gone after a reload and after the files are re-read)
 //
-//   node scripts/e2e/ui-shots.js --workdir <empty dir> --app <packaged .app>
+//   node scripts/e2e/ui-shots.js --workdir <empty dir> --app <packaged .app> [--tcdb <a .tcdb written by 1.x>]
 //   screenshots → <workdir>/shots/ui-<lang>-*.png   evidence → <workdir>/results.json
 // ════════════════════════════════════════════════════════════════
 const fs = require('fs');
@@ -22,6 +24,7 @@ const { PORTS, Results, portFree, request, startApp, stopApp } = require('./lib'
 const arg = (n, d = '') => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const WORK = path.resolve(arg('workdir', ''));
 const APP = arg('app', '');
+const TCDB = arg('tcdb', '');
 if (!arg('workdir')) { console.error('--workdir <dir> is required'); process.exit(2); }
 const binary = APP ? path.join(path.resolve(APP), 'Contents', 'MacOS', path.basename(path.resolve(APP), '.app')) : '';
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -32,7 +35,14 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
   const shots = path.join(WORK, 'shots'); fs.mkdirSync(shots, { recursive: true });
   for (const p of Object.values(PORTS)) if (!(await portFree(p))) { console.error(`port ${p} busy`); process.exit(2); }
   const userData = path.join(WORK, 'userdata');
-  const { child, ready } = startApp({ userData, logFile: path.join(WORK, 'app.log'), appBinary: binary, extraEnv: { TEXACORE_UI_SMOKE: '1', TEXACORE_SHOT_DIR: shots } });
+  // the run starts over a 1.x data folder (PostgreSQL 15 cluster marker + a config naming one company file), so the upgrade notice exists
+  const dd = path.join(userData, 'texacore-data');
+  const userFiles = path.join(WORK, 'user-files'); fs.mkdirSync(userFiles, { recursive: true });
+  const companyFile = path.join(userFiles, 'old18.tcdb');
+  if (TCDB) fs.copyFileSync(path.resolve(TCDB), companyFile); else fs.writeFileSync(companyFile, 'not a real company file');
+  fs.mkdirSync(path.join(dd, 'pgdata'), { recursive: true }); fs.writeFileSync(path.join(dd, 'pgdata', 'PG_VERSION'), '15\n');
+  fs.writeFileSync(path.join(dd, 'config.json'), JSON.stringify({ licenseKey: 'FREE-LOCAL', isFree: true, companies: [{ name: 'شركة الاختبار القديمة', tcdbPath: companyFile }] }));
+  const { child, ready } = startApp({ userData, logFile: path.join(WORK, 'app.log'), appBinary: binary, extraEnv: { TEXACORE_UI_SMOKE: '1', TEXACORE_SHOT_DIR: shots, TEXACORE_STUB_SHELL: '1' } });
   child.on('error', () => {});
   const evidence = {};
   try {
@@ -141,7 +151,42 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         evidence[`stop_${lang}`] = asked;
         return `question shown in the window («${asked.yes}» / «${asked.cancel}», focus on Cancel), system still running; Cancel → hidden; Esc → hidden; text: "${asked.text.slice(0, 90)}…"`;
       });
+
+      await R.check(`U5 [${lang}] the one-time upgrade notice: shown with the old folder and the old company file; «فتح المجلد» opens exactly that folder; «فتح» on a 1.x file is refused with the translated message`, async () => {
+        await js(`window.scrollTo(0, 0)`); await sleep(400);
+        const w = await js(`({ shown: getComputedStyle(document.getElementById('upgrade-notice')).display !== 'none', dir: document.documentElement.dir, title: document.getElementById('upgrade-notice-title').textContent,
+          a: document.getElementById('upgrade-line-a').textContent, folder: document.getElementById('upgrade-folder').textContent, b: document.getElementById('upgrade-line-b').textContent,
+          files: [...document.querySelectorAll('#upgrade-file-list .upgrade-file-name')].map((e) => e.textContent), buttons: [...document.querySelectorAll('#upgrade-notice button')].map((e) => e.textContent.trim()) })`);
+        if (!w.shown || !w.folder || w.files.length !== 1) throw new Error(`notice: ${JSON.stringify(w)}`);
+        if (!/texacore-data\.v18-backup-/.test(w.folder)) throw new Error(`folder shown: ${w.folder}`);
+        if (!w.a.includes('v2.0.0') ) throw new Error(`first line lacks the version: ${w.a}`);
+        await ev({ shot: `ui-${lang}-upgrade-notice.png`, wait: 300 });
+        // the folder button — recorded, not opened, in an isolated run
+        await js(`document.getElementById('upgrade-open-folder').click()`); await sleep(800);
+        const logText = fs.readFileSync(path.join(WORK, 'app.log'), 'utf8');
+        if (!logText.includes(`[Shell] would open the folder: ${w.folder}`)) throw new Error('the folder button did not ask for the notice\'s folder');
+        // the file button
+        await js(`document.querySelector('#upgrade-file-list button').click()`); await sleep(TCDB ? 4000 : 2500);
+        const st = await js(`({ text: document.getElementById('upgrade-status').textContent, cls: document.getElementById('upgrade-status').className })`);
+        await ev({ shot: `ui-${lang}-upgrade-notice-open-file.png`, wait: 200 });
+        if (!/err/.test(st.cls) || !st.text) throw new Error(`file button result: ${JSON.stringify(st)}`);
+        evidence[`notice_${lang}`] = { ...w, status: st };
+        return `${w.dir}: "${w.a}" + ${w.folder.slice(-44)} ; "${w.b.slice(0, 60)}…" ; file «${w.files[0]}» ; folder button → the OS was asked for that folder ; file button → "${st.text.slice(0, 110)}"`;
+      });
     }
+
+    await R.check('U6 «إغلاق» dismisses the notice for good: gone at once, still gone after a reload, and the notice file says so', async () => {
+      await js(`document.getElementById('upgrade-dismiss').click()`); await sleep(800);
+      const hidden = await js(`getComputedStyle(document.getElementById('upgrade-notice')).display === 'none'`);
+      if (!hidden) throw new Error('still visible after the button');
+      await js(`location.reload()`); await sleep(4000);
+      await js(`window.scrollTo(0, 0)`);
+      const after = await js(`getComputedStyle(document.getElementById('upgrade-notice')).display === 'none'`);
+      await ev({ shot: 'ui-en-upgrade-notice-dismissed.png', wait: 300 });
+      const note = JSON.parse(fs.readFileSync(path.join(dd, 'upgrade-notice.json'), 'utf8'));
+      if (!after || !note.dismissedAt) throw new Error(`after reload hidden=${after}, dismissedAt=${note.dismissedAt}`);
+      return `hidden at once and after a reload; dismissedAt ${note.dismissedAt}`;
+    });
 
     await R.check('U4 «yes» (confirm) stops the services', async () => {
       await js(`document.getElementById('btn-stop').click()`); await sleep(400);

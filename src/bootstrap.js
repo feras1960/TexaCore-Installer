@@ -153,6 +153,54 @@ function sanitizeConfigInPlace(dataDir, log = () => {}, now = new Date()) {
   return copy;
 }
 
+// ─── the one-time "your previous data is kept here" notice (shown by the launcher window after an upgrade over a 1.x install) ──────────────────────────
+const UPGRADE_NOTICE_FILE = 'upgrade-notice.json';
+
+/** The .tcdb files a pre-2.0 config.json names (company backups) — absolute paths only, de-duplicated. */
+function collectOldTcdbPaths(configFile, remap = null) {
+  const out = []; const seen = new Set();
+  let cfg = null;
+  try { cfg = JSON.parse(fs.readFileSync(configFile, 'utf8')); } catch { return out; }
+  const add = (name, p) => {
+    // a file that lived INSIDE the data dir went with it when the dir was moved aside: point at its new place
+    if (remap && typeof p === 'string' && (p === remap.from || p.startsWith(remap.from + path.sep))) p = path.join(remap.to, path.relative(remap.from, p));
+    if (typeof p !== 'string' || !/\.tcdb$/i.test(p) || !path.isAbsolute(p) || seen.has(p)) return;
+    seen.add(p); out.push({ name: String(name || path.basename(p, path.extname(p))).slice(0, 120), path: p });
+  };
+  for (const c of Array.isArray(cfg.companies) ? cfg.companies : []) if (c) add(c.name, c.tcdbPath);
+  add('', cfg.currentDbPath);
+  return out;
+}
+
+/** Write the notice into the NEW data dir. `folder` = where the previous data now is; `tcdb` = the old company files the config named. Never throws. */
+function writeUpgradeNotice(dataDir, { kind, folder, tcdb }, log = () => {}, now = new Date()) {
+  try {
+    fs.mkdirSync(dataDir, { recursive: true });
+    const note = { schema: 1, kind, createdAt: now.toISOString(), folder, tcdb: tcdb || [], dismissedAt: null };
+    fs.writeFileSync(path.join(dataDir, UPGRADE_NOTICE_FILE), JSON.stringify(note, null, 2), { mode: 0o600 });
+    log(`[Bootstrap] upgrade notice written (${kind}): previous data in ${folder}${note.tcdb.length ? `, ${note.tcdb.length} company file(s) named` : ''}`);
+    return note;
+  } catch (e) { log(`[Bootstrap] could not write the upgrade notice: ${e.message}`); return null; }
+}
+
+/** The notice that is still to be shown (not dismissed), with the `exists` flag of each file re-checked now; null when there is none. */
+function readUpgradeNotice(dataDir) {
+  try {
+    const note = JSON.parse(fs.readFileSync(path.join(dataDir, UPGRADE_NOTICE_FILE), 'utf8'));
+    if (!note || note.schema !== 1 || note.dismissedAt) return null;
+    return { ...note, folderExists: !!note.folder && fs.existsSync(note.folder), tcdb: (note.tcdb || []).map((t) => ({ ...t, exists: fs.existsSync(t.path) })) };
+  } catch { return null; }
+}
+
+function dismissUpgradeNotice(dataDir, now = new Date()) {
+  const f = path.join(dataDir, UPGRADE_NOTICE_FILE);
+  try {
+    const note = JSON.parse(fs.readFileSync(f, 'utf8'));
+    if (!note.dismissedAt) { note.dismissedAt = now.toISOString(); fs.writeFileSync(f, JSON.stringify(note, null, 2), { mode: 0o600 }); }
+    return true;
+  } catch { return false; }
+}
+
 /**
  * Called once at startup BEFORE anything reads the data dir (secrets, config, license). Applies the policy:
  *   legacy_v18            → the WHOLE data dir is moved aside (data, config, backups, legacy secrets all stay on disk,
@@ -162,6 +210,13 @@ function sanitizeConfigInPlace(dataDir, log = () => {}, now = new Date()) {
  *   fresh / ready         → nothing.
  * Returns { state, movedTo } (movedTo = new path of the set-aside item, or null).
  */
+/** A config that was sanitised in place named company files: tell the user where the original is (the .pre-2.0 copy lives in the data dir itself). */
+function noticeForSanitised(dataDir, copy, log) {
+  if (!copy) return;
+  const tcdb = collectOldTcdbPaths(copy);
+  if (tcdb.length) writeUpgradeNotice(dataDir, { kind: 'config-kept', folder: dataDir, tcdb }, log);
+}
+
 function prepareDataDir(dataDir, log = () => {}) {
   const d = detect(dataDir);
   let movedTo = null;
@@ -170,6 +225,7 @@ function prepareDataDir(dataDir, log = () => {}) {
     fs.mkdirSync(dataDir, { recursive: true });
     log(`[Bootstrap] pre-2.0 data dir (${d.reason}) moved aside → ${movedTo} (never deleted)`);
     carryForwardSettings(movedTo, dataDir, log);                       // the licence + cloud settings continue; the company/backup locations do not
+    writeUpgradeNotice(dataDir, { kind: 'legacy', folder: movedTo, tcdb: collectOldTcdbPaths(path.join(movedTo, 'config.json'), { from: dataDir, to: movedTo }) }, log);
   } else if (d.state === 'interrupted_first_run') {
     const pgdata = path.join(dataDir, 'pgdata');
     if (fs.existsSync(pgdata)) movedTo = moveAside(pgdata, 'interrupted');
@@ -178,9 +234,9 @@ function prepareDataDir(dataDir, log = () => {}) {
       if (fs.existsSync(p)) moveAside(p, 'interrupted');
     }
     log(`[Bootstrap] interrupted first run (${d.reason}) — partial cluster set aside${movedTo ? ' → ' + movedTo : ''}`);
-    sanitizeConfigInPlace(dataDir, log);
+    noticeForSanitised(dataDir, sanitizeConfigInPlace(dataDir, log), log);
   } else if (d.state === 'fresh') {
-    sanitizeConfigInPlace(dataDir, log);                               // a config left behind without its cluster still names the old backup file
+    noticeForSanitised(dataDir, sanitizeConfigInPlace(dataDir, log), log);   // a config left behind without its cluster still names the old backup file
   }
   return { ...d, movedTo };
 }
@@ -404,6 +460,7 @@ module.exports = {
   readMarker, writeMarker, markerPath,
   pgMajorOf, detect, moveAside, prepareDataDir,
   carryForwardSettings, sanitizeConfigInPlace, CARRY_CONFIG_FIELDS,
+  collectOldTcdbPaths, writeUpgradeNotice, readUpgradeNotice, dismissUpgradeNotice, UPGRADE_NOTICE_FILE,
   loadPin, verifyBaselineFiles, sha256File, hbaText, hbaHasTrust, passwordSql,
   rolesSql, postBaselineSql, planRetry, loadBaseline,
   parsePsqlErrors, classifyBaselineErrors,

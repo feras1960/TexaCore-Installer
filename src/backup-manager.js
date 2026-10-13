@@ -429,6 +429,28 @@ class BackupManager {
    * @param {string} [filePath] - Override file path (default: this.backupPath)
    * @returns {Promise<{duration: number, sqlSize: number}>}
    */
+  /** The major version of the PostgreSQL that wrote a plain dump ("-- Dumped from database version 15.17"), or null when the text does not say. */
+  static dumpedFromMajor(sqlText) {
+    const m = /^-- Dumped from database version (\d+)/m.exec(String(sqlText).slice(0, 4000));
+    return m ? parseInt(m[1], 10) : null;
+  }
+
+  /** The refusal for a .tcdb written by a pre-2.0 build. `code` lets the windows show their own translated text; `error` is bilingual for the web page. */
+  static legacyFileError(major) {
+    const e = new Error(
+      `هذا الملف من الإصدار 1.x (قاعدة PostgreSQL ${major}) ولا يمكن فتحه في 2.0: اختلفت بنية البيانات، وفتحه كان سيُفقد معظم الجداول (الشركات والعملاء والقيود…) ويترك قاعدة البيانات أقلّ أماناً. لم يتغيّر الملف ولا قاعدة البيانات الحالية. | ` +
+      `This file comes from a 1.x build (PostgreSQL ${major}) and cannot be opened in 2.0: the data layout changed, most tables would not load and the database would be left less secure. Neither the file nor the current database was changed.`);
+    e.code = 'LEGACY_TCDB'; e.dumpedFromMajor = major;
+    return e;
+  }
+
+  /** Read + decrypt + decompress just far enough to learn which PostgreSQL wrote the file (nothing is executed). */
+  async peekDumpMajor(filePath) {
+    const parsed = this._parseTcdbFile(fs.readFileSync(filePath));
+    const sql = await this._decompress(this._decrypt(parsed.salt, parsed.iv, parsed.authTag, parsed.ciphertext));
+    return BackupManager.dumpedFromMajor(sql.subarray(0, 4000).toString('utf8'));
+  }
+
   async restore(filePath) {
     const tcdbPath = filePath || this.backupPath;
     if (!fs.existsSync(tcdbPath)) {
@@ -472,10 +494,18 @@ class BackupManager {
       // first makes the restore an exact swap. auth.* is owned by _restoreAuthData
       // (step 5b) and is intentionally left out here. See [[local-hybrid-schema-sync]].
       const sqlStr = sql.toString('utf8');
+
+      // A .tcdb written by a pre-2.0 build (a PostgreSQL < 17 dump of the 1.x local schema) is REFUSED before anything is touched. Measured on a real 1.8.0 file:
+      // the dump's CREATE statements add ~38 tables / ~60 functions the 2.0 database does not have (38 of them readable by anon, no row security), the COPY of
+      // every table whose columns differ fails as a whole (companies, tenants, customers, journal lines … came back empty), and the "replace" step has already
+      // truncated what 2.0 held. The file itself is untouched; nothing is written to the database.
+      const dumpedFrom = BackupManager.dumpedFromMajor(sqlStr);
+      if (dumpedFrom !== null && dumpedFrom < 17) throw BackupManager.legacyFileError(dumpedFrom);
+
       this.onProgress('restore', 'تهيئة الاستبدال...');
       await this._truncatePublic(this._extractCopyTables(sqlStr));
       this.onProgress('restore', 'استعادة قاعدة البيانات...');
-      await this._executeSql(sql);
+      const execRes = await this._executeSql(sql);
 
       // Step 5b: Guarantee login accounts are loaded. The bulk restore above can
       // silently drop auth.users (its single transaction aborts on GoTrue's
@@ -511,7 +541,7 @@ class BackupManager {
       const duration = Date.now() - startTime;
       this.onProgress('done', `✅ تمت الاستعادة (${(sql.length / 1024 / 1024).toFixed(1)} MB) في ${(duration / 1000).toFixed(1)}s`);
 
-      return { duration, sqlSize: sql.length };
+      return { duration, sqlSize: sql.length, copyErrors: (execRes && execRes.copyErrors ? execRes.copyErrors.length : 0), copyErrorsLog: (execRes && execRes.copyErrors && execRes.copyErrors.length) ? this.backupPath + '.restore-errors.log' : null, dumpedFromMajor: dumpedFrom };
     } catch (error) {
       this.onProgress('error', `❌ فشل الاستعادة: ${error.message}`);
       throw error;

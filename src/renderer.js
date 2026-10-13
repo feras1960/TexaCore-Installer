@@ -1062,3 +1062,79 @@ document.addEventListener('keydown', (e) => {
     render();
   });
 })();
+
+
+// ─── One-time upgrade notice ──────────────────────────────────
+// After an upgrade over a 1.x install the main process leaves <data dir>/upgrade-notice.json: where the previous data is kept and the company
+// files (.tcdb) the old settings named. Shown until dismissed (or until a file is restored through it); every action goes through the main process,
+// which only acts on what the notice itself lists.
+(function initUpgradeNotice() {
+  const box = document.getElementById('upgrade-notice');
+  if (!box || !window.texacore || !window.texacore.getUpgradeNotice) return;
+  const el = (id) => document.getElementById(id);
+  let note = null;
+  let busy = false;
+  let result = null;   // { ok, text } of the last restore attempt
+
+  function setStatus(text, cls) { const st = el('upgrade-status'); st.textContent = text || ''; st.className = 'upgrade-status' + (cls ? ' ' + cls : ''); }
+
+  function render() {
+    if (!note) { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    el('upgrade-line-a').textContent = t('upgrade.a').replace('{v}', 'v' + (note.appVersion || ''));
+    el('upgrade-folder').textContent = note.folder || '';
+    el('upgrade-line-b').textContent = t(note.kind === 'legacy' ? 'upgrade.bLegacy' : 'upgrade.b');
+    el('upgrade-open-folder').style.display = note.folderExists ? '' : 'none';
+    const files = note.tcdb || [];
+    el('upgrade-files').style.display = files.length ? 'block' : 'none';
+    const ul = el('upgrade-file-list');
+    ul.textContent = '';
+    for (const f of files) {
+      const li = document.createElement('li'); li.className = 'upgrade-file';
+      const info = document.createElement('div'); info.className = 'upgrade-file-info';
+      const nm = document.createElement('div'); nm.className = 'upgrade-file-name'; nm.textContent = f.name;
+      const pa = document.createElement('div'); pa.className = 'upgrade-file-path'; pa.textContent = f.path; pa.title = f.path;
+      info.append(nm, pa); li.append(info);
+      if (f.exists) {
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-ghost'; b.textContent = t('upgrade.open'); b.disabled = busy;
+        b.dataset.path = f.path; b.addEventListener('click', () => openFile(f.path));
+        li.append(b);
+      } else {
+        const m = document.createElement('span'); m.className = 'upgrade-file-missing'; m.textContent = t('upgrade.missing'); li.append(m);
+      }
+      ul.append(li);
+    }
+    if (busy) setStatus(t('upgrade.opening'), '');
+    else if (result) setStatus(result.text, result.ok ? 'ok' : 'err');
+  }
+
+  async function dismiss() {
+    try { await window.texacore.dismissUpgradeNotice(); } catch { /* ignore */ }
+    note = null; result = null; render();
+  }
+
+  async function openFile(p) {
+    if (busy) return;
+    busy = true; result = null; render();
+    let r;
+    try { r = await window.texacore.openUpgradeTcdb(p); } catch (e) { r = { success: false, error: e.message }; }
+    busy = false;
+    if (r && r.success) {
+      const n = r.copyErrors || 0;
+      result = { ok: true, text: n ? t('upgrade.doneWithErrors').replace('{n}', n).replace('{f}', r.copyErrorsLog || '') : t('upgrade.done').replace('{c}', r.companyName || '') };
+      if (typeof refreshState === 'function') { try { await refreshState(); } catch { /* ignore */ } }
+    } else {
+      result = { ok: false, text: (r && r.code === 'LEGACY_TCDB') ? t('upgrade.legacyRefused') : t('upgrade.failed').replace('{e}', (r && r.error) || '?') };
+    }
+    render();
+  }
+
+  el('upgrade-close').addEventListener('click', dismiss);
+  el('upgrade-dismiss').addEventListener('click', dismiss);
+  el('upgrade-open-folder').addEventListener('click', async () => {
+    try { const r = await window.texacore.openUpgradeFolder(); if (r && !r.success) setStatus(t('upgrade.failed').replace('{e}', r.error || '?'), 'err'); } catch { /* ignore */ }
+  });
+  document.addEventListener('i18n-applied', render);
+
+  window.texacore.getUpgradeNotice().then((n) => { note = n; render(); }).catch(() => {});
+})();

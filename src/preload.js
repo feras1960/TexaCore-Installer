@@ -55,6 +55,11 @@ contextBridge.exposeInMainWorld('texacore', {
   onUpdateProgress: (cb) => ipcRenderer.on('update-progress', (_, d) => cb(d)),
   onUpdateDownloaded: (cb) => ipcRenderer.on('update-downloaded', () => cb()),
   onUpdateNotAvailable: (cb) => ipcRenderer.on('update-not-available', () => cb()),
+  // one-time notice after an upgrade over a 1.x install
+  getUpgradeNotice: () => ipcRenderer.invoke('upgrade-notice-get'),
+  dismissUpgradeNotice: () => ipcRenderer.invoke('upgrade-notice-dismiss'),
+  openUpgradeFolder: () => ipcRenderer.invoke('upgrade-notice-open-folder'),
+  openUpgradeTcdb: (filePath) => ipcRenderer.invoke('upgrade-notice-open-tcdb', filePath),
 
   // Browser
   openBrowser: (port) => ipcRenderer.invoke('open-browser', port),
