@@ -7,7 +7,10 @@
 const I18N = {
   ar: {
     'update.downloading': 'يتم تنزيل التحديث v{v} بالخلفية…',
-    'update.ready': 'التحديث v{v} جاهز — يُثبَّت عند إعادة التشغيل',
+    'update.ready': 'تحديث جديد v{v} جاهز — أعد التشغيل للتثبيت',
+    'stop.confirmText': 'سيتوقف النظام ويُقطَع اتصال كل من يعمل عليه الآن (على هذا الجهاز وفي شبكتك وعبر الرابط السحابي). هل تريد إيقافه؟',
+    'stop.confirmYes': 'نعم، أوقف النظام',
+    'stop.cancel': 'إلغاء',
     'update.restartNow': 'إعادة التشغيل الآن',
     'update.later': 'لاحقاً',
     'app.subtitle': 'نظام إدارة الأعمال المتكامل',
@@ -128,7 +131,10 @@ const I18N = {
 
   en: {
     'update.downloading': 'Downloading update v{v} in the background…',
-    'update.ready': 'Update v{v} is ready — installs on restart',
+    'update.ready': 'New update v{v} is ready — restart to install',
+    'stop.confirmText': 'The system will stop and everyone working on it right now (on this computer, on your network and through the cloud link) will be disconnected. Stop it?',
+    'stop.confirmYes': 'Yes, stop the system',
+    'stop.cancel': 'Cancel',
     'update.restartNow': 'Restart now',
     'update.later': 'Later',
     'app.subtitle': 'Integrated business management system',
@@ -249,7 +255,10 @@ const I18N = {
 
   ru: {
     'update.downloading': 'Обновление v{v} загружается в фоне…',
-    'update.ready': 'Обновление v{v} готово — установится при перезапуске',
+    'update.ready': 'Новое обновление v{v} готово — перезапустите для установки',
+    'stop.confirmText': 'Система остановится, и все, кто сейчас в ней работает (на этом компьютере, в вашей сети и по облачной ссылке), будут отключены. Остановить?',
+    'stop.confirmYes': 'Да, остановить систему',
+    'stop.cancel': 'Отмена',
     'update.restartNow': 'Перезапустить сейчас',
     'update.later': 'Позже',
     'app.subtitle': 'Комплексная система управления бизнесом',
@@ -370,7 +379,10 @@ const I18N = {
 
   uk: {
     'update.downloading': 'Оновлення v{v} завантажується у фоні…',
-    'update.ready': 'Оновлення v{v} готове — встановиться під час перезапуску',
+    'update.ready': 'Нове оновлення v{v} готове — перезапустіть для встановлення',
+    'stop.confirmText': 'Система зупиниться, і всі, хто зараз у ній працює (на цьому комп\'ютері, у вашій мережі та за хмарним посиланням), буде відключено. Зупинити?',
+    'stop.confirmYes': 'Так, зупинити систему',
+    'stop.cancel': 'Скасувати',
     'update.restartNow': 'Перезапустити зараз',
     'update.later': 'Пізніше',
     'app.subtitle': 'Комплексна система управління бізнесом',
@@ -517,6 +529,8 @@ function applyI18n(lang) {
   document.querySelectorAll('[data-i18n-ph]').forEach(el => {
     el.placeholder = t(el.getAttribute('data-i18n-ph'));
   });
+  // strings that are set from script (the update banner) re-render themselves on this event
+  document.dispatchEvent(new Event('i18n-applied'));
 }
 
 // Expose globally for renderer.js + inline handlers

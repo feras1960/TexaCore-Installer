@@ -1744,6 +1744,24 @@ async function uiUpdate(url, method) {
   return out;
 }
 
+// Screenshot check of the installer window (isolated harness runs only — same gate as /api/ui-update): run a snippet in the real renderer, optionally
+// resize the (hidden) window, and capture what the window shows. Nothing here is reachable in a normal run.
+async function uiEval(opts) {
+  if (!mainWindow || mainWindow.isDestroyed()) return { ok: false, error: 'no installer window' };
+  const wc = mainWindow.webContents;
+  if (wc.isLoading()) await new Promise((r) => wc.once('did-finish-load', r));
+  if (Array.isArray(opts.size) && opts.size.length === 2) mainWindow.setContentSize(Math.min(2000, opts.size[0] | 0), Math.min(2000, opts.size[1] | 0));
+  const out = { ok: true };
+  if (typeof opts.js === 'string' && opts.js.length < 20000) out.result = await wc.executeJavaScript(opts.js, true);
+  await new Promise((r) => setTimeout(r, Math.max(0, Math.min(3000, opts.wait | 0))));
+  if (opts.shot && process.env.TEXACORE_SHOT_DIR) {
+    const f = path.join(process.env.TEXACORE_SHOT_DIR, path.basename(String(opts.shot)).replace(/[^A-Za-z0-9._-]/g, '_'));
+    fs.writeFileSync(f, (await wc.capturePage()).toPNG());
+    out.shot = f;
+  }
+  return out;
+}
+
 async function uiSmoke() {
   if (!mainWindow || mainWindow.isDestroyed()) return { ok: false, error: 'no installer window (start with TEXACORE_UI_SMOKE=1)' };
   const wc = mainWindow.webContents;
@@ -2463,6 +2481,16 @@ const httpServer = http.createServer(async (req, res) => {
     // release-check only (isolated harness runs): read the installer window's OTA widget (what the user is shown) and press its «restart now» button
     uiUpdate(new URL(req.url, 'http://127.0.0.1'), req.method).then((r) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r)); })
       .catch((e) => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: e.message })); });
+
+  } else if (HARNESS_OK && req.method === 'POST' && req.url === '/api/ui-eval') {
+    // release-check only (isolated harness runs): run a snippet in the installer window and/or capture it (screenshots of the launcher in each language)
+    let body = '';
+    req.on('data', (c) => { if (body.length < 30000) body += c.toString(); });
+    req.on('end', () => {
+      let opts; try { opts = JSON.parse(body || '{}'); } catch { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end('{"ok":false,"error":"bad json"}'); return; }
+      uiEval(opts).then((r) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r)); })
+        .catch((e) => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: e.message })); });
+    });
 
   } else if (req.method === 'GET' && (req.url || '').startsWith('/api/employee-roles')) {
     (async () => {

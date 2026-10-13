@@ -148,6 +148,7 @@ function updateUI(state) {
     document.getElementById('input-cloud').checked = false;
     document.getElementById('cloud-content').style.display = 'none';
   }
+  syncSwitch();
   
   // If registered (and not known-deleted), show active view. Otherwise setup view.
   if (state.config?.subdomain && _deletedSubdomain !== state.config.subdomain) {
@@ -550,7 +551,30 @@ async function startERP() {
 }
 
 // ─── Stop ERP ────────────────────────────────────────────────
+// The red button only ASKS: the question appears inside the window (no native dialog) and nothing is stopped until «yes» is pressed.
+// «Cancel» has the focus, Esc cancels, and an unanswered question withdraws itself after 15 s.
+let _stopAskTimer = null;
+function requestStopERP() {
+  const box = document.getElementById('stop-confirm');
+  if (!box) { stopERP(); return; }
+  box.style.display = 'block';
+  document.getElementById('btn-stop-cancel')?.focus();
+  clearTimeout(_stopAskTimer);
+  _stopAskTimer = setTimeout(cancelStopERP, 15000);
+}
+function cancelStopERP() {
+  clearTimeout(_stopAskTimer);
+  const box = document.getElementById('stop-confirm');
+  if (box) box.style.display = 'none';
+}
+document.addEventListener('keydown', (e) => {
+  if (e.key === 'Escape' && document.getElementById('stop-confirm')?.style.display === 'block') cancelStopERP();
+});
+
 async function stopERP() {
+  clearTimeout(_stopAskTimer);
+  const confirmBox = document.getElementById('stop-confirm');
+  if (confirmBox) confirmBox.style.display = 'none';
   const btn = document.getElementById('btn-stop');
   const feedback = document.getElementById('feedback-control');
 
@@ -705,6 +729,17 @@ async function copyText(text) {
     const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
   }
 }
+// Copy a link exactly as it is shown (cloud link, local/LAN link) and say so on the button for a moment
+async function copyLink(linkId, btnId) {
+  const text = (document.getElementById(linkId)?.textContent || '').trim();
+  if (!text || text === '—') return;
+  await copyText(text);
+  const btn = document.getElementById(btnId);
+  if (btn) {
+    btn.textContent = t('emp.copied'); btn.classList.add('copied');
+    setTimeout(() => { btn.textContent = t('emp.copy'); btn.classList.remove('copied'); }, 1500);
+  }
+}
 async function copyLanEmployeeUrl() {
   const u = document.getElementById('lan-employee-url')?.dataset.url;
   if (!u) return;
@@ -741,7 +776,14 @@ async function addEmployee() {
 }
 
 // ─── Cloud Logic ─────────────────────────────────────────────
+// role="switch" needs aria-checked to follow the real state (set programmatically from the saved config, and by every click / Space press)
+function syncSwitch(el) {
+  const i = el || document.getElementById('input-cloud');
+  if (i) i.setAttribute('aria-checked', i.checked ? 'true' : 'false');
+}
+
 async function toggleCloudView() {
+  syncSwitch();
   const isChecked = document.getElementById('input-cloud').checked;
   document.getElementById('cloud-content').style.display = isChecked ? 'block' : 'none';
   // Actually enable/disable cloud access — start/stop the Cloudflare tunnel NOW
@@ -961,8 +1003,9 @@ document.addEventListener('keydown', (e) => {
   let dismissed = false;
 
   function render() {
-    if (updState === 'idle' || dismissed) { widget.style.display = 'none'; return; }
+    if (updState === 'idle' || dismissed) { widget.style.display = 'none'; widget.classList.remove('ready'); return; }
     widget.style.display = 'block';
+    widget.classList.toggle('ready', updState === 'ready');
     if (updState === 'downloading') {
       iconEl.textContent = '⬇️';
       textEl.textContent = t('update.downloading').replace('{v}', updVersion);
@@ -980,6 +1023,8 @@ document.addEventListener('keydown', (e) => {
       laterBtn.style.display = 'inline-flex';
     }
   }
+
+  document.addEventListener('i18n-applied', render);   // switching the language re-words the banner at once
 
   window.texacore.onUpdateAvailable((info) => {
     updVersion = info?.version || '';

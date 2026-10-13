@@ -354,7 +354,20 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
         if (!w.shown || !w.restartVisible || !w.text.includes('2.0.1-test')) throw new Error(`widget ${JSON.stringify(w)}`);
         const st = await request('GET', `http://127.0.0.1:${PORTS.admin}/api/update/status`, { headers: H() });
         if (st.json.state !== 'ready' || st.json.version !== '2.0.1-test') throw new Error(`status ${st.text}`);
-        return `"${w.text}" [${w.restartText}] [${w.laterText}] (lang ${w.lang}); screenshot ${path.relative(WORK, u.json.shot || '')}; GET /api/update/status → ${st.text}`;
+        // the same banner in Arabic (RTL) and English (LTR) — through the real renderer's language switch (a screenshot of the window each)
+        const banners = {};
+        for (const lang of ['ar', 'en']) {
+          const e = await request('POST', `http://127.0.0.1:${PORTS.admin}/api/ui-eval`, { headers: H(), body: { size: [900, 640], wait: 500, shot: `b-update-banner-${lang}.png`,
+            js: `(() => { const s = document.getElementById('lang-select'); s.value = '${lang}'; onLangChange(); window.scrollTo(0, 0); const w = document.getElementById('update-widget');
+              return { text: document.getElementById('update-text').textContent, restart: document.getElementById('update-restart-btn').textContent, later: document.getElementById('update-later-btn').textContent,
+                dir: document.documentElement.dir, ready: w.classList.contains('ready'), shown: getComputedStyle(w).display !== 'none' }; })()` } });
+          if (!e.json || !e.json.ok) throw new Error(`ui-eval ${e.text.slice(0, 200)}`);
+          const b = e.json.result;
+          if (!b.shown || !b.ready || !b.text.includes('2.0.1-test') || !b.restart) throw new Error(`banner (${lang}) ${JSON.stringify(b)}`);
+          banners[lang] = b;
+        }
+        evidence.banners = banners;
+        return `"${w.text}" [${w.restartText}] [${w.laterText}] (lang ${w.lang}); AR (${banners.ar.dir}): "${banners.ar.text}" [${banners.ar.restart}]; EN (${banners.en.dir}): "${banners.en.text}" [${banners.en.restart}]; screenshots shots/b-update-banner-{ar,en}.png; GET /api/update/status → ${st.text}`;
       });
       if (ERP) {
         await R.check('B3 THE PROMPT in the ERP page (what a subscriber sees in the browser): the header pill «Update v2.0.1-test ready» + «Restart to install» (two-click confirm)', async () => {

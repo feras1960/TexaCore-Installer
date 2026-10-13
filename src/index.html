@@ -79,7 +79,7 @@
     </div>
 
     <!-- OTA Update Widget (hidden until an update is downloading/ready) -->
-    <div class="update-widget" id="update-widget" style="display:none;">
+    <div class="update-widget" id="update-widget" role="status" aria-live="polite" style="display:none;">
       <div class="update-widget-row">
         <span class="update-icon" id="update-icon">⬇️</span>
         <span class="update-text" id="update-text"></span>
@@ -154,7 +154,7 @@
           <span class="btn-icon">▶</span>
           <span data-i18n="btn.start">تشغيل النظام</span>
         </button>
-        <button class="btn btn-stop" id="btn-stop" onclick="stopERP()" style="display:none;">
+        <button class="btn btn-stop" id="btn-stop" onclick="requestStopERP()" style="display:none;">
           <span class="btn-icon">⏹</span>
           <span data-i18n="btn.stop">إيقاف النظام</span>
         </button>
@@ -162,6 +162,15 @@
           <span class="btn-icon">🌐</span>
           <span data-i18n="btn.open">فتح في المتصفح</span>
         </button>
+      </div>
+
+      <!-- Stop confirmation: asked inside the window (no native dialog) before any service is stopped -->
+      <div class="stop-confirm" id="stop-confirm" role="alertdialog" aria-labelledby="stop-confirm-text" style="display:none;">
+        <div class="stop-confirm-text" id="stop-confirm-text" data-i18n="stop.confirmText"></div>
+        <div class="stop-confirm-actions">
+          <button type="button" class="btn btn-ghost" id="btn-stop-cancel" onclick="cancelStopERP()" data-i18n="stop.cancel">إلغاء</button>
+          <button type="button" class="btn btn-danger-solid" id="btn-stop-confirm" onclick="stopERP()" data-i18n="stop.confirmYes">نعم، أوقف النظام</button>
+        </div>
       </div>
 
       <div class="feedback" id="feedback-control"></div>
@@ -214,12 +223,12 @@
       <div class="cloud-box" id="cloud-box">
         <div class="cloud-header">
           <div>
-            <h3 data-i18n="cloud.title">🌐 الوصول السحابي (Cloud Access)</h3>
+            <h3 id="cloud-title" data-i18n="cloud.title">🌐 الوصول السحابي (Cloud Access)</h3>
             <p data-i18n="cloud.subtitle">اربط الخادم بالإنترنت للوصول من أي مكان</p>
           </div>
           <label class="toggle-switch">
-            <input type="checkbox" id="input-cloud" onchange="toggleCloudView()">
-            <span class="slider"></span>
+            <input type="checkbox" id="input-cloud" role="switch" aria-checked="false" aria-labelledby="cloud-title" onchange="toggleCloudView()">
+            <span class="slider" aria-hidden="true"></span>
           </label>
         </div>
 
@@ -261,11 +270,17 @@
           <div id="cloud-active" style="display:none; text-align:center;">
             <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
               <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;" data-i18n="cloud.urlRemote">الرابط السحابي (من أي مكان):</div>
-              <a href="#" id="cloud-url" style="color:var(--accent); font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openCloudUrl()">https://sub.texacore.ai</a>
+              <div class="link-row">
+                <a href="#" id="cloud-url" dir="ltr" style="color:var(--accent); font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openCloudUrl(); return false;">https://sub.texacore.ai</a>
+                <button type="button" class="copy-btn" id="copy-cloud-url" onclick="copyLink('cloud-url', 'copy-cloud-url')" data-i18n="emp.copy">نسخ</button>
+              </div>
             </div>
             <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
               <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;" data-i18n="cloud.urlLocal">الرابط المحلي (داخل شبكتك):</div>
-              <a href="#" id="local-url" style="color:#3b82f6; font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openLocalUrl()">http://127.0.0.1:80</a>
+              <div class="link-row">
+                <a href="#" id="local-url" dir="ltr" style="color:#3b82f6; font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openLocalUrl(); return false;">http://127.0.0.1:80</a>
+                <button type="button" class="copy-btn" id="copy-local-url" onclick="copyLink('local-url', 'copy-local-url')" data-i18n="emp.copy">نسخ</button>
+              </div>
             </div>
             <div id="employee-link-box" style="display:none; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
               <div style="font-size:11px; color:var(--text-muted); margin-bottom:6px; font-weight:600;" data-i18n="cloud.urlEmployee">رابط الموظفين (دخول مباشر للشركة):</div>
