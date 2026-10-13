@@ -58,7 +58,7 @@ class ServiceManager {
     this.isFreshInstall = prepared.state !== 'ready';
 
     // Per-install secrets: unique JWT secret, anon/service keys and DB password per machine (no legacy path in 2.0).
-    const _secrets = getOrCreateSecrets(this.dataDir);
+    const _secrets = getOrCreateSecrets(this.dataDir, require('./secrets-vault').getVault());
     this.secretsCreated = _secrets.created;     // true → the DB roles must be (re)keyed with this password
     this.jwtSecret = _secrets.jwtSecret;
     this.anonKey = _secrets.anonKey;
@@ -617,30 +617,31 @@ class ServiceManager {
     const logFile = path.join(this.logDir, 'postgrest.log');
     try { fs.writeFileSync(logFile, ''); } catch {}
 
-    // Write PostgREST config file (secrets in it: 0600). anon is the unauthenticated role; whatever it may do is
+    // PostgREST is configured through its environment (PGRST_*), NOT a config file: the JWT secret and the DB password never touch the disk here
+    // (a postgrest.conf next to an encrypted secrets file would make the encryption pointless). anon is the unauthenticated role; whatever it may do is
     // decided by the baseline's grants and RLS policies — exactly as on production. max-rows matches Supabase's 1000.
-    const configPath = path.join(this.dataDir, 'postgrest.conf');
-    fs.writeFileSync(configPath, [
-      `db-uri = "postgres://authenticator:${encodeURIComponent(this.dbPassword)}@127.0.0.1:${PG_PORT}/postgres"`,
-      `db-schemas = "public"`,
-      `db-extra-search-path = "public, extensions"`,
-      `db-anon-role = "anon"`,
-      `jwt-secret = "${this.jwtSecret}"`,
-      `server-port = ${this.activePostgrestPort}`,
-      `server-host = "127.0.0.1"`,
-      `db-use-legacy-gucs = false`,
-      `db-max-rows = 1000`,
-      `app-settings.jwt_secret = "${this.jwtSecret}"`,
-    ].join('\n') + '\n', { mode: 0o600 });
+    try { const old = path.join(this.dataDir, 'postgrest.conf'); if (fs.existsSync(old)) { fs.writeFileSync(old, Buffer.alloc(fs.statSync(old).size)); fs.unlinkSync(old); } } catch { /* a config file left by an earlier build */ }
 
     // Build environment: add pg/lib and pg/bin to PATH for libpq.dll on Windows
-    const env = { ...process.env };
+    const env = {
+      ...process.env,
+      PGRST_DB_URI: `postgres://authenticator:${encodeURIComponent(this.dbPassword)}@127.0.0.1:${PG_PORT}/postgres`,
+      PGRST_DB_SCHEMAS: 'public',
+      PGRST_DB_EXTRA_SEARCH_PATH: 'public, extensions',
+      PGRST_DB_ANON_ROLE: 'anon',
+      PGRST_JWT_SECRET: this.jwtSecret,
+      PGRST_SERVER_PORT: String(this.activePostgrestPort),
+      PGRST_SERVER_HOST: '127.0.0.1',
+      PGRST_DB_USE_LEGACY_GUCS: 'false',
+      PGRST_DB_MAX_ROWS: '1000',
+      PGRST_APP_SETTINGS_JWT_SECRET: this.jwtSecret,
+    };
     if (this.isWindows) {
       const pgLib = path.join(this.binsDir, 'pg', 'lib');
       env.PATH = this.pgBin + ';' + pgLib + ';' + (env.PATH || '');
     }
 
-    const proc = spawn(this.postgrestBin, [configPath], { env });
+    const proc = spawn(this.postgrestBin, [], { env });
     proc.stdout.on('data', d => { try { fs.appendFileSync(logFile, d); } catch {} });
     proc.stderr.on('data', d => { try { fs.appendFileSync(logFile, d); } catch {} });
 

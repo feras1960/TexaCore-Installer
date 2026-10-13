@@ -32,6 +32,8 @@ const DEV_HARNESS = HARNESS_OK && process.env.TEXACORE_HEADLESS === '1';
 if (HARNESS_OK && process.env.TEXACORE_USER_DATA) {
   app.setPath('userData', process.env.TEXACORE_USER_DATA);
 }
+// A release check can run the secrets-at-rest path against Chromium's in-memory MOCK keychain, so it never touches the real Keychain (isolated runs only).
+if (HARNESS_OK && process.env.TEXACORE_SECRETS_AT_REST === 'mock') app.commandLine.appendSwitch('use-mock-keychain');
 
 // ─── File Logger ─────────────────────────────────────────────
 // Saves all console output to a log file for debugging
@@ -3250,7 +3252,25 @@ function mintHarnessLicense(kind) {
 
 app.whenReady().then(() => {
   ensureDataDir();
-  svcManager = new ServiceManager(app.getPath('userData'));   // classifies the data dir first (a 1.x dir is moved aside)
+  // Secrets at rest (OS keychain / DPAPI via safeStorage) — policy in secrets-vault.js; an existing secrets.enc is always opened.
+  try {
+    const sv = require('./secrets-vault');
+    const policy = sv.secretsAtRestPolicy({ platform: process.platform, env: process.env, config: ((require('../package.json').texacore || {}).secretsAtRest) || {}, harnessOk: HARNESS_OK, execPath: process.execPath });
+    sv.setVault(sv.createVault({ safeStorage: require('electron').safeStorage, policy }));
+    fileLog(`[TexaCore] secrets at rest: ${policy.write ? 'OS keychain (safeStorage)' : '0600 file'} — ${policy.reason}`);
+  } catch (e) { fileLog('[TexaCore] secrets vault not initialised:', e.message); }
+  try {
+    svcManager = new ServiceManager(app.getPath('userData'));   // classifies the data dir first (a 1.x dir is moved aside)
+  } catch (e) {
+    if (e && e.code === 'SECRETS_UNAVAILABLE') {
+      fileLog('[TexaCore] ❌', e.message);
+      if (DEV_HARNESS) { fileLog('E2E_READY', JSON.stringify({ ok: false, error: e.message })); return; }
+      dialog.showErrorBox('TexaCore ERP', `${e.message}\n\nNothing was changed. Unlock the keychain / allow TexaCore ERP access and start the program again.`);
+      app.quit();
+      return;
+    }
+    throw e;
+  }
   if (svcManager.bootMovedTo) fileLog('[TexaCore] previous data dir set aside →', svcManager.bootMovedTo);
   if (!DEV_HARNESS) { createTray(); createWindow(); setupAutoUpdater(); }
   else if (process.platform === 'darwin' && app.dock) { try { app.dock.hide(); } catch { /* headless */ } }

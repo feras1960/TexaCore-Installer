@@ -51,7 +51,8 @@ test('the web server has no unauthenticated route that reaches the admin API fro
 
 test('the DB roles are created without login superusers and PostgREST runs as the anon role under production grants', () => {
   const sm = all.find((x) => x.f === 'service-manager.js').text;
-  assert.match(sm, /db-anon-role = "anon"/);
+  assert.match(sm, /PGRST_DB_ANON_ROLE: 'anon'/);
+  assert.doesNotMatch(sm.replace(/^\s*\/\/.*$/gm, '').replace(/try \{ const old = path\.join\(this\.dataDir, 'postgrest\.conf'\)[^\n]*\n/, ''), /postgrest\.conf/, 'PostgREST must not get its secrets from a file on disk');
   const b = all.find((x) => x.f === 'bootstrap.js').text;
   assert.doesNotMatch(b, /LOGIN[^;]*SUPERUSER|SUPERUSER[^;]*LOGIN/);
 });

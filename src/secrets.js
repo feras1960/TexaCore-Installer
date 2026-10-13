@@ -43,19 +43,69 @@ function makeKeys(jwtSecret) {
   };
 }
 
+const { SecretsUnavailableError } = require('./secrets-vault');
+
+const shapeOk = (s) => !!(s && s.jwtSecret && s.dbPassword && s.anonKey && s.serviceKey && !isLegacySecrets(s));
+
+/** Overwrite with zeros, then unlink (best effort on a journaling file system — it removes the casual copy, not a forensic one). */
+function shred(file) {
+  try { const n = fs.statSync(file).size; fs.writeFileSync(file, Buffer.alloc(n)); } catch { /* gone or read-only */ }
+  try { fs.unlinkSync(file); } catch { /* gone */ }
+}
+
+function writeEncrypted(encPath, secrets, vault) {
+  const blob = vault.encrypt(JSON.stringify(secrets));
+  const tmp = `${encPath}.tmp`;
+  fs.writeFileSync(tmp, JSON.stringify({ v: 1, provider: 'safeStorage', data: Buffer.from(blob).toString('base64') }), { mode: 0o600 });
+  fs.renameSync(tmp, encPath);
+}
+
+function readEncrypted(encPath, vault) {
+  try {
+    const f = JSON.parse(fs.readFileSync(encPath, 'utf8'));
+    return JSON.parse(vault.decrypt(Buffer.from(f.data, 'base64')));
+  } catch (e) {
+    throw new SecretsUnavailableError(`The stored secrets of this install could not be unlocked (${e.message}). The OS keychain refused or the file is damaged — nothing was regenerated or deleted.`);
+  }
+}
+
 // Load this install's secrets, or generate them. `created` tells the caller the DB roles must be (re)keyed.
-function getOrCreateSecrets(dataDir) {
+//   vault (optional, secrets-vault.js): when it can write, secrets live in secrets.enc (OS keychain / DPAPI) and a plain secrets.json is migrated into it;
+//   otherwise the 0600 secrets.json of 2.0 stays as it was. An existing secrets.enc is always opened (policy only governs writing).
+function getOrCreateSecrets(dataDir, vault = null) {
   const secretsPath = path.join(dataDir, 'secrets.json');
+  const encPath = path.join(dataDir, 'secrets.enc');
+  const addAdminSecret = (s, persist) => {
+    // secrets written by an earlier 2.0 build have no admin-API secret yet: add one (everything else is untouched)
+    if (!s.localApiSecret) { s.localApiSecret = crypto.randomBytes(32).toString('hex'); try { persist(s); } catch { /* in-memory only */ } }
+    return s;
+  };
+
+  if (fs.existsSync(encPath)) {
+    if (!vault || !vault.canRead()) throw new SecretsUnavailableError('This install keeps its secrets in the OS keychain (secrets.enc) but the keychain is not available now.');
+    const s = readEncrypted(encPath, vault);
+    if (!shapeOk(s)) throw new SecretsUnavailableError('secrets.enc opened but does not hold a valid set of secrets — nothing was regenerated.');
+    addAdminSecret(s, (x) => writeEncrypted(encPath, x, vault));
+    if (fs.existsSync(secretsPath)) shred(secretsPath);           // a leftover plain copy next to the encrypted one
+    return { ...s, created: false, atRest: 'safeStorage' };
+  }
+
   if (fs.existsSync(secretsPath)) {
     try {
       const s = JSON.parse(fs.readFileSync(secretsPath, 'utf8'));
-      if (s && s.jwtSecret && s.dbPassword && s.anonKey && s.serviceKey && !isLegacySecrets(s)) {
-        // secrets.json written by an earlier 2.0 build has no admin-API secret yet: add one (everything else is untouched)
-        if (!s.localApiSecret) {
-          s.localApiSecret = crypto.randomBytes(32).toString('hex');
-          try { fs.writeFileSync(secretsPath, JSON.stringify(s, null, 2), { mode: 0o600 }); } catch { /* in-memory only */ }
+      if (shapeOk(s)) {
+        addAdminSecret(s, (x) => fs.writeFileSync(secretsPath, JSON.stringify(x, null, 2), { mode: 0o600 }));
+        if (vault && vault.canWrite()) {
+          // migration: encrypt, prove it opens to the same secrets, only then remove the plain file
+          try {
+            writeEncrypted(encPath, s, vault);
+            const back = readEncrypted(encPath, vault);
+            if (JSON.stringify(back) !== JSON.stringify(s)) throw new Error('round trip differs');
+            shred(secretsPath);
+            return { ...s, created: false, atRest: 'safeStorage', migrated: true };
+          } catch { try { fs.unlinkSync(encPath); } catch { /* none */ } /* keep the plain file */ }
         }
-        return { ...s, created: false };
+        return { ...s, created: false, atRest: 'file' };
       }
     } catch { /* fall through to regenerate */ }
   }
@@ -71,11 +121,13 @@ function getOrCreateSecrets(dataDir) {
     localApiSecret: crypto.randomBytes(32).toString('hex'),
     legacy: false,
   };
+  let atRest = 'memory';
   try {
     fs.mkdirSync(dataDir, { recursive: true });
-    fs.writeFileSync(secretsPath, JSON.stringify(secrets, null, 2), { mode: 0o600 });
+    if (vault && vault.canWrite()) { writeEncrypted(encPath, secrets, vault); atRest = 'safeStorage'; }
+    else { fs.writeFileSync(secretsPath, JSON.stringify(secrets, null, 2), { mode: 0o600 }); atRest = 'file'; }
   } catch { /* best effort; caller still gets in-memory secrets */ }
-  return { ...secrets, created: true };
+  return { ...secrets, created: true, atRest };
 }
 
 /** True when a secrets object is (or contains) one of the shared 1.x values. */

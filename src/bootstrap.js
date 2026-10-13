@@ -121,7 +121,7 @@ function prepareDataDir(dataDir, log = () => {}) {
   } else if (d.state === 'interrupted_first_run') {
     const pgdata = path.join(dataDir, 'pgdata');
     if (fs.existsSync(pgdata)) movedTo = moveAside(pgdata, 'interrupted');
-    for (const f of [MARKER_FILE, 'secrets.json']) { // secrets belong to the cluster we just set aside
+    for (const f of [MARKER_FILE, 'secrets.json', 'secrets.enc']) { // secrets belong to the cluster we just set aside
       const p = path.join(dataDir, f);
       if (fs.existsSync(p)) moveAside(p, 'interrupted');
     }
