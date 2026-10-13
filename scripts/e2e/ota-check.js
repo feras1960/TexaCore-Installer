@@ -217,7 +217,7 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
         return `exit ${ex.code}; install log: ${text.trim().split('\n').map((l) => l.replace(/^\[[^\]]+\]\s*/, '')).filter((l) => !/^\s*$/.test(l)).slice(0, 6).join(' | ').slice(0, 330)}; bundle now ${plistVersion(appPath)} (package.json ${pkgVersion(appPath)}), codesign --verify --deep --strict OK, no quarantine, staging removed`;
       });
       // what the owner's machine would do next (open the new bundle) — done here with the isolated environment
-      await R.check('A5 THE NEW APP STARTS: the swapped bundle launches as 2.0.0 on the SAME user-data folder; a pre-2.0 data folder is set aside whole (kept), not reused', async () => {
+      await R.check('A5 THE NEW APP STARTS: the swapped bundle launches as 2.0.0 on the SAME user-data folder; a pre-2.0 data folder is set aside whole (kept), not reused; the licence and account settings continue, the company list does not', async () => {
         const dd = path.join(userData, 'texacore-data');
         // what a 1.x install leaves behind (the old build never ran its services here): PostgreSQL 15 cluster, config with the licence, backups, a .tcdb
         fs.mkdirSync(path.join(dd, 'pgdata', 'base', '1'), { recursive: true }); fs.writeFileSync(path.join(dd, 'pgdata', 'PG_VERSION'), '15\n'); fs.writeFileSync(path.join(dd, 'pgdata', 'base', '1', '1259'), 'old cluster page');
@@ -238,9 +238,16 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
         if (JSON.stringify(kept) !== JSON.stringify(before)) throw new Error(`the set-aside folder lost files: ${kept} vs ${before}`);
         if (fs.readFileSync(path.join(userData, aside[0], 'backups', 'old.tcdb'), 'utf8') !== 'TCDB-old-backup-bytes') throw new Error('the old backup file changed');
         const fresh = fs.readdirSync(dd).sort();
-        evidence.dataAfter = { asideFolder: aside[0], keptEntries: kept, newEntries: fresh };
+        // the account-level settings continue (licence, trial flag, cloud settings, port); the company list and backup locations do NOT (the auto-backup would overwrite the old .tcdb)
+        const alog = fs.readFileSync(path.join(WORK, 'app-a-new.log'), 'utf8');
+        const carried = (alog.match(/\[Bootstrap\] carried over from the old data dir: ([^\n]*)/) || [])[1] || '';
+        if (!/licenseKey/.test(carried) || !/license\.dat/.test(carried)) throw new Error(`the licence was not carried over (log: "${carried}")`);
+        const ncfg = JSON.parse(fs.readFileSync(path.join(dd, 'config.json'), 'utf8'));
+        if (JSON.stringify(ncfg).includes('Old Co') || JSON.stringify(ncfg).includes('/old/backups')) throw new Error('the old company list / backup path leaked into the new config');
+        if (fs.readFileSync(path.join(userData, aside[0], 'license.dat'), 'utf8') !== 'old-encrypted-licence') throw new Error('the old license.dat changed');
+        evidence.dataAfter = { asideFolder: aside[0], keptEntries: kept, newEntries: fresh, carried };
         await stop(app);
-        return `app reports v${v.json.version}; the whole old folder is kept as ${aside[0]} (${kept.join(', ')} — byte-identical); a NEW empty database was built in texacore-data (${fresh.join(', ')}); the old licence/config are NOT carried over`;
+        return `app reports v${v.json.version}; the whole old folder is kept as ${aside[0]} (${kept.join(', ')} — byte-identical); a NEW database was built in texacore-data (${fresh.join(', ')}); carried over: ${carried}; the old company list and backup paths are NOT carried over`;
       });
       await mock.close(); mock = null;
     }
