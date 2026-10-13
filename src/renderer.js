@@ -603,9 +603,9 @@ async function setEmployeeLink(subdomain) {
   if (!subdomain) { empBox.style.display = 'none'; return; }
   let code = '';
   try {
-    const r = await fetch('http://127.0.0.1:1960/api/companies', { headers: { 'x-texacore-local-secret': (window.texacore && window.texacore.getLocalApiSecret && window.texacore.getLocalApiSecret()) || '' } });
-    if (r.ok) {
-      const j = await r.json();
+    // IPC, not fetch(): the admin API has no CORS for a file:// page, and the secret never leaves the main process.
+    const j = await window.texacore.listLocalCompanies();
+    if (j && j.success) {
       const companies = j.companies || [];
       code = String(companies[0] && companies[0].id || '').split('-')[0];  // e.g. 6b6e4674
     }

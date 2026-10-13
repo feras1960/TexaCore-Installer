@@ -33,6 +33,17 @@ const LICENSE_PUBKEY_B64 = 'MCowBQYDK2VwAyEAqUuyf9XwTQ4Q1x6eu7MwpjfWp15aWcZYp9fG
 // getInfo().signed for observability, but the tier is NOT downgraded — so we
 // never brick the current fleet of unsigned (legacy v2) licenses. Flip to
 // true ONLY after backfill is confirmed via telemetry (getInfo().signed=true).
+//
+// 2.0.0 AUDIT (release engineering, 2026-10-13) — LEFT OFF, because no cloud path issues an Ed25519 `_sig`:
+//   • license-activate (paid / key activation) signs an HMAC `signature` with LICENSE_SIGNING_SECRET — a different
+//     algorithm, key and field; it never produces `_sig`.
+//   • license-trial → RPC create_trial, and licensing_register_free / licensing_get_license_state (SQL) return no signature
+//     at all; license-heartbeat / license-validate neither sign nor return `_sig`.
+//   • the free licence is minted locally by the installer (start-free) and is unsigned by construction.
+//   • applyCloudState() rewrites tier / expires_at / limits / modules on every heartbeat — fields the signature covers — so even a
+//     signed licence would stop verifying after its first heartbeat unless the server re-delivers a fresh `_sig` each time.
+// Turning enforcement on now would cap EVERY paid and trial licence (including TRL-2026-CGWGJ-W2FSX) to the free tier.
+// The mechanism itself is tested with a generated key pair (test/license-signature.test.js, via the constructor options).
 const ENFORCE_SIGNATURE = false;
 
 // Lazily-built public KeyObject (built once, cached on first verify).
@@ -48,8 +59,13 @@ function _getLicensePubKey() {
 }
 
 class LicenseGuard {
-  constructor(dataDir) {
+  // opts (tests only): { enforceSignature: boolean, publicKeyB64: SPKI-DER base64 } — production passes none.
+  constructor(dataDir, opts = {}) {
     this.dataDir = dataDir;
+    this._enforceSignature = (opts && typeof opts.enforceSignature === 'boolean') ? opts.enforceSignature : ENFORCE_SIGNATURE;
+    this._pubKeyOverride = (opts && opts.publicKeyB64)
+      ? crypto.createPublicKey({ key: Buffer.from(opts.publicKeyB64, 'base64'), format: 'der', type: 'spki' })
+      : null;
     this.licensePath = path.join(dataDir, 'license.dat'); // .dat not .json
     this.legacyPath = path.join(dataDir, 'license.json'); // for migration
     this._hwId = null;
@@ -327,7 +343,7 @@ class LicenseGuard {
       return crypto.verify(
         null,
         Buffer.from(this._canonicalSignedString(lic), 'utf8'),
-        _getLicensePubKey(),
+        this._pubKeyOverride || _getLicensePubKey(),
         Buffer.from(lic._sig, 'base64')
       );
     } catch {
@@ -342,7 +358,7 @@ class LicenseGuard {
   // only, never enforced) so legacy unsigned licenses are not bricked.
   effectiveTier(lic) {
     if (!lic || !lic.tier) return 'free';
-    if (!ENFORCE_SIGNATURE) return lic.tier;
+    if (!this._enforceSignature) return lic.tier;
     return this.verifySignature(lic) ? lic.tier : 'free';
   }
 

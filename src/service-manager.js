@@ -15,6 +15,7 @@ const { getVendorAccount } = require('./vendor-support');
 const { PORTS, harnessAllowed } = require('./ports');
 const bootstrap = require('./bootstrap');
 const { validateAdminPassword } = require('./admin-password');
+const netGuard = require('./net-guard');
 
 // ─── Ports (defaults — TEXACORE_PORT_BASE moves the whole block; see ports.js) ───
 const PG_PORT = PORTS.pg;
@@ -696,11 +697,9 @@ class ServiceManager {
     console.log('[ServiceManager] Starting API proxy on port', this.activeApiPort);
 
     this.proxyServer = http.createServer((req, res) => {
-      // CORS headers
-      res.setHeader('Access-Control-Allow-Origin', '*');
-      res.setHeader('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-      res.setHeader('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey, x-client-info, Accept, Range, X-Upsert, Prefer, x-supabase-api-version, accept-profile, content-profile');
-      res.setHeader('Access-Control-Expose-Headers', 'Content-Range, X-Total-Count');
+      // CORS: loopback origins only, never '*' (see net-guard.js). Other PCs reach the API through the page's own
+      // /_supabase proxy (same origin — no CORS involved), not through this port, so it is bound to loopback too.
+      netGuard.applyCors(req, res);
 
       if (req.method === 'OPTIONS') {
         res.writeHead(204);
@@ -736,9 +735,8 @@ class ServiceManager {
       };
 
       const proxyReq = http.request(proxyOptions, (proxyRes) => {
-        // Copy CORS headers onto proxied response
-        proxyRes.headers['access-control-allow-origin'] = '*';
-        res.writeHead(proxyRes.statusCode, proxyRes.headers);
+        // The upstream's own CORS headers are dropped — ours were set above.
+        res.writeHead(proxyRes.statusCode, netGuard.stripCorsHeaders(proxyRes.headers));
         proxyRes.pipe(res);
       });
 
@@ -751,7 +749,7 @@ class ServiceManager {
       req.pipe(proxyReq);
     });
 
-    this.proxyServer.listen(this.activeApiPort, '0.0.0.0', () => {
+    this.proxyServer.listen(this.activeApiPort, '127.0.0.1', () => {
       console.log(`[ServiceManager] API proxy listening on port ${this.activeApiPort}`);
     });
 
@@ -931,17 +929,20 @@ class ServiceManager {
       // instead of localhost:54321 which only works on the same machine.
       app.get('/config.js', (req, res) => {
         const host = req.headers.host || '';
-        const isCloudAccess = host.includes('.texacore.ai') || host.includes('.texacore.com');
         const protocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
+        // THIS machine, browsing by loopback name, with no proxy/CDN header (net-guard.js). Everything else — the public
+        // tunnel, a PC on the LAN, a forged Host — is "remote": it gets the page's own /_supabase proxy and NO admin bits.
+        const isLocal = netGuard.isLocalRequest(req);
 
         let supabaseUrl;
-        if (isCloudAccess) {
-          // Cloud access: use the same origin so requests go through our proxy
-          supabaseUrl = `${protocol}://${host}/_supabase`;
-          console.log(`[config.js] Cloud access detected (${host}) → using proxy URL: ${supabaseUrl}`);
-        } else {
-          // Local access: connect directly to API proxy
+        if (isLocal) {
+          // Local access: connect directly to the API proxy (loopback-only listener; the page's origin is a loopback origin,
+          // which the proxy's CORS allows).
           supabaseUrl = `http://localhost:${this.activeApiPort}`;
+        } else {
+          // Tunnel / LAN access: same origin, so requests go through THIS server's /_supabase proxy
+          // (localhost on the client's machine is not this machine).
+          supabaseUrl = `${protocol}://${host}/_supabase`;
         }
 
         // Shell version — the number WE ship and the number the subscriber
@@ -952,13 +953,15 @@ class ServiceManager {
         let shellVersion = '';
         try { shellVersion = require('electron').app.getVersion() || ''; } catch { /* dev */ }
 
-        // The admin-API secret is handed ONLY to a same-origin page load of this server (a browser says so in Sec-Fetch-Site).
+        // The admin-API secret is handed ONLY to a LOCAL, same-origin page load (a browser says so in Sec-Fetch-Site).
         // <script src="http://localhost:8080/config.js"> on any other website is "cross-site" and must never receive it (the
-        // anon key is public by design; this one is not). Over the tunnel it is never served at all.
+        // anon key is public by design; this one is not). A remote caller — the tunnel, a LAN PC (curl sends no Origin and no
+        // Sec-Fetch-Site, so "no header" alone proves nothing), a forged Host — never receives it: isLocal above is decided
+        // by Host + TCP peer + the absence of proxy headers, not by "not a .texacore.ai host".
         const site = String(req.headers['sec-fetch-site'] || '');
         const origin = String(req.headers['origin'] || '');
         const sameOrigin = site === 'same-origin' || site === 'none' || (!site && !origin);
-        const adminBits = (!isCloudAccess && sameOrigin)
+        const adminBits = (isLocal && sameOrigin)
           ? `
   localApiBase: "",
   localApiSecret: "${this.localApiSecret}",`
@@ -997,12 +1000,11 @@ window.__TEXACORE_CONFIG__ = {
         console.log(`[CloudProxy] ${req.method} ${targetPath} → localhost:${this.activeApiPort}`);
 
         const proxyReq = http.request(proxyOptions, (proxyRes) => {
-          // Add CORS headers
-          proxyRes.headers['access-control-allow-origin'] = '*';
-          proxyRes.headers['access-control-allow-methods'] = 'GET,POST,PUT,PATCH,DELETE,OPTIONS';
-          proxyRes.headers['access-control-allow-headers'] = 'Content-Type, Authorization, apikey, x-client-info, Accept, Range, X-Upsert, Prefer, x-supabase-api-version, accept-profile, content-profile';
-          proxyRes.headers['access-control-expose-headers'] = 'Content-Range, X-Total-Count';
-          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          // Same-origin for every real caller (the page loaded from this server). CORS only for loopback origins; the
+          // upstream's own CORS headers are dropped, never turned into '*'.
+          const h = netGuard.stripCorsHeaders(proxyRes.headers);
+          Object.assign(h, netGuard.corsHeadersFor(req));
+          res.writeHead(proxyRes.statusCode, h);
           proxyRes.pipe(res);
         });
 
@@ -1016,10 +1018,7 @@ window.__TEXACORE_CONFIG__ = {
 
       // CORS preflight for proxy routes
       app.options('/_supabase/*', (req, res) => {
-        res.set('Access-Control-Allow-Origin', '*');
-        res.set('Access-Control-Allow-Methods', 'GET,POST,PUT,PATCH,DELETE,OPTIONS');
-        res.set('Access-Control-Allow-Headers', 'Content-Type, Authorization, apikey, x-client-info, Accept, Range, X-Upsert, Prefer, x-supabase-api-version, accept-profile, content-profile');
-        res.set('Access-Control-Expose-Headers', 'Content-Range, X-Total-Count');
+        netGuard.applyCors(req, res);
         res.sendStatus(204);
       });
 
@@ -1030,16 +1029,16 @@ window.__TEXACORE_CONFIG__ = {
 
       // Admin API proxy (/api/companies, /api/delete-company, etc.)
       // These are served by the Electron admin server (main.js, PORTS.admin). The installer's admin API is a LOCAL
-      // control surface (create/delete companies, backups, restores, tunnel control): over the public tunnel
-      // (subdomain.texacore.ai) NOTHING of it is reachable except /api/ping. (1.8 blocked a list of destructive paths and let
-      // everything else through; 2.0 is default-deny for cloud-origin requests.) The destructive paths are also CSRF-guarded
-      // inside the admin server itself.
-      const CLOUD_API_ALLOW = new Set(['/api/ping']);
+      // control surface (create/delete companies, backups, restores, tunnel control). This front-end server listens on
+      // 0.0.0.0 (the office PCs open the ERP from it), so "not the cloud" is NOT "local": a LAN PC or a forged Host would
+      // otherwise reach it. Default-deny: only a request from THIS machine (net-guard.isLocalRequest: loopback Host + loopback
+      // TCP peer + no proxy/CDN header) gets through; everyone else — the tunnel, a LAN client — gets /api/ping and nothing
+      // else. The admin server re-checks the same facts (the proxy forwards them as x-texacore-fwd-*), and every call but
+      // /api/ping also needs the per-install secret.
+      const REMOTE_API_ALLOW = new Set(['/api/ping']);
       app.all('/api/*', (req, res) => {
-        const host = req.headers.host || '';
-        const isCloudAccess = host.includes('.texacore.ai') || host.includes('.texacore.com');
         const urlPath = (req.url || '').split('?')[0];
-        if (isCloudAccess && !CLOUD_API_ALLOW.has(urlPath)) {
+        if (!netGuard.isLocalRequest(req) && !REMOTE_API_ALLOW.has(urlPath)) {
           res.status(403).json({ error: 'This administrative operation is local-only and cannot be performed remotely.' });
           return;
         }
@@ -1048,12 +1047,20 @@ window.__TEXACORE_CONFIG__ = {
           port: ADMIN_PORT,
           path: req.url,
           method: req.method,
-          headers: { ...req.headers, host: `127.0.0.1:${ADMIN_PORT}` },
+          // x-texacore-fwd-* are OURS: whatever the client sent under those names is replaced, never trusted.
+          headers: {
+            ...req.headers,
+            host: `127.0.0.1:${ADMIN_PORT}`,
+            'x-texacore-fwd-host': String(req.headers.host || ''),
+            'x-texacore-fwd-peer': String((req.socket && req.socket.remoteAddress) || ''),
+            'x-texacore-fwd-proxied': netGuard.hasProxyHeaders(req.headers) ? '1' : '0',
+          },
         };
 
         const proxyReq = http.request(proxyOptions, (proxyRes) => {
-          proxyRes.headers['access-control-allow-origin'] = '*';
-          res.writeHead(proxyRes.statusCode, proxyRes.headers);
+          const h = netGuard.stripCorsHeaders(proxyRes.headers);
+          Object.assign(h, netGuard.corsHeadersFor(req));
+          res.writeHead(proxyRes.statusCode, h);
           proxyRes.pipe(res);
         });
 

@@ -15,6 +15,9 @@
 // Exit code 0 = everything passed. Evidence goes to <workdir>/results.json.
 // ════════════════════════════════════════════════════════════════
 const fs = require('fs');
+const os = require('os');
+const net = require('net');
+const crypto = require('crypto');
 const path = require('path');
 const { Client } = require('pg');
 const { ROOT, PORTS, Results, portFree, request, startApp, stopApp } = require('./lib');
@@ -361,6 +364,128 @@ async function main() {
       }
       if (bad.length) throw new Error(bad.join('; '));
       return `loopback only: ${seen.join(', ')} (the web UI + API gateway are the two LAN-facing ports by design)`;
+    });
+
+    // ── 4.9–4.11 the LAN is a second open front: the UI server listens on 0.0.0.0 (office PCs open the ERP from it) ──
+    const lanIp = Object.values(os.networkInterfaces()).flat().filter((i) => i && (i.family === 'IPv4' || i.family === 4) && !i.internal && !String(i.address).startsWith('169.254.'))
+      .map((i) => i.address)[0] || '';
+    const refusedTcp = (host, port) => new Promise((resolve) => {
+      const sock = net.connect({ host, port, timeout: 3000 });
+      sock.on('connect', () => { sock.destroy(); resolve(false); });
+      sock.on('error', () => resolve(true));
+      sock.on('timeout', () => { sock.destroy(); resolve(true); });
+    });
+    // one origin of requests the admin surface must refuse: [label, base URL to connect to, Host header to send (or '' for the natural one), extra headers]
+    const remoteCases = [];
+    if (lanIp) {
+      remoteCases.push([`LAN client at ${lanIp} (natural Host)`, `http://${lanIp}:${PORTS.ui}`, '', {}]);
+      remoteCases.push([`LAN client forging Host: 127.0.0.1`, `http://${lanIp}:${PORTS.ui}`, `127.0.0.1:${PORTS.ui}`, {}]);
+    }
+    remoteCases.push(['loopback socket, LAN-style Host header (forged)', UI, `192.168.77.20:${PORTS.ui}`, {}]);
+    remoteCases.push(['loopback socket, Host: localhost + tunnel headers (a tunnel whose origin settings rewrite Host)', UI, `localhost:${PORTS.ui}`, { 'cf-connecting-ip': '203.0.113.9', 'x-forwarded-for': '203.0.113.9', 'cf-ray': 'abc-FRA' }]);
+    await R.check('4.9 LAN / forged-Host callers: never the admin secret in /config.js, 403 on every /api/* except ping, no raw API/admin ports on the LAN', async () => {
+      const notes = [];
+      for (const [label, base, host, extra] of remoteCases) {
+        const hdr = { ...(host ? { Host: host } : {}), ...extra };
+        for (const [variant, extraHdr] of [['curl (no Origin, no Sec-Fetch-Site)', {}], ['browser same-origin', { 'Sec-Fetch-Site': 'same-origin' }], ['browser, navigation', { 'Sec-Fetch-Site': 'none' }]]) {
+          const cfg = await request('GET', `${base}/config.js`, { headers: { ...hdr, ...extraHdr } });
+          if (cfg.status !== 200) throw new Error(`${label}: config.js → ${cfg.status}`);
+          if (cfg.text.includes(secrets.localApiSecret) || /localApiSecret/.test(cfg.text)) throw new Error(`${label} / ${variant}: config.js handed out the admin secret`);
+          if (!cfg.text.includes('/_supabase')) throw new Error(`${label} / ${variant}: config.js does not point the page at its own /_supabase proxy`);
+          if (cfg.text.includes(secrets.serviceKey) || cfg.text.includes(secrets.jwtSecret) || cfg.text.includes(secrets.dbPassword)) throw new Error(`${label}: config.js leaks a server secret`);
+        }
+        for (const [method, p, bodyObj] of [['GET', '/api/companies'], ['GET', '/api/backup-status'], ['GET', '/api/tunnel-status'], ['POST', '/api/create-local-company', body({ adminEmail: 'x@lan.test' })],
+          ['POST', '/api/delete-company', { companyId: '00000000-0000-0000-0000-000000000000' }], ['POST', '/api/backup', {}], ['POST', '/api/restore-tcdb', ''], ['POST', '/api/update/install', {}], ['GET', '/api/open-tcdb']]) {
+          const r = await request(method, `${base}${p}`, { headers: { ...hdr, ...H }, body: bodyObj });
+          if (r.status !== 403) throw new Error(`${label}: ${method} ${p} WITH the admin secret → ${r.status} (want 403)`);
+        }
+        const ping = await request('GET', `${base}/api/ping`, { headers: hdr });
+        if (ping.status !== 200) throw new Error(`${label}: /api/ping → ${ping.status}`);
+        notes.push(label);
+      }
+      let rawNote = 'no LAN interface on this machine — the LAN-listener cases were exercised with forged Host headers only';
+      if (lanIp) {
+        for (const [name, port] of [['API gateway', PORTS.api], ['admin API', PORTS.admin], ['PostgREST', PORTS.postgrest], ['GoTrue', PORTS.gotrue], ['PostgreSQL', PORTS.pg]]) {
+          if (!(await refusedTcp(lanIp, port))) throw new Error(`${name} (port ${port}) accepts connections on the LAN address ${lanIp}`);
+        }
+        const ui = await refusedTcp(lanIp, PORTS.ui);
+        if (ui) throw new Error('the UI server is NOT reachable on the LAN address — office PCs could not use the ERP');
+        rawNote = `LAN address ${lanIp}: UI port open; API gateway / admin / PostgREST / GoTrue / PostgreSQL ports refuse connections`;
+      }
+      return `${notes.length} caller shapes × 3 config.js variants (secret never served) × 9 admin calls with the REAL secret (all 403), ping 200; ${rawNote}`;
+    });
+    await R.check('4.9b the same LAN PC still USES the ERP: anon sees nothing, the admin logs in through /_supabase and reads only their tenant under RLS', async () => {
+      const base = lanIp ? `http://${lanIp}:${PORTS.ui}` : UI;
+      const lanHdr = lanIp ? {} : { Host: `192.168.77.20:${PORTS.ui}` };
+      const cfg = await request('GET', `${base}/config.js`, { headers: lanHdr });
+      if (!cfg.text.includes(secrets.anonKey)) throw new Error('config.js lacks the public anon key');
+      const anonRead = await request('GET', `${base}/_supabase/rest/v1/companies?select=id&limit=5`, { headers: { ...lanHdr, apikey: secrets.anonKey, Authorization: `Bearer ${secrets.anonKey}` } });
+      if (anonRead.status === 200 && Array.isArray(anonRead.json) && anonRead.json.length) throw new Error('anon reads companies from the LAN');
+      const login = await request('POST', `${base}/_supabase/auth/v1/token?grant_type=password`, { headers: { ...lanHdr, apikey: secrets.anonKey }, body: { email: 'owner@e2e.test', password: 'E2ePass#2026' } });
+      if (login.status !== 200 || !login.json || !login.json.access_token) throw new Error(`LAN login → ${login.status} ${login.text.slice(0, 160)}`);
+      const au = { ...lanHdr, apikey: secrets.anonKey, Authorization: `Bearer ${login.json.access_token}` };
+      const own = await request('GET', `${base}/_supabase/rest/v1/companies?select=id,tenant_id`, { headers: au });
+      if (own.status !== 200 || !own.json.length || own.json.some((c) => c.tenant_id !== A.tenantId)) throw new Error(`LAN admin reads companies: ${own.status} ${own.text.slice(0, 160)}`);
+      const foreign = await request('GET', `${base}/_supabase/rest/v1/companies?select=id&tenant_id=eq.${B.tenantId}`, { headers: au });
+      if (foreign.status === 200 && foreign.json.length) throw new Error('LAN admin of tenant A reads tenant B companies');
+      const upd = await request('PATCH', `${base}/_supabase/rest/v1/companies?id=eq.${B.companyId}`, { headers: { ...au, Prefer: 'return=representation' }, body: { name: 'LAN-HACK' } });
+      if (upd.status < 300 && upd.json && upd.json.length) throw new Error('LAN admin modified tenant B');
+      const adminApi = await request('GET', `${base}/_supabase/auth/v1/admin/users`, { headers: au });
+      if (adminApi.status < 400) throw new Error('LAN reached GoTrue admin');
+      return `via ${lanIp || 'forged-Host loopback'}: anon sees 0 rows; admin logs in (200), reads ${own.json.length} own company(ies), 0 of tenant B, cross-tenant PATCH refused`;
+    });
+    await R.check('4.10 CORS: never "*"; a foreign website origin gets no allow-origin from any local server; loopback origins are reflected', async () => {
+      const targets = [['API gateway', 'GET', `${API}/rest/v1/companies?select=id&limit=1`, anon], ['UI /_supabase', 'GET', `${UI}/_supabase/rest/v1/companies?select=id&limit=1`, anon],
+        ['UI /api/ping', 'GET', `${UI}/api/ping`, {}], ['admin API ping', 'GET', `${ADMIN}/api/ping`, {}], ['UI /config.js (a <script src>, never needs CORS)', 'GET', `${UI}/config.js`, {}, false]];
+      for (const [name, method, url, base, reflect = true] of targets) {
+        for (const origin of ['https://evil.example', 'http://192.168.1.50:47395', 'null', 'http://localhost.evil.example']) {
+          for (const m of [method, 'OPTIONS']) {
+            const r = await request(m, url, { headers: { ...base, Origin: origin, 'Access-Control-Request-Method': 'GET', 'Access-Control-Request-Headers': 'apikey' } });
+            const acao = r.headers['access-control-allow-origin'];
+            if (acao !== undefined) throw new Error(`${name} ${m} with Origin ${origin} → Access-Control-Allow-Origin: ${acao}`);
+          }
+        }
+        const ok = await request(method, url, { headers: { ...base, Origin: `http://localhost:${PORTS.ui}` } });
+        if (reflect && ok.headers['access-control-allow-origin'] !== `http://localhost:${PORTS.ui}`) throw new Error(`${name}: a loopback origin is not reflected (${ok.headers['access-control-allow-origin']})`);
+        if (ok.headers['access-control-allow-origin'] === '*') throw new Error(`${name}: wildcard CORS`);
+      }
+      return `${targets.length} servers × 4 foreign origins × (GET + preflight): no Access-Control-Allow-Origin; loopback origin reflected, never "*"`;
+    });
+    await R.check('4.11 restore-tcdb: path traversal / absolute / bad-magic uploads are refused BEFORE anything is written', async () => {
+      const restoreDir = path.join(WORK, 'restore-tcdb');
+      const tag = 'rel200-probe-' + crypto.randomBytes(4).toString('hex');
+      const tcdbLike = 'TCDB\x02' + '\x00'.repeat(220);
+      const mp = (filename, content) => {
+        const b = '----rel200' + crypto.randomBytes(6).toString('hex');
+        return { b, text: `--${b}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n${content}\r\n--${b}--\r\n` };
+      };
+      // where each hostile name WOULD land if it escaped restoreDir (and a clean-name file in the dir)
+      const wouldBe = [path.join(WORK, `${tag}-a.tcdb`), path.join(path.dirname(WORK), `${tag}-b.tcdb`), path.join(WORK, `${tag}-c.tcdb`), path.join(WORK, `${tag}-abs.tcdb`)];
+      const attempts = [
+        [`../../${tag}-a.tcdb`, tcdbLike, 'invalid file name'],
+        [`..\\..\\${tag}-b.tcdb`, tcdbLike, 'invalid file name'],
+        [`../${tag}-c.tcdb`, tcdbLike, 'invalid file name'],
+        [path.join(WORK, `${tag}-abs.tcdb`), tcdbLike, 'invalid file name'],
+        [`C:\\${tag}.tcdb`, tcdbLike, 'invalid file name'],
+        [`${tag}.tcdb\u0000.png`, tcdbLike, 'invalid file name'],
+        [`.hidden-${tag}.tcdb`, tcdbLike, 'invalid file name'],
+        [`${tag}.sh`, tcdbLike, 'invalid file name'],
+        [`${tag}-clean.tcdb`, 'this is not a TexaCore backup, just text'.padEnd(300, 'x'), 'not a texacore backup'],
+        [`${tag}-short.tcdb`, 'TCDB\x02', 'not a texacore backup'],
+      ];
+      for (const [name, content, want] of attempts) {
+        const { b, text } = mp(name, content);
+        const r = await request('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': `multipart/form-data; boundary=${b}` }, body: text });
+        if (r.status !== 400 || !String(r.text).toLowerCase().includes(want)) throw new Error(`upload "${JSON.stringify(name)}" → ${r.status} ${r.text.slice(0, 120)} (want 400 "${want}")`);
+      }
+      const leaked = wouldBe.filter((f) => fs.existsSync(f));
+      const inDir = fs.existsSync(restoreDir) ? fs.readdirSync(restoreDir) : [];
+      if (leaked.length) throw new Error(`files escaped the folder: ${leaked.join(', ')}`);
+      if (inDir.length) throw new Error(`refused uploads left files in the restore folder: ${inDir.join(', ')}`);
+      // an oversize / wrong-method / secret-less call is also refused
+      const noSecret = await request('POST', `${UI}/api/restore-tcdb`, { headers: { 'Content-Type': 'multipart/form-data; boundary=x' }, body: '--x--' });
+      if (noSecret.status !== 401) throw new Error(`restore-tcdb without the secret → ${noSecret.status}`);
+      return `${attempts.length} hostile uploads → 400 each; nothing written anywhere (checked ${wouldBe.length} escape targets + the restore folder); without the secret → 401`;
     });
 
     // ── 5. the web UI ──

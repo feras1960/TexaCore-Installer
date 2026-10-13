@@ -13,6 +13,7 @@ const { autoUpdater } = require('electron-updater');
 const { MacUpdater, applyUpdateEvent } = require('./mac-updater');
 const ServiceManager = require('./service-manager');
 const LicenseGuard = require('./license-guard');
+const netGuard = require('./net-guard');
 const BackupManager = require('./backup-manager');
 const { RsfReader, detectFileType } = require('./rsf-reader');
 const { RsfExporter, RsfSyncManager } = require('./rsf-exporter');
@@ -1687,14 +1688,62 @@ function adminApiAuthorized(req) {
   const b = Buffer.from(secret);
   return a.length === b.length && require('crypto').timingSafeEqual(a, b);
 }
+// The company list of this install (id + name) — used by GET /api/companies and by the installer window over IPC.
+async function listLocalCompanies() {
+  const stdout = await psqlExec("SELECT id, name FROM public.companies ORDER BY created_at DESC;");
+  const lines = stdout.split('\n').filter(line => line.trim() !== '' && !line.includes('---') && !line.includes('rows)') && !line.includes('row)'));
+  return lines.map(line => {
+    const parts = line.split('|');
+    if (parts.length >= 2) {
+      const id = parts[0].trim();
+      const name = parts[1].trim();
+      // Skip header row
+      if (id === 'id' || !id.match(/^[0-9a-f]{8}-/)) return null;
+      return { id, name, logo: name.charAt(0).toUpperCase(), lastAccessed: new Date().toISOString() };
+    }
+    return null;
+  }).filter(c => c !== null);
+}
+// The installer window (file://) asks over IPC instead of fetch()ing the admin port: no CORS, no secret on the wire.
+ipcMain.handle('list-local-companies', async () => {
+  try { return { success: true, companies: await listLocalCompanies() }; }
+  catch (e) { return { success: false, companies: [], error: e.message }; }
+});
+
+// A TexaCore backup container starts with "TCDB" + a format-version byte (backup-manager.js writes/reads the same header).
+function isTcdbContainer(buf) {
+  return Buffer.isBuffer(buf) && buf.length >= 153 && buf.subarray(0, 4).toString('latin1') === 'TCDB' && buf[4] >= 1 && buf[4] <= 2;
+}
+function adminRequestIsLocal(req) {
+  if (!netGuard.isLoopbackAddress(req.socket && req.socket.remoteAddress)) return false;
+  const fwdHost = req.headers['x-texacore-fwd-host'];
+  const fwdPeer = req.headers['x-texacore-fwd-peer'];
+  const fwdProxied = req.headers['x-texacore-fwd-proxied'];
+  if (fwdHost === undefined && fwdPeer === undefined && fwdProxied === undefined) {
+    return netGuard.isLoopbackHost(req.headers.host) && !netGuard.hasProxyHeaders(req.headers);
+  }
+  return netGuard.isLoopbackHost(fwdHost) && netGuard.isLoopbackAddress(fwdPeer) && fwdProxied === '0';
+}
 const httpServer = http.createServer(async (req, res) => {
-  res.setHeader('Access-Control-Allow-Origin', '*');
-  res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, ' + LOCAL_API_SECRET_HEADER);
+  // CORS: loopback origins only, never '*' (net-guard.js). The ERP page calls this API same-origin through its own /api proxy and the
+  // installer window uses IPC, so no foreign origin has any reason to read a response from here.
+  netGuard.applyCors(req, res, { methods: 'POST, GET, OPTIONS', allowHeaders: 'Content-Type, ' + LOCAL_API_SECRET_HEADER });
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
     res.end();
+    return;
+  }
+
+  // Defence in depth behind the UI server's own /api guard: this surface serves THIS machine only. A call is accepted when
+  //  - it came straight to this loopback-bound port (a program on this machine): loopback Host (a DNS-rebinding page sends its
+  //    own name), no proxy/CDN header; or
+  //  - it came through the UI server's /api proxy, which forwards the ORIGINAL Host and TCP peer as x-texacore-fwd-* (replacing
+  //    anything the client sent): the original Host must be loopback and the original peer loopback and unproxied.
+  // /api/ping alone answers everyone.
+  if (!adminRequestIsLocal(req) && (req.url || '').split('?')[0] !== '/api/ping') {
+    res.writeHead(403, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: false, error: 'forbidden: the administrative API is local-only' }));
     return;
   }
 
@@ -1748,19 +1797,7 @@ const httpServer = http.createServer(async (req, res) => {
   } else if (req.method === 'GET' && req.url === '/api/companies') {
     (async () => {
       try {
-        const stdout = await psqlExec("SELECT id, name FROM public.companies ORDER BY created_at DESC;");
-        const lines = stdout.split('\n').filter(line => line.trim() !== '' && !line.includes('---') && !line.includes('rows)') && !line.includes('row)'));
-        const companies = lines.map(line => {
-          const parts = line.split('|');
-          if (parts.length >= 2) {
-            const id = parts[0].trim();
-            const name = parts[1].trim();
-            // Skip header row
-            if (id === 'id' || !id.match(/^[0-9a-f]{8}-/)) return null;
-            return { id, name, logo: name.charAt(0).toUpperCase(), lastAccessed: new Date().toISOString() };
-          }
-          return null;
-        }).filter(c => c !== null);
+        const companies = await listLocalCompanies();
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: true, companies }));
       } catch (err) {
@@ -1920,12 +1957,11 @@ const httpServer = http.createServer(async (req, res) => {
       }
     });
   } else if (req.method === 'GET' && req.url === '/api/ping') {
-    res.writeHead(200, { 'Content-Type': 'application/json', 'Access-Control-Allow-Origin': '*' });
+    res.writeHead(200, { 'Content-Type': 'application/json' });
     res.end(JSON.stringify({ success: true, message: 'TexaCore Local API is running' }));
 
   // ─── POST /api/backup ────────────────────────────────────
   } else if (req.method === 'POST' && req.url === '/api/backup') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
     if (!backupManager) {
       res.writeHead(400, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: 'Backup not initialized. Import an RSF file first.' }));
@@ -1942,7 +1978,6 @@ const httpServer = http.createServer(async (req, res) => {
 
   // ─── GET /api/backup-status ──────────────────────────────
   } else if (req.method === 'GET' && req.url === '/api/backup-status') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
     if (!backupManager) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ initialized: false }));
@@ -1991,7 +2026,6 @@ const httpServer = http.createServer(async (req, res) => {
 
   // ─── GET /api/companies ──────────────────────────────────
   } else if (req.method === 'GET' && req.url === '/api/companies') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
     try {
       const { Client } = require('pg');
       const pgC = new Client({ host: 'localhost', port: ServiceManager.PG_PORT, database: 'postgres', user: 'postgres', password: ServiceManager.DB_PASSWORD });
@@ -2007,7 +2041,6 @@ const httpServer = http.createServer(async (req, res) => {
 
   // ─── GET /api/tunnel-status ─────────────────────────────────
   } else if (req.method === 'GET' && req.url === '/api/tunnel-status') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
     res.writeHead(200, { 'Content-Type': 'application/json' });
     
     const config = loadConfig();
@@ -2034,7 +2067,6 @@ const httpServer = http.createServer(async (req, res) => {
 
   // ─── POST /api/tunnel-restart ───────────────────────────────
   } else if (req.method === 'POST' && req.url === '/api/tunnel-restart') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
     try {
       if (svcManager) {
         // Kill existing
@@ -2064,7 +2096,6 @@ const httpServer = http.createServer(async (req, res) => {
   // ─── GET /api/tunnel-fix ────────────────────────────────────
   // Re-registers subdomain to get a fresh tunnel token and starts cloudflared
   } else if (req.method === 'GET' && req.url === '/api/tunnel-fix') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
     try {
       const config = loadConfig();
       const subdomain = config.subdomain;
@@ -2131,7 +2162,6 @@ const httpServer = http.createServer(async (req, res) => {
   // ─── GET /api/open-tcdb ─────────────────────────────────────
   // Opens native file dialog → gets full path (even USB) → restores → syncs to same file
   } else if (req.method === 'GET' && req.url === '/api/open-tcdb') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
     try {
       const { dialog, BrowserWindow } = require('electron');
 
@@ -2372,13 +2402,24 @@ const httpServer = http.createServer(async (req, res) => {
     }
 
   } else if (req.method === 'POST' && req.url === '/api/restore-tcdb') {
-    res.setHeader('Access-Control-Allow-Origin', '*');
     
     // Upload TCDB file via multipart, restore DB, and set backup path
+    const MAX_UPLOAD_BYTES = 1024 * 1024 * 1024;   // a .tcdb is compressed + encrypted; nothing legitimate comes near 1 GiB
     const chunks = [];
-    req.on('data', (chunk) => chunks.push(chunk));
+    let received = 0;
+    let tooBig = false;
+    req.on('data', (chunk) => {
+      received += chunk.length;
+      if (received > MAX_UPLOAD_BYTES) { tooBig = true; chunks.length = 0; return; }
+      if (!tooBig) chunks.push(chunk);
+    });
     req.on('end', async () => {
       try {
+        if (tooBig) {
+          res.writeHead(413, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'File too large' }));
+          return;
+        }
         const body = Buffer.concat(chunks);
         const boundary = req.headers['content-type']?.split('boundary=')[1];
         
@@ -2400,15 +2441,15 @@ const httpServer = http.createServer(async (req, res) => {
         }
         
         let fileData = null;
-        let fileName = 'backup.tcdb';
+        let rawFileName = 'backup.tcdb';
         
         for (const part of parts) {
           const headerEnd = part.indexOf('\r\n\r\n');
           if (headerEnd === -1) continue;
           const header = part.subarray(0, headerEnd).toString();
           if (header.includes('filename=')) {
-            const match = header.match(/filename="([^"]+)"/);
-            if (match) fileName = match[1];
+            const match = header.match(/filename="([^"]*)"/);
+            if (match) rawFileName = match[1];
             fileData = part.subarray(headerEnd + 4, part.lastIndexOf('\r\n'));
             break;
           }
@@ -2419,14 +2460,46 @@ const httpServer = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ success: false, error: 'No file in request' }));
           return;
         }
+
+        // The multipart filename is chosen by the caller: it must be a plain "<name>.tcdb" — a separator, "..", a drive
+        // letter or a control character is refused (NOT cleaned into something else), and the bytes must be a real TCDB
+        // container BEFORE anything touches the disk.
+        const fileName = netGuard.safeUploadName(rawFileName, { ext: '.tcdb' });
+        if (!fileName) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Invalid file name' }));
+          return;
+        }
+        if (!isTcdbContainer(fileData)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Not a TexaCore backup file' }));
+          return;
+        }
         
         // Save to C:\TexaCore (Windows) or ~/Documents/TexaCore (Mac)
         const os = require('os');
         const isWin = process.platform === 'win32';
-        const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore');
+        // (isolated test runs — HARNESS_OK — may point this at a scratch folder so they never write into the real one)
+        const tcdbDir = (HARNESS_OK && process.env.TEXACORE_TCDB_DIR)
+          ? path.resolve(process.env.TEXACORE_TCDB_DIR)
+          : (isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore'));
         if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
         const tcdbPath = path.join(tcdbDir, fileName);
-        fs.writeFileSync(tcdbPath, fileData);
+        // Belt and braces: whatever the name was, the final path must be a direct child of the TexaCore folder.
+        if (path.dirname(path.resolve(tcdbPath)) !== path.resolve(tcdbDir)) {
+          res.writeHead(400, { 'Content-Type': 'application/json' });
+          res.end(JSON.stringify({ success: false, error: 'Invalid file name' }));
+          return;
+        }
+        // Write to a temp name inside the same folder, then rename: a half-written upload never replaces a good backup.
+        const tmpPath = path.join(tcdbDir, `.restore-${process.pid}-${Date.now()}.tmp`);
+        try {
+          fs.writeFileSync(tmpPath, fileData, { flag: 'wx', mode: 0o600 });
+          fs.renameSync(tmpPath, tcdbPath);
+        } catch (werr) {
+          try { fs.unlinkSync(tmpPath); } catch { /* already gone */ }
+          throw werr;
+        }
         console.log(`[Restore] TCDB saved to: ${tcdbPath} (${(fileData.length / 1024).toFixed(0)} KB)`);
         
         // Initialize backupManager if needed

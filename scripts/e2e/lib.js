@@ -71,7 +71,7 @@ function startApp({ userData, license = 'free', logFile, appBinary = '' }) {
     env: {
       ...process.env,
       TEXACORE_HEADLESS: '1', TEXACORE_PORT_BASE: String(PORT_BASE), TEXACORE_USER_DATA: userData,
-      TEXACORE_STUB_TUNNEL: '1', TEXACORE_STUB_MDM: '1', TEXACORE_E2E_AUTOSTART: '1', TEXACORE_E2E_LICENSE: license,
+      TEXACORE_TCDB_DIR: path.join(path.dirname(userData), 'restore-tcdb'), TEXACORE_STUB_TUNNEL: '1', TEXACORE_STUB_MDM: '1', TEXACORE_E2E_AUTOSTART: '1', TEXACORE_E2E_LICENSE: license,
     },
   });
   const ready = new Promise((resolve, reject) => {
