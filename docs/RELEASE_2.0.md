@@ -54,6 +54,21 @@ npm test                                                                        
 node scripts/check-rpc-coverage.js --erp $ERP                                                   # does the baseline contain every RPC the ERP calls?
 ```
 
+### What the launch check proves about the network (4.9–4.11)
+The UI server listens on 0.0.0.0 on purpose (office PCs open the ERP from it). Everything administrative is therefore decided by
+`src/net-guard.js` — loopback Host + loopback TCP peer + no proxy/CDN header — never by "not a *.texacore.ai host". The check runs
+against the machine's real LAN address (and forged-Host / tunnel-header shapes): `/config.js` never carries the admin secret, every
+`/api/*` call except `/api/ping` is 403 even WITH the right secret, the raw API/admin/PostgREST/GoTrue/PostgreSQL ports refuse
+connections on the LAN address, the same LAN client still logs in and reads only its own tenant through `/_supabase`, no server
+answers a foreign Origin with Access-Control-Allow-Origin, and hostile `restore-tcdb` uploads (`../`, absolute, drive letter, NUL,
+bad magic) are refused before anything is written. `TEXACORE_TCDB_DIR` (isolated harness runs only) points the restore folder at the scratch dir.
+
+## Licence signature (ENFORCE_SIGNATURE) — left OFF in 2.0.0
+No cloud path issues the Ed25519 `_sig` the client verifies (license-activate signs an HMAC `signature`; create_trial, licensing_register_free,
+licensing_get_license_state, license-heartbeat and license-validate sign nothing; the free licence is minted locally), and heartbeat rewrites signed
+fields. Enforcing now would cap every paid/trial licence to free. See the comment above the flag in `src/license-guard.js`; the mechanism is tested
+in `test/license-signature.test.js`. Flip the flag only after the cloud signs every licence AND re-signs after each heartbeat change.
+
 ## Publish
 
 `npm run publish` (never upload a hand-renamed exe: names with spaces 404). Windows installer name is `TexaCore-ERP-Setup-<version>.exe`.
