@@ -10,12 +10,17 @@
 // StackBuilder (the wx*.dll), docs, headers and symbols. Writes bin/windows-x64/pg/PG_BUNDLE_VERSION (the build refuses a
 // bundle that is not 17.x — scripts/prebuild-checks.js).
 //
-// NOTE: written on macOS without the zip; the Windows launch path (initdb --locale=en-US, pg_ctl start) is untested.
+// The archive is pinned by sha256 (a different file is refused). The Windows launch path (initdb, pg_ctl start) cannot be run on a Mac:
+// see docs/WINDOWS_SMOKE_CHECKLIST.md and scripts/verify-win-build.js (static verification of the packaged build).
 // ════════════════════════════════════════════════════════════════
 const fs = require('fs');
+const crypto = require('crypto');
 const os = require('os');
 const path = require('path');
 const { execFileSync } = require('child_process');
+
+// The one archive this release accepts (downloaded from the URL above and checked by the owner on 2026-10-13).
+const PINNED = { file: 'postgresql-17.6-1-windows-x64-binaries.zip', bytes: 329891687, sha256: 'd378882abd001a186735acd6f6ba716bca6ccd192e800412d4fd15ed25376b3e' };
 
 const ROOT = path.join(__dirname, '..');
 const DEST = path.join(ROOT, 'bin', 'windows-x64', 'pg');
@@ -24,6 +29,8 @@ const KEEP_EXE = new Set(['postgres.exe', 'initdb.exe', 'pg_ctl.exe', 'psql.exe'
 function main() {
   const zip = process.argv[2];
   if (!zip || !fs.existsSync(zip)) { console.error('usage: node scripts/prepare-pg-win.js <postgresql-17.6-1-windows-x64-binaries.zip>'); process.exit(2); }
+  const sha = crypto.createHash('sha256').update(fs.readFileSync(zip)).digest('hex');
+  if (sha !== PINNED.sha256) { console.error(`prepare-pg-win: ${path.basename(zip)} has sha256 ${sha}, this release pins ${PINNED.sha256} (${PINNED.file}). Refusing it.`); process.exit(2); }
   const tmp = fs.mkdtempSync(path.join(os.tmpdir(), 'pgwin-'));
   try {
     console.log(`  extracting ${path.basename(zip)} …`);
@@ -46,6 +53,7 @@ function main() {
     }
     for (const dir of ['lib', 'share']) fs.cpSync(path.join(root, dir), path.join(DEST, dir), { recursive: true });
     fs.writeFileSync(path.join(DEST, 'PG_BUNDLE_VERSION'), `${m[1]}\n`);
+    fs.writeFileSync(path.join(DEST, 'PG_BUNDLE_SOURCE'), `${PINNED.file}\nsha256 ${PINNED.sha256}\n`);
     const size = execFileSync('du', ['-sh', DEST], { encoding: 'utf8' }).split('\t')[0];
     console.log(`  OK: PostgreSQL ${m[1]} → ${path.relative(ROOT, DEST)} (${size})`);
   } catch (e) {
