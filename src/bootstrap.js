@@ -313,7 +313,7 @@ const stripPublic = (s) => String(s).replace(/\bpublic\./g, '');
  * `rows` = [{ sig: 'schema.name(identity args)', md5 }] for the four app schemas.
  * Only the four secret-bearing functions may differ in body; none may be missing or extra.
  */
-function compareFunctionInventory(inventoryMd5, rows, patched = {}) {
+function compareFunctionInventory(inventoryMd5, rows) {
   const want = new Map();
   for (const [k, v] of Object.entries(inventoryMd5 || {})) {
     if (k.startsWith('auth.') || k.startsWith('storage.')) continue;
@@ -322,14 +322,12 @@ function compareFunctionInventory(inventoryMd5, rows, patched = {}) {
   const have = new Map(rows.map((r) => [stripPublic(r.sig), r.md5]));
   const redacted = new Set(REDACTED_FUNCTIONS.map(stripPublic));
   const local = new Set(LOCAL_EXTRAS.functions.map(stripPublic));
-  // a function the installer patched on purpose (function-patches.js): accepted ONLY with exactly the md5 recorded when the patch was applied
-  const patchedMd5 = new Map(Object.entries(patched || {}).map(([k, v]) => [stripPublic(k), v]));
   const missing = [];
   const extra = [];
   const mismatched = [];
   for (const [k, v] of want) {
     if (!have.has(k)) missing.push(k);
-    else if (have.get(k) !== v && !redacted.has(k) && patchedMd5.get(k) !== have.get(k)) mismatched.push(k);
+    else if (have.get(k) !== v && !redacted.has(k)) mismatched.push(k);
   }
   for (const k of have.keys()) if (!want.has(k) && !local.has(k)) extra.push(k);
   return { ok: !missing.length && !extra.length && !mismatched.length, missing, extra, mismatched, expected: want.size, installed: have.size };

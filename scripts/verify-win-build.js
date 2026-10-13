@@ -9,7 +9,7 @@
 //   W1  latest.yml: version 2.0.0, file name, size and sha512 of the installer
 //   W2  the installer is a PE32+ x64 NSIS executable; its embedded app archive (app-64.7z) is extracted
 //   W3  version 2.0.0 everywhere (app package.json, executable resources)
-//   W4  the application code inside the installer is byte-identical to the repo's src/ (incl. net-guard, function-patches, plan-sync,
+//   W4  the application code inside the installer is byte-identical to the repo's src/ (incl. net-guard, plan-sync,
 //       provisioning, bootstrap SQL) and carries the security code paths: loopback binds, local-only admin API, no wildcard CORS
 //   W5  the pinned database baseline + the web bundle (2.0.0, local fonts) are in the installer, byte-for-byte what the pin says
 //   W6  PostgreSQL 17.6: postgres/initdb/pg_ctl/psql/pg_dump/pg_restore, ICU, the extensions the baseline needs, everything initdb reads,

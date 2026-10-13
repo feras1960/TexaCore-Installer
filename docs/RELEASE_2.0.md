@@ -82,11 +82,11 @@ node scripts/check-rpc-coverage.js --erp $ERP                                   
   fully offline on them. Whenever the cloud answers, the control panel's catalogue (+ the licence's `plan_code` / `custom_limits` / module grant) is applied (`src/plan-sync.js`,
   every 15 min and on each heartbeat); offline nothing is written, so the last synced values stay (also across restarts). Lowering a limit passes production's plan guard because the
   write carries the confirmation the guard asks for (bound to that plan id).
-* **An import is never refused by a plan limit** — `src/function-patches.js` applies the owner's rule to `enforce_plan_limit()` (the cloud change is described exactly in
-  `docs/proposed-cloud/enforce_plan_limit_import_exempt.md`); it becomes a no-op once the baseline carries the same change.
+* **An import is never refused by a plan limit** — production carries the rule itself (migration 20270210h: `enforce_plan_limit()` with the import exemption, `fn_import_write_gate`, `fn_import_insert_rows`),
+  so the pinned baseline already holds it and the installer patches nothing (the local patch of the first 2.0.0 builds was retired; install verification compares every function body with the baseline).
 * **Local employee invites** (`provisioning.inviteLocalEmployee`, the *Employees* box in the installer): same server functions as the cloud's invite path, one-time password shown once.
 * `node scripts/e2e/plan-sync-check.js --workdir <dir> --app <.app> --erp <ERP> --rsf <file.rsf>` proves: network blocked first run → network returns with changed limits → offline again
-  (and after a restart) → import over the limits → a licence pointing at a new plan. `--control` runs the same import with the exemption switched off and expects the plan to refuse it.
+  (and after a restart) → import over the limits → a licence pointing at a new plan. 
 * Windows: `node scripts/prepare-pg-win.js <zip>` (pinned by sha256), optional `node scripts/prepare-vcredist.js <vc_redist.x64.exe>`, `npm run build:win`, then
   `node scripts/verify-win-build.js` (static) and `docs/WINDOWS_SMOKE_CHECKLIST.md` (a real PC).
 

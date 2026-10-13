@@ -26,7 +26,6 @@ const WORK = path.resolve(arg('workdir', ''));
 const APP = arg('app', '');
 const ERP = arg('erp', '');
 const RSF = arg('rsf', '');
-const CONTROL = process.argv.includes('--control');     // negative control: the import exemption switched OFF → the same import must be REFUSED by the plan
 if (!arg('workdir')) { console.error('--workdir is required'); process.exit(2); }
 const binary = APP ? path.join(path.resolve(APP), 'Contents', 'MacOS', path.basename(path.resolve(APP), '.app')) : '';
 const MOCK_PORT = PORT_BASE + 8;                       // 47399 — inside the installer's port block
@@ -76,7 +75,7 @@ const stopMock = () => new Promise((resolve) => { if (!cloud.server) return reso
 let child = null; let ready = null;
 async function boot(license) {
   const logFile = path.join(WORK, `app-${Date.now()}.log`);
-  ({ child, ready } = startApp({ userData, license, logFile, appBinary: binary, extraEnv: { TEXACORE_CLOUD_MOCK_URL: MOCK_URL, TEXACORE_PLAN_SYNC_MS: '2000', ...(CONTROL ? { TEXACORE_SKIP_FUNCTION_PATCHES: '1' } : {}) } }));
+  ({ child, ready } = startApp({ userData, license, logFile, appBinary: binary, extraEnv: { TEXACORE_CLOUD_MOCK_URL: MOCK_URL, TEXACORE_PLAN_SYNC_MS: '2000' } }));
   await ready;
   return logFile;
 }
@@ -92,27 +91,6 @@ const freeRow = async (code = 'free') => (await pg('SELECT max_users, max_compan
   const customerInsert = async (token, code) => request('POST', `${API}/rest/v1/customers`, { headers: { apikey: secrets.anonKey, Authorization: `Bearer ${token}`, Prefer: 'return=minimal' }, body: { tenant_id: A.tenantId, company_id: A.companyId, code, name_ar: 'Probe ' + code } });
   const signIn = async () => (await request('POST', `http://127.0.0.1:${PORTS.gotrue}/token?grant_type=password`, { headers: { apikey: secrets.anonKey }, body: { email: 'owner@plan.test', password: 'PlanPass#2026' } })).json.access_token;
   try {
-    if (CONTROL) {
-      // ─────────── control: no exemption → the plan refuses the import (proves the exemption is what lets it through) ───────────
-      await R.check('CONTROL the import exemption is OFF: the same Rashid import on the same lowered free plan is REFUSED by the plan (so the patch is what allows it)', async () => {
-        if (!(ERP && RSF)) throw new Error('--erp and --rsf are required');
-        await boot('free');
-        secrets = JSON.parse(fs.readFileSync(path.join(dataDir, 'secrets.json'), 'utf8')); setPgPassword(secrets.dbPassword);
-        const mk = JSON.parse(fs.readFileSync(path.join(dataDir, 'bootstrap.json'), 'utf8'));
-        if (Object.keys(mk.patchedFunctions || {}).length) throw new Error('the control run still has the patch');
-        cloud.plans = [planRow('free', { plan_type: 'free', max_users: 1, max_warehouses: 1, max_customers: 50, max_invoices_monthly: 5, max_documents: 100, included_modules: FREE_MODS })];
-        cloud.licenseState = { license_key: 'FREE-LOCAL', tier: 'free', status: 'active', plan_code: 'free', custom_limits: false };
-        await startMock();
-        await until(async () => (await freeRow()).max_customers === 50, 30000, 'the lowered free plan');
-        const out = require('child_process').spawnSync('node', ['--import', 'tsx', '--import', path.join(__dirname, 'rsf-register.mjs'), path.join(__dirname, 'rsf-import.mts')],
-          { encoding: 'utf8', timeout: 1500000, cwd: ERP, env: { ...process.env, WT_SRC: path.join(ERP, 'src'), ERP_DIR: ERP, RSF, UI_URL: UI, API_URL: API, ADMIN_URL: ADMIN, ADMIN_SECRET: secrets.localApiSecret,
-            ANON_KEY: secrets.anonKey, OUT: path.join(WORK, 'rsf'), PG_PORT: String(PORTS.pg), PG_PASSWORD: secrets.dbPassword } });
-        const text = `${out.stdout || ''}\n${out.stderr || ''}`;
-        if (out.status === 0) throw new Error('the import succeeded WITHOUT the exemption — the control proves nothing');
-        if (!/PLAN_LIMIT_EXCEEDED/.test(text)) throw new Error(`the import failed, but not on the plan limit: ${text.slice(-500)}`);
-        return `refused: ${(text.match(/PLAN_LIMIT_EXCEEDED[^"\n]{0,60}/) || [''])[0]}`;
-      });
-    } else {
     // ─────────── A: first run, network blocked ───────────
     await R.check('A1 first run with the network BLOCKED: the app installs and starts (no cloud answer at all)', async () => {
       await boot('free');
@@ -232,7 +210,6 @@ const freeRow = async (code = 'free') => (await pg('SELECT max_users, max_compan
       if (r.status !== 'trial' || !r.gold || r.max_warehouses !== 6 || r.max_customers !== 11) throw new Error(`plan state ${JSON.stringify(r)}`);
       return `tenant now on ${r.code} (${r.status}); plan limits: customers ${r.max_customers}, documents ${r.max_documents}; licence custom_limits applied: users 4, warehouses 6; module gold active`;
     });
-    }
   } catch (e) {
     R.rows.push({ name: 'harness', ok: false, evidence: e.stack || e.message, ms: 0 });
     console.log(`  FAIL  harness — ${e.message}`);

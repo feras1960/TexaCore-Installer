@@ -97,12 +97,9 @@ async function main() {
       const rows = (await pg(`SELECT n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')' AS sig, md5(p.prosrc) AS md5
                                 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
                                WHERE n.nspname IN ('public','licensing','newpost','tomgenerators') AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid=p.oid AND d.deptype='e')`)).rows;
-      const mk = bootstrap.readMarker(dataDir) || {};
-      const c = bootstrap.compareFunctionInventory(inv.functions_md5, rows, mk.patchedFunctions || {});
-      const patchedNote = Object.keys(mk.patchedFunctions || {}).length ? `; patched on purpose (import exemption): ${Object.keys(mk.patchedFunctions).join(', ')}` : '';
-      if ((mk.patchesSkipped || []).length) throw new Error(`a function patch was skipped: ${JSON.stringify(mk.patchesSkipped)}`);
+      const c = bootstrap.compareFunctionInventory(inv.functions_md5, rows);
       if (!c.ok) throw new Error(`missing ${c.missing.length} extra ${c.extra.length} differ ${c.mismatched.length}: ${[...c.missing, ...c.extra, ...c.mismatched].slice(0, 3).join(' | ')}`);
-      return `${c.expected} functions compared${patchedNote}`;
+      return `${c.expected} functions compared (none patched: the baseline carries production's own enforce_plan_limit, 20270210h)`;
     });
     await R.check('1.4b database authentication: scram-sha-256 for EVERYONE — no password / wrong password / another role\'s password are refused; pg_hba has no trust; roles hold SCRAM hashes', async () => {
       const attempt = async (opts) => {
