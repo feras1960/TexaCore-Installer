@@ -76,5 +76,5 @@ test('the build never ships a key in source control, and the installer never wri
   const body = sm.slice(i, sm.indexOf('async verifyBaselineInstall', i));
   assert.doesNotMatch(body, /writeFileSync\([^)]*(baselineSql|baselineStore|storage\b)/i, 'no baseline text is written to a file');
   assert.doesNotMatch(body, /(console\.(log|warn|error)|fileLog)\([^)]*(baselineSql|storage\b|\.toString\(\))/, 'no baseline text is logged');
-  assert.match(body, /runPsqlSql\(baselineSql/);
+  assert.match(body, /loadBaseline\(baselineSql, \(buf\) => this\.runPsqlSql\(buf/);
 });

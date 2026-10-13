@@ -20,7 +20,7 @@ const net = require('net');
 const crypto = require('crypto');
 const path = require('path');
 const { Client } = require('pg');
-const { ROOT, PORTS, Results, portFree, request, startApp, stopApp } = require('./lib');
+const { ROOT, PORTS, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions } = require('./lib');
 const bootstrap = require('../../src/bootstrap');
 const secretsMod = require('../../src/secrets');
 
@@ -38,14 +38,14 @@ const API = `http://127.0.0.1:${PORTS.api}`;
 const ADMIN = `http://127.0.0.1:${PORTS.admin}`;
 
 async function pg(sql, params = []) {
-  const c = new Client({ host: '127.0.0.1', port: PORTS.pg, database: 'postgres', user: 'postgres' });
+  const c = new Client(pgOptions());
   await c.connect();
   try { return await c.query(sql, params); } finally { await c.end(); }
 }
 
 /** A plan edit the way the console does it: production's plan guard refuses lowering a mirrored limit unless the transaction carries the confirmation. */
 async function pgConfirmedPlan(planId, sql, params) {
-  const c = new Client({ host: '127.0.0.1', port: PORTS.pg, database: 'postgres', user: 'postgres' });
+  const c = new Client(pgOptions());
   await c.connect();
   try {
     await c.query('BEGIN');
@@ -75,6 +75,7 @@ async function main() {
     });
     const dataDir = path.join(userData, 'texacore-data');
     secrets = JSON.parse(fs.readFileSync(path.join(dataDir, 'secrets.json'), 'utf8'));
+    setPgPassword(secrets.dbPassword);
 
     await R.check('1.2 bootstrap marker is ready and pins the baseline sha', async () => {
       const m = bootstrap.readMarker(dataDir);
@@ -102,6 +103,66 @@ async function main() {
       if ((mk.patchesSkipped || []).length) throw new Error(`a function patch was skipped: ${JSON.stringify(mk.patchesSkipped)}`);
       if (!c.ok) throw new Error(`missing ${c.missing.length} extra ${c.extra.length} differ ${c.mismatched.length}: ${[...c.missing, ...c.extra, ...c.mismatched].slice(0, 3).join(' | ')}`);
       return `${c.expected} functions compared${patchedNote}`;
+    });
+    await R.check('1.4b database authentication: scram-sha-256 for EVERYONE — no password / wrong password / another role\'s password are refused; pg_hba has no trust; roles hold SCRAM hashes', async () => {
+      const attempt = async (opts) => {
+        const c = new Client({ ...pgOptions(), connectionTimeoutMillis: 5000, ...opts });
+        c.on('error', () => {});
+        try { await c.connect(); await c.query('SELECT 1'); return 'accepted'; } catch (e) { return `refused: ${String(e.message).slice(0, 70)}`; } finally { try { await c.end(); } catch { /* */ } }
+      };
+      const sp = secrets.dbPassword;
+      const noPw = await attempt({ password: undefined });
+      const wrong = await attempt({ password: 'definitely-wrong' });
+      const wrongSuper = await attempt({ password: secrets.authenticatorPassword });
+      const authnRight = await attempt({ user: 'authenticator', password: secrets.authenticatorPassword });
+      const authnNoPw = await attempt({ user: 'authenticator', password: undefined });
+      const authnSuper = await attempt({ user: 'authenticator', password: sp });
+      const adminRight = await attempt({ user: 'supabase_auth_admin', password: secrets.authAdminPassword });
+      const adminOther = await attempt({ user: 'supabase_auth_admin', password: secrets.authenticatorPassword });
+      const ok = await attempt({});
+      if (!noPw.startsWith('refused') || !wrong.startsWith('refused') || !wrongSuper.startsWith('refused')) throw new Error(`superuser: no password → ${noPw}; wrong → ${wrong}; the authenticator's password → ${wrongSuper}`);
+      if (ok !== 'accepted') throw new Error(`the right superuser password was ${ok}`);
+      if (authnRight !== 'accepted' || !authnNoPw.startsWith('refused') || !authnSuper.startsWith('refused')) throw new Error(`authenticator: right ${authnRight}; none ${authnNoPw}; superuser's password ${authnSuper}`);
+      if (adminRight !== 'accepted' || !adminOther.startsWith('refused')) throw new Error(`supabase_auth_admin: right ${adminRight}; authenticator's password ${adminOther}`);
+      if (new Set([secrets.dbPassword, secrets.authenticatorPassword, secrets.authAdminPassword]).size !== 3) throw new Error('the three database passwords are not distinct');
+      // the command-line client too (psql without PGPASSWORD must not get in)
+      const psqlBin = APP ? path.join(path.resolve(APP), 'Contents', 'Resources', 'bin', 'pg', 'bin', 'psql') : path.join(ROOT, 'bin', 'macos-arm64', 'pg', 'bin', 'psql');
+      const env = { ...process.env }; delete env.PGPASSWORD;
+      const cli = require('child_process').spawnSync(psqlBin, ['-w', '-X', '-h', '127.0.0.1', '-p', String(PORTS.pg), '-U', 'postgres', '-d', 'postgres', '-c', 'SELECT 1'], { env, encoding: 'utf8', timeout: 15000 });
+      if (cli.status === 0) throw new Error('psql without a password connected');
+      const hbaPath = path.join(dataDir, 'pgdata', 'pg_hba.conf');
+      const hba = fs.readFileSync(hbaPath, 'utf8');
+      const rules = hba.split('\n').filter((l) => l.trim() && !/^\s*#/.test(l));
+      if (/\btrust\b/.test(hba.replace(/^\s*#.*$/gm, '')) || rules.some((l) => !/scram-sha-256\s*$/.test(l))) throw new Error(`pg_hba.conf has a rule that is not scram-sha-256:\n${rules.join('\n')}`);
+      const q = (await pg(`SELECT current_setting('password_encryption') pe, current_setting('log_min_error_statement') lm, current_setting('log_statement') ls, current_setting('listen_addresses') la,
+                                  (SELECT count(*)::int FROM pg_authid WHERE rolname IN ('postgres','authenticator','supabase_auth_admin') AND rolpassword LIKE 'SCRAM-SHA-256$%') scram`)).rows[0];
+      if (q.pe !== 'scram-sha-256' || q.lm !== 'panic' || q.ls !== 'none' || q.la !== '127.0.0.1' || q.scram !== 3) throw new Error(`settings ${JSON.stringify(q)}`);
+      return `superuser: no password / wrong / authenticator's → refused, right → ok; authenticator & supabase_auth_admin: own password ok, none or the other's refused; psql without PGPASSWORD refused; ${rules.length} pg_hba rules, all scram-sha-256 (none trust); 3 roles hold SCRAM-SHA-256 hashes; log_min_error_statement=panic`;
+    });
+    await R.check('1.4c nothing leaks into files: no CREATE TABLE / CREATE POLICY / ALTER TABLE / CREATE FUNCTION text in any file outside the database cluster (logs, config, markers, Electron data); logs and secrets are private', async () => {
+      const needles = ['CREATE TABLE', 'CREATE POLICY', 'ALTER TABLE', 'CREATE FUNCTION', 'CREATE OR REPLACE FUNCTION', 'CREATE TRIGGER', 'CREATE INDEX', 'CREATE VIEW'].map((x) => Buffer.from(x));
+      const pgdata = path.join(dataDir, 'pgdata') + path.sep;
+      const hits = []; let scanned = 0; let bytes = 0; let chromiumDbs = 0;     // (Electron's own browser-profile SQLite files — Cookies, Trust Tokens … — carry their own schema text: not ours)
+      const walkAll = (d) => { for (const e of fs.readdirSync(d, { withFileTypes: true })) { const f = path.join(d, e.name); if (e.isSymbolicLink()) continue; if (e.isDirectory()) { if ((f + path.sep).startsWith(pgdata)) continue; walkAll(f); } else { const st = fs.statSync(f); if (st.size === 0 || st.size > 300e6) continue; const b = fs.readFileSync(f); if (b.subarray(0, 15).toString('latin1') === 'SQLite format 3') { chromiumDbs += 1; continue; } scanned += 1; bytes += st.size; const n = needles.find((x) => b.indexOf(x) >= 0); if (n) hits.push(`${path.relative(userData, f)} (${n})`); } } };
+      walkAll(userData);
+      if (hits.length) throw new Error(`SQL text found in: ${hits.slice(0, 6).join('; ')}`);
+      const mode = (f) => (fs.statSync(f).mode & 0o777).toString(8);
+      const modes = { 'logs/postgres.log': mode(path.join(dataDir, 'logs', 'postgres.log')), 'logs/gotrue.log': mode(path.join(dataDir, 'logs', 'gotrue.log')), 'logs/postgrest.log': mode(path.join(dataDir, 'logs', 'postgrest.log')),
+        'logs/': mode(path.join(dataDir, 'logs')), 'secrets.json': mode(path.join(dataDir, 'secrets.json')), 'config.json': mode(path.join(dataDir, 'config.json')), 'pg_hba.conf': mode(path.join(dataDir, 'pgdata', 'pg_hba.conf')) };
+      const loose = Object.entries(modes).filter(([k, v]) => (k === 'logs/' ? v !== '700' : v !== '600'));
+      if (loose.length) throw new Error(`not private: ${loose.map(([k, v]) => `${k} ${v}`).join(', ')}`);
+      const plog = fs.statSync(path.join(dataDir, 'logs', 'postgres.log')).size;
+      if (plog > 20000) throw new Error(`postgres.log is ${plog} bytes right after the first run (the bootstrap's lines should be gone)`);
+      const bl = JSON.parse(fs.readFileSync(path.join(dataDir, 'logs', 'baseline-load.json'), 'utf8'));
+      return `${scanned} files (${(bytes / 1e6).toFixed(1)} MB) outside pgdata scanned (+${chromiumDbs} Chromium profile SQLite files skipped): no DDL text; modes ${Object.entries(modes).map(([k, v]) => k + ' ' + v).join(', ')}; postgres.log ${plog} bytes; baseline load: ${bl.map((p) => `pass ${p.pass} ${p.mode} ${p.errors} err`).join(' → ')}`;
+    });
+    await R.check('1.4d no secret appears on any process command line (ps): JWT secret, the three database passwords, service key, admin-API secret', async () => {
+      const ps = require('child_process').execFileSync('ps', ['-axww', '-o', 'command='], { encoding: 'utf8', maxBuffer: 64 << 20 });
+      const named = { jwtSecret: secrets.jwtSecret, dbPassword: secrets.dbPassword, authenticatorPassword: secrets.authenticatorPassword, authAdminPassword: secrets.authAdminPassword, serviceKey: secrets.serviceKey, localApiSecret: secrets.localApiSecret };
+      const leaks = Object.entries(named).filter(([, v]) => v && ps.includes(v)).map(([k]) => k);
+      if (leaks.length) throw new Error(`on a command line: ${leaks.join(', ')}`);
+      const mine = ps.split('\n').filter((l) => l.includes(dataDir) || l.includes('postgrest') || /\/auth\b/.test(l) || l.includes('texacore')).length;
+      return `${ps.split('\n').length} process command lines on this machine searched (${mine} are this install's): none contains any of the 6 secrets`;
     });
     await R.check('1.5 extensions usable as extensions.* (uuid-ossp, pgcrypto); the rest of the baseline\'s extension list accounted for', async () => {
       const r = (await pg(`SELECT extensions.uuid_generate_v4() IS NOT NULL u, length(extensions.gen_salt('bf'))>0 c, encode(extensions.digest('a','sha256'),'hex') h`)).rows[0];
@@ -291,7 +352,7 @@ async function main() {
       // (b) catalog-level proof, independent of guard triggers: PostgreSQL checks RLS WITH CHECK before any constraint, so with the
       //     tables' USER triggers disabled (inside a rolled-back transaction) an anon INSERT … DEFAULT VALUES fails with 42501 iff
       //     privileges/RLS deny it. Anything else means RLS let the row through.
-      const c = new Client({ host: '127.0.0.1', port: PORTS.pg, database: 'postgres', user: 'postgres' });
+      const c = new Client(pgOptions());
       await c.connect();
       const allowedGlobal = []; const holes = [];
       try {
@@ -628,7 +689,7 @@ async function main() {
       await R.check('6.1 Rashid import into a NEW company (real importer, real REST gateway, as the admin)', async () => {
         const out = require('child_process').spawnSync('node', ['--import', 'tsx', '--import', path.join(__dirname, 'rsf-register.mjs'), path.join(__dirname, 'rsf-import.mts')],
           { encoding: 'utf8', timeout: 1500000, cwd: ERP, env: { ...process.env, WT_SRC: path.join(ERP, 'src'), ERP_DIR: ERP, RSF, UI_URL: UI, API_URL: API, ADMIN_URL: ADMIN, ADMIN_SECRET: secrets.localApiSecret,
-            ANON_KEY: secrets.anonKey, OUT: path.join(WORK, 'rsf'), PG_PORT: String(PORTS.pg) } });
+            ANON_KEY: secrets.anonKey, OUT: path.join(WORK, 'rsf'), PG_PORT: String(PORTS.pg), PG_PASSWORD: secrets.dbPassword } });
         fs.mkdirSync(path.join(WORK, 'rsf'), { recursive: true });
         fs.writeFileSync(path.join(WORK, 'rsf', 'stdout.txt'), out.stdout || '');
         fs.writeFileSync(path.join(WORK, 'rsf', 'stderr.txt'), out.stderr || '');

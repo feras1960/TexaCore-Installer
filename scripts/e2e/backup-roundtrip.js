@@ -10,7 +10,7 @@
 const fs = require('fs');
 const path = require('path');
 const { Client } = require('pg');
-const { ROOT, PORTS, Results, portFree, request, startApp, stopApp } = require('./lib');
+const { ROOT, PORTS, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions } = require('./lib');
 const BackupManager = require('../../src/backup-manager');
 const bootstrap = require('../../src/bootstrap');
 
@@ -23,7 +23,7 @@ const userData = path.join(WORK, 'userdata');
 const API = `http://127.0.0.1:${PORTS.api}`;
 
 const pg = async (sql, params = []) => {
-  const c = new Client({ host: '127.0.0.1', port: PORTS.pg, database: 'postgres', user: 'postgres' });
+  const c = new Client(pgOptions());
   await c.connect();
   try { return await c.query(sql, params); } finally { await c.end(); }
 };
@@ -52,6 +52,7 @@ const integrity = async () => {
   try {
     await ready;
     const secrets = JSON.parse(fs.readFileSync(path.join(userData, 'texacore-data', 'secrets.json'), 'utf8'));
+    setPgPassword(secrets.dbPassword);
     const mgr = new BackupManager({
       pgBinDir: path.join(ROOT, 'bin', 'macos-arm64', 'pg', 'bin'), dbHost: '127.0.0.1', dbPort: PORTS.pg, dbName: 'postgres', dbUser: 'postgres', dbPassword: secrets.dbPassword,
       backupPath: path.join(WORK, 'roundtrip.tcdb'), encryptionKey: 'texacore-default-backup-key-2026', dataDir: path.join(userData, 'texacore-data'),

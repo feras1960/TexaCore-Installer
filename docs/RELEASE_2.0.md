@@ -62,6 +62,13 @@ node scripts/check-rpc-coverage.js --erp $ERP                                   
 * **Main-process / preload / service code** is obfuscated in the package only (`scripts/lib/obfuscate-app.js`, javascript-obfuscator: mangling incl. module-level names, RC4 string array,
   light dead code; no control-flow flattening / self-defending / property renaming). The renderer files (inline-handler globals) are left alone. A manifest of the ORIGINAL sources'
   sha256 is packaged so a verifier can prove which sources the build came from. `TEXACORE_NO_OBFUSCATE=1` exists for debugging a build, never for release.
+* **Database access is password-only.** initdb runs with `--auth=scram-sha-256` and a one-shot 0600 `--pwfile`; pg_hba.conf (rewritten at every start) holds scram-sha-256 rules for loopback only — no `trust`.
+  Three distinct per-install passwords: the superuser `postgres` (`dbPassword`), PostgREST's `authenticator` and GoTrue's `supabase_auth_admin`. The installer's psql / pg clients get theirs through
+  `PGPASSWORD` in the child environment (never argv); services get theirs through their environment. An install from an earlier test build (trust) is migrated on its next start; an install whose
+  secrets were lost is re-keyed through a one-off loopback rule that is gone before the services start (`scripts/e2e/auth-migration-check.js` proves both).
+* **The server log never carries SQL**: `log_min_error_statement = panic`, `log_statement = none`, logs 0600 in a 0700 directory, truncated after the bootstrap. The baseline is loaded in ONE pass; only
+  statements psql reports as failed are retried (`bootstrap.loadBaseline`) instead of replaying the whole file (which produced ~12,000 "already exists" errors).
+* **The tunnel token** reaches cloudflared as `TUNNEL_TOKEN` in its environment, not `--token` on the command line; `config.json` is 0600.
 * **Web bundle** (ERP repo, `vite.config.ts`, mode `selfhosted` only): no source maps, esbuild minification, `console`/`debugger` dropped, no legal banners, bare-hash chunk and asset names.
 * **Secrets at rest**: `secrets.enc` via Electron safeStorage where the policy allows (macOS only with a stable signature; Windows off until run on a PC), migration from the 0600 file, and PostgREST
   now takes its secrets from its environment (no `postgrest.conf` on disk). See `src/secrets-vault.js`.

@@ -16,8 +16,9 @@ class MigrationRunner {
    * @param {string}   opts.migrationsDir — absolute path to migrations folder
    * @param {Function} opts.onProgress — (step, total, migrationName) => void
    */
-  constructor({ psqlExec, pgBin, isWindows, migrationsDir, onProgress }) {
+  constructor({ psqlExec, pgBin, pgEnv, isWindows, migrationsDir, onProgress }) {
     this.psqlExec = psqlExec;
+    this.pgEnv = pgEnv;
     this.pgBin = pgBin || '';
     this.isWindows = isWindows || false;
     this.migrationsDir = migrationsDir;
@@ -143,13 +144,13 @@ class MigrationRunner {
             await new Promise((resolve, reject) => {
               const psqlExe = this.isWindows ? 'psql.exe' : 'psql';
               const psqlPath = this.pgBin ? path.join(this.pgBin, psqlExe) : psqlExe;
-              const spawnOpts = {};
+              const spawnOpts = { env: this.pgEnv ? this.pgEnv() : { ...process.env } };      // PGPASSWORD for the superuser comes from here, never from argv
               if (this.isWindows && this.pgBin) {
-                spawnOpts.env = { ...process.env, PATH: this.pgBin + ';' + (process.env.PATH || '') };
+                spawnOpts.env = { ...spawnOpts.env, PATH: this.pgBin + ';' + (spawnOpts.env.PATH || process.env.PATH || '') };
               }
               console.log(`[MigrationRunner] Executing: ${psqlPath} -f ${tmpFile}`);
               const psql = spawn(psqlPath, [
-                '-p', String(require('./ports').PORTS.pg), '-h', '127.0.0.1', '-U', 'postgres',
+                '-w', '-p', String(require('./ports').PORTS.pg), '-h', '127.0.0.1', '-U', 'postgres',
                 '-d', 'postgres', '-v', 'ON_ERROR_STOP=0',
                 '-f', tmpFile
               ], spawnOpts);

@@ -19,7 +19,7 @@ const fs = require('fs');
 const path = require('path');
 const http = require('http');
 const { Client } = require('pg');
-const { ROOT, PORTS, PORT_BASE, Results, portFree, request, startApp, stopApp } = require('./lib');
+const { ROOT, PORTS, PORT_BASE, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions } = require('./lib');
 
 const arg = (n, d = '') => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const WORK = path.resolve(arg('workdir', ''));
@@ -39,7 +39,7 @@ const ADMIN = `http://127.0.0.1:${PORTS.admin}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
 const pg = async (sql, params = []) => {
-  const c = new Client({ host: '127.0.0.1', port: PORTS.pg, database: 'postgres', user: 'postgres' });
+  const c = new Client(pgOptions());
   await c.connect();
   try { return await c.query(sql, params); } finally { await c.end(); }
 };
@@ -97,7 +97,7 @@ const freeRow = async (code = 'free') => (await pg('SELECT max_users, max_compan
       await R.check('CONTROL the import exemption is OFF: the same Rashid import on the same lowered free plan is REFUSED by the plan (so the patch is what allows it)', async () => {
         if (!(ERP && RSF)) throw new Error('--erp and --rsf are required');
         await boot('free');
-        secrets = JSON.parse(fs.readFileSync(path.join(dataDir, 'secrets.json'), 'utf8'));
+        secrets = JSON.parse(fs.readFileSync(path.join(dataDir, 'secrets.json'), 'utf8')); setPgPassword(secrets.dbPassword);
         const mk = JSON.parse(fs.readFileSync(path.join(dataDir, 'bootstrap.json'), 'utf8'));
         if (Object.keys(mk.patchedFunctions || {}).length) throw new Error('the control run still has the patch');
         cloud.plans = [planRow('free', { plan_type: 'free', max_users: 1, max_warehouses: 1, max_customers: 50, max_invoices_monthly: 5, max_documents: 100, included_modules: FREE_MODS })];
@@ -106,7 +106,7 @@ const freeRow = async (code = 'free') => (await pg('SELECT max_users, max_compan
         await until(async () => (await freeRow()).max_customers === 50, 30000, 'the lowered free plan');
         const out = require('child_process').spawnSync('node', ['--import', 'tsx', '--import', path.join(__dirname, 'rsf-register.mjs'), path.join(__dirname, 'rsf-import.mts')],
           { encoding: 'utf8', timeout: 1500000, cwd: ERP, env: { ...process.env, WT_SRC: path.join(ERP, 'src'), ERP_DIR: ERP, RSF, UI_URL: UI, API_URL: API, ADMIN_URL: ADMIN, ADMIN_SECRET: secrets.localApiSecret,
-            ANON_KEY: secrets.anonKey, OUT: path.join(WORK, 'rsf'), PG_PORT: String(PORTS.pg) } });
+            ANON_KEY: secrets.anonKey, OUT: path.join(WORK, 'rsf'), PG_PORT: String(PORTS.pg), PG_PASSWORD: secrets.dbPassword } });
         const text = `${out.stdout || ''}\n${out.stderr || ''}`;
         if (out.status === 0) throw new Error('the import succeeded WITHOUT the exemption — the control proves nothing');
         if (!/PLAN_LIMIT_EXCEEDED/.test(text)) throw new Error(`the import failed, but not on the plan limit: ${text.slice(-500)}`);
@@ -116,7 +116,7 @@ const freeRow = async (code = 'free') => (await pg('SELECT max_users, max_compan
     // ─────────── A: first run, network blocked ───────────
     await R.check('A1 first run with the network BLOCKED: the app installs and starts (no cloud answer at all)', async () => {
       await boot('free');
-      secrets = JSON.parse(fs.readFileSync(path.join(dataDir, 'secrets.json'), 'utf8'));
+      secrets = JSON.parse(fs.readFileSync(path.join(dataDir, 'secrets.json'), 'utf8')); setPgPassword(secrets.dbPassword);
       H = { 'x-texacore-local-secret': secrets.localApiSecret };
       const cc = await request('POST', `${ADMIN}/api/create-local-company`, { headers: H, body: { companyName: 'Plan Co', adminEmail: 'owner@plan.test', adminPassword: 'PlanPass#2026', localCurrency: 'UAH', mainCurrency: 'USD', country: 'UA', storagePath: path.join(WORK, 'tcdb'), dbFileName: 'plan' } });
       if (!cc.json || !cc.json.success) throw new Error(`create company: ${cc.text.slice(0, 200)}`);
@@ -204,7 +204,7 @@ const freeRow = async (code = 'free') => (await pg('SELECT max_users, max_compan
         await until(async () => (await freeRow()).max_customers === 50, 30000, 'the lowered free plan');
         const out = require('child_process').spawnSync('node', ['--import', 'tsx', '--import', path.join(__dirname, 'rsf-register.mjs'), path.join(__dirname, 'rsf-import.mts')],
           { encoding: 'utf8', timeout: 1500000, cwd: ERP, env: { ...process.env, WT_SRC: path.join(ERP, 'src'), ERP_DIR: ERP, RSF, UI_URL: UI, API_URL: API, ADMIN_URL: ADMIN, ADMIN_SECRET: secrets.localApiSecret,
-            ANON_KEY: secrets.anonKey, OUT: path.join(WORK, 'rsf'), PG_PORT: String(PORTS.pg) } });
+            ANON_KEY: secrets.anonKey, OUT: path.join(WORK, 'rsf'), PG_PORT: String(PORTS.pg), PG_PASSWORD: secrets.dbPassword } });
         fs.mkdirSync(path.join(WORK, 'rsf'), { recursive: true });
         fs.writeFileSync(path.join(WORK, 'rsf', 'stdout.txt'), out.stdout || ''); fs.writeFileSync(path.join(WORK, 'rsf', 'stderr.txt'), out.stderr || '');
         if (out.status !== 0) throw new Error(`${(out.stdout || '').slice(-700)}\n${(out.stderr || '').slice(-400)}`);

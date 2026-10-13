@@ -160,7 +160,7 @@ function verifyBaselineFiles(baselineDir) {
 const lit = (s) => `'${String(s).replace(/'/g, "''")}'`;
 
 /** Cluster roles + schemas that must exist before GoTrue's migrations and the baseline. Passwords are per-install. */
-function rolesSql({ dbPassword }) {
+function rolesSql({ authenticatorPassword, authAdminPassword }) {
   return `
 DO $$
 BEGIN
@@ -182,8 +182,8 @@ BEGIN
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_privileged_role') THEN CREATE ROLE supabase_privileged_role NOLOGIN NOINHERIT; END IF;
   IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'cli_login_postgres') THEN CREATE ROLE cli_login_postgres NOLOGIN NOINHERIT; END IF;
 END $$;
-ALTER ROLE authenticator PASSWORD ${lit(dbPassword)};
-ALTER ROLE supabase_auth_admin PASSWORD ${lit(dbPassword)};
+ALTER ROLE authenticator PASSWORD ${lit(authenticatorPassword)};
+ALTER ROLE supabase_auth_admin PASSWORD ${lit(authAdminPassword)};
 GRANT anon, authenticated, service_role TO authenticator;
 
 CREATE SCHEMA IF NOT EXISTS extensions;
@@ -194,6 +194,38 @@ GRANT USAGE ON SCHEMA auth TO authenticator, anon, authenticated, service_role;
 
 -- as on Supabase: extension functions (uuid_generate_v4, digest, gen_salt, crypt …) live in "extensions" and resolve through search_path
 ALTER DATABASE postgres SET search_path TO "$user", public, extensions;
+`;
+}
+
+// ─── database authentication ───────────────────────────────────────────────
+/**
+ * pg_hba.conf of a 2.0 install: loopback only, scram-sha-256 for EVERY connection (no `trust` anywhere). The superuser and the two service roles have
+ * their own per-install passwords (secrets). On Windows there is no unix socket, so no `local` line.
+ */
+function hbaText({ windows = false } = {}) {
+  return [
+    '# TexaCore ERP — generated; rewritten at every start. No trust, no remote hosts.',
+    '# TYPE  DATABASE  USER  ADDRESS  METHOD',
+    ...(windows ? [] : ['local   all       all                scram-sha-256']),
+    'host    all       all   127.0.0.1/32  scram-sha-256',
+    'host    all       all   ::1/128       scram-sha-256',
+    '',
+  ].join('\n');
+}
+
+/** Does this pg_hba.conf let anyone in without a password? (`trust`, `password` is fine over loopback but we want scram.) */
+function hbaHasTrust(text) {
+  return String(text || '').split('\n').some((l) => !/^\s*#/.test(l) && /\btrust\b/.test(l));
+}
+
+/** Rows of the SQL that make the superuser / service roles use their per-install passwords (idempotent; roles that do not exist yet are skipped). */
+function passwordSql({ dbPassword, authenticatorPassword, authAdminPassword }) {
+  return `
+ALTER ROLE postgres PASSWORD ${lit(dbPassword)};
+DO $$ BEGIN
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticator') THEN EXECUTE 'ALTER ROLE authenticator PASSWORD ' || quote_literal(${lit(authenticatorPassword)}); END IF;
+  IF EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_auth_admin') THEN EXECUTE 'ALTER ROLE supabase_auth_admin PASSWORD ' || quote_literal(${lit(authAdminPassword)}); END IF;
+END $$;
 `;
 }
 
@@ -223,6 +255,54 @@ function classifyBaselineErrors(errors, { second }) {
     (benign ? expected : unexpected).push(e);
   }
   return { expected, unexpected };
+}
+
+// ─── loading the baseline: one full pass, then ONLY what failed ──────────────────────────────────────────────────
+// The baseline is a plain script with forward references, so a statement may fail on the first pass for a reason a later statement removes. Re-running the
+// WHOLE file (the 1.9/early-2.0 way) turned every one of its ~25,000 statements into an "already exists" error (≈12,000 error lines — and, in the
+// server log, the text of each statement). Now: psql reports the LINE of every failing statement; the retry script is exactly those statements (plus the
+// session SET lines), repeated while it keeps shrinking. A full second pass is the fallback, used only when a failure cannot be mapped to a
+// statement or the selective retries stop making progress.
+function planRetry(sqlText, errors, { second = false } = {}) {
+  const { unexpected } = classifyBaselineErrors(errors, { second });
+  if (!unexpected.length) return { mode: 'none', unexpected: 0 };
+  if (unexpected.some((e) => e.line == null)) return { mode: 'full', unexpected: unexpected.length, reason: 'an error without a line number' };
+  const r = require('./sql-split').buildRetryScript(sqlText, unexpected.map((e) => e.line));
+  if (r.unmapped.length) return { mode: 'full', unexpected: unexpected.length, reason: `error line(s) ${r.unmapped.slice(0, 5).join(',')} match no statement` };
+  return { mode: 'selective', unexpected: unexpected.length, script: r.script, retried: r.retried };
+}
+
+/**
+ * run(buf) → { stderr } executes SQL with psql (ON_ERROR_STOP=0). Returns { summary: [{ pass, mode, statements, errors, expected, unexpected }], unexpected: [...] }.
+ * No SQL text is kept in the summary or logged — only counts and psql's error messages.
+ */
+async function loadBaseline(sqlBuf, run, { maxSelective = 6, log = () => {} } = {}) {
+  const original = sqlBuf.toString('utf8');
+  const summary = [];
+  let text = original; let buf = sqlBuf; let mode = 'full'; let fullAgain = false;
+  let prev = Infinity; let last = null;
+  for (let pass = 1; pass <= maxSelective + 2; pass++) {
+    const r = await run(buf);
+    const errors = parsePsqlErrors(r.stderr);
+    // ("already exists" in a retry = a statement that shares its line with the failed one and had succeeded — benign)
+    const cls = classifyBaselineErrors(errors, { second: pass > 1 });
+    last = cls.unexpected;
+    summary.push({ pass, mode: pass === 1 ? 'full' : mode, errors: errors.length, expected: cls.expected.length, unexpected: cls.unexpected.length });
+    if (!cls.unexpected.length) break;
+    const plan = planRetry(text, errors, { second: pass > 1 });
+    if (plan.mode === 'selective' && plan.unexpected < prev && pass <= maxSelective) {
+      prev = plan.unexpected; text = plan.script; buf = Buffer.from(plan.script, 'utf8'); mode = 'selective';
+      log(`[Bootstrap] baseline pass ${pass}: ${plan.unexpected} unexpected error(s) — retrying exactly those statements`);
+      continue;
+    }
+    if (!fullAgain) {
+      fullAgain = true; text = original; buf = sqlBuf; mode = 'full'; prev = Infinity;
+      log(`[Bootstrap] baseline pass ${pass}: ${plan.reason || 'the selective retries stopped making progress'} — one full second pass`);
+      continue;
+    }
+    break;
+  }
+  return { summary, unexpected: last || [] };
 }
 
 // ─── verification arithmetic ────────────────────────────────────────────────
@@ -270,8 +350,8 @@ module.exports = {
   MARKER_FILE, EXPECTED_PG_MAJOR, REDACTED_FUNCTIONS, LOCAL_EXTRAS,
   readMarker, writeMarker, markerPath,
   pgMajorOf, detect, moveAside, prepareDataDir,
-  loadPin, verifyBaselineFiles, sha256File,
-  rolesSql, postBaselineSql,
+  loadPin, verifyBaselineFiles, sha256File, hbaText, hbaHasTrust, passwordSql,
+  rolesSql, postBaselineSql, planRetry, loadBaseline,
   parsePsqlErrors, classifyBaselineErrors,
   compareFunctionInventory, compareTotals, stripPublic,
 };

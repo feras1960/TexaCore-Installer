@@ -257,7 +257,7 @@ function saveConfig(config) {
   if (existing.tunnelToken && !config.tunnelToken) merged.tunnelToken = existing.tunnelToken;
   if (existing.subdomain && !config.subdomain) merged.subdomain = existing.subdomain;
   if (existing.enableCloud && config.enableCloud === undefined) merged.enableCloud = existing.enableCloud;
-  fs.writeFileSync(CONFIG_FILE, JSON.stringify(merged, null, 2));
+  fs.writeFileSync(CONFIG_FILE, JSON.stringify(merged, null, 2), { mode: 0o600 });
 }
 
 // ─── Create Window ───────────────────────────────────────────
@@ -371,7 +371,7 @@ async function getLocalDbStats() {
       port: (typeof ServiceManager !== 'undefined' && ServiceManager.PG_PORT) || 54322,
       database: 'postgres',
       user: 'postgres',
-      password: (svcManager && svcManager.dbPassword) || (typeof ServiceManager !== 'undefined' && ServiceManager.DB_PASSWORD) || '',
+      password: (svcManager && svcManager.dbPassword) || '',
     });
     await client.connect();
     const { rows } = await client.query(`
@@ -2058,7 +2058,7 @@ const httpServer = http.createServer(async (req, res) => {
   } else if (req.method === 'GET' && req.url === '/api/companies') {
     try {
       const { Client } = require('pg');
-      const pgC = new Client({ host: 'localhost', port: ServiceManager.PG_PORT, database: 'postgres', user: 'postgres', password: ServiceManager.DB_PASSWORD });
+      const pgC = new Client({ host: 'localhost', port: ServiceManager.PG_PORT, database: 'postgres', user: 'postgres', password: (svcManager && svcManager.dbPassword) || '' });
       await pgC.connect();
       const { rows } = await pgC.query('SELECT id, name, tenant_id FROM public.companies LIMIT 10');
       await pgC.end();
@@ -2239,7 +2239,7 @@ const httpServer = http.createServer(async (req, res) => {
         // Initialize backupManager pointing to the ORIGINAL file path
         if (!backupManager) {
           const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
-          const dbPass = svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD;
+          const dbPass = svcManager ? svcManager.dbPassword : '';
           backupManager = new BackupManager({
             pgBinDir, dbHost: 'localhost', dbPort: ServiceManager.PG_PORT || 54322,
             dbName: 'postgres', dbUser: 'postgres', dbPassword: dbPass,
@@ -2294,7 +2294,7 @@ const httpServer = http.createServer(async (req, res) => {
           const pgClient = new Client({
             host: 'localhost', port: ServiceManager.PG_PORT,
             database: 'postgres', user: 'postgres',
-            password: svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD,
+            password: svcManager ? svcManager.dbPassword : '',
           });
           await pgClient.connect();
           
@@ -2387,7 +2387,7 @@ const httpServer = http.createServer(async (req, res) => {
             const pgC2 = new PgClient2({
               host: 'localhost', port: ServiceManager.PG_PORT,
               database: 'postgres', user: 'postgres',
-              password: ServiceManager.DB_PASSWORD,
+              password: (svcManager && svcManager.dbPassword) || '',
             });
             await pgC2.connect();
             await pgC2.query("NOTIFY pgrst, 'reload schema'");
@@ -2562,7 +2562,7 @@ const httpServer = http.createServer(async (req, res) => {
         // Initialize backupManager if needed
         if (!backupManager) {
           const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
-          const dbPass = svcManager ? svcManager.dbPassword : ServiceManager.DB_PASSWORD;
+          const dbPass = svcManager ? svcManager.dbPassword : '';
           backupManager = new BackupManager({
             pgBinDir, dbHost: 'localhost', dbPort: ServiceManager.PG_PORT || 54322,
             dbName: 'postgres', dbUser: 'postgres', dbPassword: dbPass,

@@ -132,8 +132,9 @@ test('verifyBaselineFiles: pin vs the files on disk', () => {
 });
 
 test('roles SQL: per-install password, no superuser login, anon cannot log in', () => {
-  const sql = b.rolesSql({ dbPassword: "pw'with'quotes" });
+  const sql = b.rolesSql({ authenticatorPassword: "pw'with'quotes", authAdminPassword: 'other' });
   assert.match(sql, /ALTER ROLE authenticator PASSWORD 'pw''with''quotes'/);
+  assert.match(sql, /ALTER ROLE supabase_auth_admin PASSWORD 'other'/);
   assert.match(sql, /CREATE ROLE anon NOLOGIN/);
   assert.doesNotMatch(sql, /SUPERUSER/);
   assert.match(sql, /GRANT anon, authenticated, service_role TO authenticator/);
@@ -179,4 +180,108 @@ test('totals: inventory + the local extras', () => {
   const t = { tables: '724', functions: '1993', triggers: '716', policies: '4470', indexes: '2860', views: '29' };
   assert.deepEqual(b.compareTotals(t, { tables: 725, functions: 1994, triggers: 716, policies: 4470, indexes: 2861, views: 29 }), []);
   assert.match(b.compareTotals(t, { tables: 724, functions: 1994, triggers: 716, policies: 4470, indexes: 2861, views: 29 }).join(), /tables: expected 725, installed 724/);
+});
+
+// ─── baseline load: only the failed statements are retried ───────────────────────────────────────────────────────
+const { statementsWithEndLines, buildRetryScript } = require('../src/sql-split');
+const bs = require('../src/bootstrap');
+
+// a fake psql: each statement is "MAKE name [NEEDS other];" — it fails while `other` does not exist yet; reports psql's line (the statement's LAST line)
+function fakePsql(created = new Set()) {
+  const calls = [];
+  const run = async (buf) => {
+    const sql = buf.toString('utf8');
+    const stmts = statementsWithEndLines(sql);
+    calls.push(stmts.filter((x) => !x.session).length);
+    let err = '';
+    for (const st of stmts) {
+      if (st.session) continue;
+      const m = /MAKE\s+(\w+)(?:\s+NEEDS\s+(\w+))?\s*;/.exec(st.text);
+      if (!m) continue;
+      if (/REALTIME/.test(st.text)) { err += `psql:<stdin>:${st.endLine}: ERROR:  relation "realtime.messages_2026_10_13" does not exist\n`; continue; }
+      if (m[2] && !created.has(m[2])) { err += `psql:<stdin>:${st.endLine}: ERROR:  "${m[2]}" does not exist\n`; continue; }
+      if (created.has(m[1])) { err += `psql:<stdin>:${st.endLine}: ERROR:  "${m[1]}" already exists\n`; continue; }
+      created.add(m[1]);
+    }
+    return { code: 0, stderr: err };
+  };
+  return { run, calls, created };
+}
+
+test('baseline load: ordering failures are retried by themselves (multi-line, dollar-quoted, same-line), nothing else is re-run', async () => {
+  const sql = `SET search_path = public;
+MAKE a;
+MAKE b NEEDS d;
+MAKE c
+   NEEDS e
+ ;
+DO $$
+BEGIN
+  -- a semicolon ; inside a dollar quote
+END $$;
+MAKE d; MAKE e;
+MAKE f NEEDS g; MAKE g;
+MAKE REALTIME_PART;
+`;
+  const f = fakePsql();
+  const r = await bs.loadBaseline(Buffer.from(sql), f.run);
+  assert.deepEqual([...f.created].sort(), ['a', 'b', 'c', 'd', 'e', 'f', 'g']);
+  assert.equal(r.unexpected.length, 0);
+  assert.equal(r.summary[0].mode, 'full');
+  assert.ok(f.calls.length >= 2 && f.calls[1] < f.calls[0], 'the retry runs far fewer statements than the full pass');
+  assert.ok(r.summary.slice(1).every((x) => x.mode === 'selective'), 'no full second pass was needed');
+  // the expected realtime error never triggers a retry
+  const g = fakePsql();
+  const r2 = await bs.loadBaseline(Buffer.from('SET x = 1;\nMAKE a;\nMAKE REALTIME_PART;\n'), g.run);
+  assert.equal(g.calls.length, 1); assert.equal(r2.summary.length, 1); assert.equal(r2.summary[0].expected, 1);
+});
+
+test('baseline load: with no failures at all there is ONE pass (no 12,000-line "already exists" second pass)', async () => {
+  const f = fakePsql();
+  const r = await bs.loadBaseline(Buffer.from('MAKE a;\nMAKE b NEEDS a;\n'), f.run);
+  assert.equal(f.calls.length, 1); assert.equal(r.summary.length, 1); assert.equal(r.unexpected.length, 0);
+});
+
+test('baseline load: an unmappable failure falls back to ONE full second pass, where "already exists" is benign', async () => {
+  let n = 0; const calls = [];
+  const run = async (buf) => { n += 1; calls.push(buf.toString('utf8').length); return { stderr: n === 1 ? 'psql: ERROR:  something odd without a line\n' : 'psql:<stdin>:3: ERROR:  relation "x" already exists\n' }; };
+  const r = await bs.loadBaseline(Buffer.from('MAKE a;\nMAKE b;\nMAKE c;\n'), run);
+  assert.equal(r.summary.length, 2); assert.equal(r.summary[1].mode, 'full'); assert.equal(r.unexpected.length, 0);
+  assert.equal(calls[0], calls[1], 'the second pass is the whole file');
+});
+
+test('baseline load: a failure that never goes away is reported (no infinite loop)', async () => {
+  const run = async (buf) => {
+    const st = statementsWithEndLines(buf.toString('utf8')).filter((x) => !x.session);
+    return { stderr: st.map((x) => (/BAD/.test(x.text) ? `psql:<stdin>:${x.endLine}: ERROR:  syntax error at or near "BAD"\n` : '')).join('') };
+  };
+  const r = await bs.loadBaseline(Buffer.from('MAKE a;\nBAD;\nMAKE b;\n'), run);
+  assert.equal(r.unexpected.length, 1); assert.ok(r.summary.length <= 9);
+});
+
+test('retry script keeps every session statement and only the failed ones, in file order', () => {
+  const sql = 'SET a = 1;\nCREATE x;\nCREATE y;\nSELECT pg_catalog.set_config(\'s\', \'v\', false);\nCREATE z;\n';
+  const r = buildRetryScript(sql, [3, 5]);
+  const order = ['SET a = 1;', 'CREATE y;', "set_config('s'", 'CREATE z;'].map((x) => r.script.indexOf(x));
+  assert.ok(order.every((i) => i >= 0) && order.every((v, i) => i === 0 || v > order[i - 1]), 'session + failed statements, in file order');
+  assert.ok(!r.script.includes('CREATE x;'), 'the statement that succeeded is not repeated');
+  assert.equal(r.retried, 2); assert.deepEqual(r.unmapped, []);
+  assert.deepEqual(buildRetryScript(sql, [99]).unmapped, [99]);
+});
+
+test('pg_hba is scram-sha-256 only, loopback only; trust is detected', () => {
+  const unix = bs.hbaText({ windows: false }); const win = bs.hbaText({ windows: true });
+  assert.ok(!bs.hbaHasTrust(unix) && !bs.hbaHasTrust(win));
+  assert.match(unix, /^local\s+all\s+all\s+scram-sha-256$/m); assert.doesNotMatch(win, /^local/m);
+  for (const t of [unix, win]) { assert.match(t, /127\.0\.0\.1\/32\s+scram-sha-256/); assert.match(t, /::1\/128\s+scram-sha-256/); assert.doesNotMatch(t, /0\.0\.0\.0|::\/0/); }
+  assert.ok(bs.hbaHasTrust('host all all 127.0.0.1/32 trust\n')); assert.ok(!bs.hbaHasTrust('# trust is bad\nhost all all 127.0.0.1/32 scram-sha-256\n'));
+});
+
+test('role passwords: postgres is set unconditionally, the two service roles only when they exist, values are quoted', () => {
+  const sql = bs.passwordSql({ dbPassword: "pw'1", authenticatorPassword: 'a2', authAdminPassword: 'a3' });
+  assert.match(sql, /ALTER ROLE postgres PASSWORD 'pw''1'/);
+  assert.match(sql, /IF EXISTS \(SELECT FROM pg_roles WHERE rolname = 'authenticator'\)/);
+  assert.match(sql, /rolname = 'supabase_auth_admin'/);
+  const roles = bs.rolesSql({ authenticatorPassword: 'AUTHN', authAdminPassword: 'AUTHA' });
+  assert.match(roles, /ALTER ROLE authenticator PASSWORD 'AUTHN'/); assert.match(roles, /ALTER ROLE supabase_auth_admin PASSWORD 'AUTHA'/);
 });

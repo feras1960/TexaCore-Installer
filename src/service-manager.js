@@ -63,7 +63,9 @@ class ServiceManager {
     this.jwtSecret = _secrets.jwtSecret;
     this.anonKey = _secrets.anonKey;
     this.serviceKey = _secrets.serviceKey;
-    this.dbPassword = _secrets.dbPassword;
+    this.dbPassword = _secrets.dbPassword;                     // the PostgreSQL superuser `postgres`: EVERY connection authenticates (scram-sha-256)
+    this.authenticatorPassword = _secrets.authenticatorPassword; // PostgREST's login role
+    this.authAdminPassword = _secrets.authAdminPassword;         // GoTrue's login role (supabase_auth_admin)
     this.localApiSecret = _secrets.localApiSecret;   // required by the admin API (main.js) — see /config.js
     this.proxyServer = null;
     this.onMigrationProgress = null; // callback: (step, total, name) => void
@@ -86,10 +88,11 @@ class ServiceManager {
     // The packaged app carries the baseline + installer SQL as ONE encrypted container (baseline-store.js); development reads the plain files.
     this.baselineStore = openBaselineStore({ baselineDir: this.baselineDir, bootstrapDir: this.bootstrapSqlDir });
 
-    // Ensure directories
+    // Ensure directories (the logs may carry business data: private to the owner of the account)
     for (const dir of [this.dataDir, this.logDir]) {
-      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+      if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true, mode: 0o700 });
     }
+    if (process.platform !== 'win32') { try { fs.chmodSync(this.logDir, 0o700); } catch { /* not ours to change */ } }
   }
 
   // ─── Binary Paths ────────────────────────────────────────────
@@ -120,10 +123,15 @@ class ServiceManager {
     };
   }
 
+  /** node-postgres options for a connection as the superuser (scram-sha-256: the password is mandatory). */
+  pgClientOptions(extra = {}) {
+    return { host: '127.0.0.1', port: PG_PORT, database: 'postgres', user: 'postgres', password: this.dbPassword, ...extra };
+  }
+
   // PostgreSQL 17's bundle has no pg_isready: ask the server itself (a real connection + SELECT 1).
   async _pgAccepting(timeoutMs = 2500) {
     const { Client } = require('pg');
-    const client = new Client({ host: '127.0.0.1', port: PG_PORT, database: 'postgres', user: 'postgres', connectionTimeoutMillis: timeoutMs });
+    const client = new Client(this.pgClientOptions({ connectionTimeoutMillis: timeoutMs }));
     client.on('error', () => { /* swallowed: reported through the catch below */ });
     try {
       await client.connect();
@@ -169,6 +177,8 @@ class ServiceManager {
   // per-install password.
   _pgEnv() {
     const env = { ...process.env };
+    // psql / pg_dump / pg_restore authenticate through the environment, never through argv (a command line is visible to every process on the machine)
+    if (this.dbPassword) env.PGPASSWORD = this.dbPassword;
     if (this.isWindows) {
       env.PATH = this.pgBin + ';' + path.join(this.binsDir, 'pg', 'lib') + ';' + (env.PATH || '');
       env.PGSHAREDIR = path.join(this.binsDir, 'pg', 'share');
@@ -203,6 +213,12 @@ class ServiceManager {
     console.log('[ServiceManager] Initializing database for first time (PostgreSQL 17, ICU en-US, UTC)...');
     const initdb = path.join(this.pgBin, this.isWindows ? 'initdb.exe' : 'initdb');
 
+    // The superuser's password reaches initdb through a 0600 file in a private directory that is deleted right after — never on the command line.
+    const pwDir = fs.mkdtempSync(path.join(this.dataDir, '.pw-'));
+    const pwFile = path.join(pwDir, 'pw');
+    fs.writeFileSync(pwFile, `${this.dbPassword}\n`, { mode: 0o600 });
+    const dropPwFile = () => { try { fs.writeFileSync(pwFile, ''); } catch { /* gone */ } try { fs.rmSync(pwDir, { recursive: true, force: true }); } catch { /* gone */ } };
+
     return new Promise((resolve, reject) => {
       const proc = spawn(initdb, [
         '-D', this.pgDataDir,
@@ -213,28 +229,23 @@ class ServiceManager {
         // libc side of the locale. With the ICU provider the default collation, upper()/lower() and regex classes come from ICU;
         // the libc locale only backs the odd libc call. macOS knows en_US.UTF-8 (= production's datcollate/datctype). On Windows
         // there is no such libc name, and an invalid one would stop initdb — "C" is the one value that is always valid there.
-        // (Windows is untested: no PostgreSQL 17 Windows bundle was available when this was written.)
         `--locale=${this.isWindows ? 'C' : 'en_US.UTF-8'}`,
-        '--auth=trust',
+        '--auth=scram-sha-256',          // NO trust, not even while bootstrapping: every client (ours included) presents a password
+        `--pwfile=${pwFile}`,
       ], { env: this._pgEnv() });
 
       let errOut = '';
       let stdOut = '';
       proc.stdout.on('data', d => stdOut += d.toString());
       proc.stderr.on('data', d => errOut += d.toString());
-      proc.on('error', err => reject(new Error(`initdb spawn error: ${err.message}`)));
+      proc.on('error', err => { dropPwFile(); reject(new Error(`initdb spawn error: ${err.message}`)); });
       proc.on('close', code => {
+        dropPwFile();
         if (code === 0) {
           console.log('[ServiceManager] Database initialized successfully');
-          // pg_hba.conf: loopback only, trust (the app's own processes are the only clients).
-          const hbaLines = [
-            '# TYPE  DATABASE  USER  ADDRESS  METHOD',
-            'host    all       all   127.0.0.1/32  trust',
-            'host    all       all   ::1/128       trust',
-          ];
-          if (!this.isWindows) hbaLines.splice(1, 0, 'local   all       all              trust');
-          fs.writeFileSync(path.join(this.pgDataDir, 'pg_hba.conf'), hbaLines.join('\n') + '\n');
-          // postgresql.conf: production time zone, loopback listener, no unix socket (no path-length / collision trouble).
+          // pg_hba.conf: loopback only, scram-sha-256 for everything (the app's own processes authenticate with their per-install passwords).
+          this._writeHba();
+          // postgresql.conf: production time zone, loopback listener, no unix socket (no path-length / collision trouble), and a log that never echoes SQL.
           fs.appendFileSync(path.join(this.pgDataDir, 'postgresql.conf'), [
             '', '# ── TexaCore 2.0 ──',
             "timezone = 'UTC'",
@@ -242,6 +253,11 @@ class ServiceManager {
             "listen_addresses = '127.0.0.1'",
             // (Windows has no /tmp socket directory to collide with; the setting is left at the server's own default there)
             ...(this.isWindows ? [] : ["unix_socket_directories = ''"]),
+            "password_encryption = 'scram-sha-256'",
+            // the server log is for diagnosing the server, not for keeping business data or the schema: no statement text is ever written with an error
+            "log_min_error_statement = panic",
+            "log_statement = 'none'",
+            "log_min_duration_statement = -1",
             '',
           ].join('\n'));
           resolve();
@@ -252,6 +268,66 @@ class ServiceManager {
         }
       });
     });
+  }
+
+  /** An empty log file that only the account that runs the program can read (logs may contain data; the file is recreated empty at every start). */
+  _privateLog(file) {
+    try { fs.writeFileSync(file, '', { mode: 0o600 }); } catch { /* ignore */ }
+    if (process.platform !== 'win32') { try { fs.chmodSync(file, 0o600); } catch { /* ignore */ } }
+  }
+
+  /** Empty the server log in place (the server keeps appending to the same file). Used right after the bootstrap. */
+  _resetPostgresLog() {
+    const f = path.join(this.logDir, 'postgres.log');
+    try { fs.truncateSync(f, 0); } catch { /* not there */ }
+    if (process.platform !== 'win32') { try { fs.chmodSync(f, 0o600); } catch { /* ignore */ } }
+  }
+
+  /** (Re)write pg_hba.conf atomically. mode 'trust' exists for ONE purpose: recovery after the secrets file was lost (see startPostgres). */
+  _writeHba({ trust = false } = {}) {
+    const hbaPath = path.join(this.pgDataDir, 'pg_hba.conf');
+    let text = bootstrap.hbaText({ windows: this.isWindows });
+    if (trust) text = text.replace(/scram-sha-256/g, 'trust');
+    const tmp = `${hbaPath}.tmp`;
+    fs.writeFileSync(tmp, text, { mode: 0o600 });
+    fs.renameSync(tmp, hbaPath);
+  }
+
+  /**
+   * Called once PostgreSQL accepts connections. Makes sure the cluster authenticates EVERYONE with a password:
+   *  - the superuser and the two service roles get their per-install passwords (a cluster built by an earlier 2.0 test build had `trust` and no passwords),
+   *  - pg_hba.conf becomes scram-sha-256 only, the server is told to reload it,
+   *  - the server never writes statement text into its log.
+   * Idempotent; a cluster that already is in that state costs one comparison of the file.
+   */
+  async _hardenAuth() {
+    const hbaPath = path.join(this.pgDataDir, 'pg_hba.conf');
+    let have = '';
+    try { have = fs.readFileSync(hbaPath, 'utf8'); } catch { /* none */ }
+    const want = bootstrap.hbaText({ windows: this.isWindows });
+    if (have === want && !this._recoveryTrust) return false;
+    console.log(`[ServiceManager] hardening database authentication (${this._recoveryTrust ? 'secrets were regenerated: roles re-keyed' : 'pg_hba.conf of an earlier build had ' + (bootstrap.hbaHasTrust(have) ? 'trust' : 'other rules')})`);
+    await this._withPgClient(async (client) => {
+      await client.query('BEGIN');
+      try {
+        await client.query(bootstrap.passwordSql({ dbPassword: this.dbPassword, authenticatorPassword: this.authenticatorPassword, authAdminPassword: this.authAdminPassword }));
+        await client.query('COMMIT');
+      } catch (e) { await client.query('ROLLBACK'); throw e; }
+      await client.query("ALTER SYSTEM SET log_min_error_statement = 'panic'");
+      await client.query("ALTER SYSTEM SET log_statement = 'none'");
+    });
+    this._writeHba();                                   // passwords first, THEN the file: a crash in between leaves the old (open) rules and the work is repeated
+    await this._withPgClient(async (client) => { await client.query('SELECT pg_reload_conf()'); });
+    this._recoveryTrust = false;
+    // prove it: the next connection without a password must be refused
+    await this._sleep(300);
+    const { Client } = require('pg');
+    const probe = new Client(this.pgClientOptions({ password: undefined, connectionTimeoutMillis: 3000 }));
+    probe.on('error', () => {});
+    let open = false;
+    try { await probe.connect(); await probe.query('SELECT 1'); open = true; } catch { /* refused — as intended */ } finally { try { await probe.end(); } catch { /* ignore */ } }
+    if (open) throw new Error('PostgreSQL still accepts a passwordless connection after the hardening step');
+    return true;
   }
 
   _appVersion() {
@@ -283,7 +359,16 @@ class ServiceManager {
 
     console.log('[ServiceManager] Starting PostgreSQL on port', PG_PORT);
     const logFile = path.join(this.logDir, 'postgres.log');
-    try { fs.writeFileSync(logFile, ''); } catch {}
+    this._privateLog(logFile);
+
+    // Recovery: this is an EXISTING cluster whose per-install secrets were lost and regenerated — nobody knows the old superuser password, so the
+    // cluster is started once with a loopback-only trust rule, the passwords are set to the new ones, and _hardenAuth() puts scram back before anything else runs.
+    this._recoveryTrust = false;
+    if (this.secretsCreated && !this.isFreshInstall && fs.existsSync(path.join(this.pgDataDir, 'PG_VERSION'))) {
+      console.warn('[ServiceManager] secrets were regenerated for an existing database → temporary loopback recovery rule');
+      this._writeHba({ trust: true });
+      this._recoveryTrust = true;
+    }
 
     const pgEnv = this._pgEnv();
     pgEnv.PGDATA = this.pgDataDir;
@@ -301,6 +386,7 @@ class ServiceManager {
         execSync(`"${pgCtl}" start -D "${this.pgDataDir}" -l "${logFile}" -w -t 30 -o "-p ${PG_PORT}"`, { env: pgEnv, stdio: 'ignore' });
         this.processes.postgres = { isPgCtl: true }; // dummy object to track status
         console.log('[ServiceManager] PostgreSQL is ready via pg_ctl');
+        await this._hardenAuth();
         return;
       } catch (err) {
         let logContent = '';
@@ -350,6 +436,7 @@ class ServiceManager {
 
       if (await this._pgAccepting()) {
         console.log('[ServiceManager] PostgreSQL is ready');
+        await this._hardenAuth();
         return;
       }
     }
@@ -366,7 +453,7 @@ class ServiceManager {
     return new Promise((resolve, reject) => {
       const psqlExe = this.isWindows ? 'psql.exe' : 'psql';
       const psql = spawn(path.join(this.pgBin, psqlExe), [
-        '-X',
+        '-X', '-w',
         '-p', String(PG_PORT),
         '-h', '127.0.0.1',
         '-U', 'postgres',
@@ -393,7 +480,7 @@ class ServiceManager {
     return new Promise((resolve, reject) => {
       const psqlExe = this.isWindows ? 'psql.exe' : 'psql';
       const psql = spawn(path.join(this.pgBin, psqlExe), [
-        '-X', '-q',
+        '-X', '-w', '-q',
         '-p', String(PG_PORT), '-h', '127.0.0.1', '-U', 'postgres', '-d', dbName,
         '-v', `ON_ERROR_STOP=${stopOnError ? 1 : 0}`,
         '-f', '-',
@@ -414,7 +501,7 @@ class ServiceManager {
     return new Promise((resolve, reject) => {
       const psqlExe = this.isWindows ? 'psql.exe' : 'psql';
       const psql = spawn(path.join(this.pgBin, psqlExe), [
-        '-X', '-q',
+        '-X', '-w', '-q',
         '-p', String(PG_PORT), '-h', '127.0.0.1', '-U', 'postgres', '-d', dbName,
         '-v', `ON_ERROR_STOP=${stopOnError ? 1 : 0}`,
         '-f', file,
@@ -431,7 +518,7 @@ class ServiceManager {
   /** A query through the node client (rows as objects) — for verification and the provisioning code. */
   async pgQuery(text, params = []) {
     const { Client } = require('pg');
-    const client = new Client({ host: '127.0.0.1', port: PG_PORT, database: 'postgres', user: 'postgres' });
+    const client = new Client(this.pgClientOptions());
     await client.connect();
     try { return await client.query(text, params); }
     finally { try { await client.end(); } catch { /* ignore */ } }
@@ -440,7 +527,7 @@ class ServiceManager {
   /** fn(query) inside ONE transaction on one connection (BEGIN … COMMIT, ROLLBACK on error). */
   async pgTransaction(fn) {
     const { Client } = require('pg');
-    const client = new Client({ host: '127.0.0.1', port: PG_PORT, database: 'postgres', user: 'postgres' });
+    const client = new Client(this.pgClientOptions());
     await client.connect();
     try {
       await client.query('BEGIN');
@@ -468,7 +555,7 @@ class ServiceManager {
     bootstrap.writeMarker(this.dataDir, { status: 'schema_loading', baselineSha256: pin.files['production_baseline.sql'].sha256, baselineCut: pin.cutTimestamp });
 
     step('Creating database roles');
-    await this.psqlExec(bootstrap.rolesSql({ dbPassword: this.dbPassword }));
+    await this.psqlExec(bootstrap.rolesSql({ authenticatorPassword: this.authenticatorPassword, authAdminPassword: this.authAdminPassword }));
 
     step('Creating the authentication schema');
     await this.runGoTrueMigrations();
@@ -479,17 +566,11 @@ class ServiceManager {
 
     step('Loading the production schema');
     const baselineSql = this.baselineStore.read('production_baseline.sql');     // decrypted in memory, fed to psql over stdin, never written down
-    const summary = [];
-    for (let pass = 1; pass <= 2; pass++) {
-      const r = await this.runPsqlSql(baselineSql, { stopOnError: false });
-      const errs = bootstrap.parsePsqlErrors(r.stderr);
-      const cls = bootstrap.classifyBaselineErrors(errs, { second: pass === 2 });
-      summary.push({ pass, errors: errs.length, expected: cls.expected.length, unexpected: cls.unexpected.length });
-      if (pass === 2 && cls.unexpected.length) {
-        console.warn(`[Bootstrap] baseline pass 2: ${cls.unexpected.length} unexpected error(s), first: ${cls.unexpected[0].message}`);
-      }
-    }
-    fs.writeFileSync(path.join(this.logDir, 'baseline-load.json'), JSON.stringify(summary, null, 2));
+    // One full pass; then ONLY the statements psql reported as failed (see bootstrap.loadBaseline) — not the whole file again.
+    const loaded = await bootstrap.loadBaseline(baselineSql, (buf) => this.runPsqlSql(buf, { stopOnError: false }), { log: (m) => console.log(m) });
+    const summary = loaded.summary;
+    if (loaded.unexpected.length) console.warn(`[Bootstrap] baseline: ${loaded.unexpected.length} unexpected error(s) remain, first: ${loaded.unexpected[0].message}`);
+    fs.writeFileSync(path.join(this.logDir, 'baseline-load.json'), JSON.stringify(summary, null, 2), { mode: 0o600 });
 
     step('Installing local extras');
     await this.runPsqlSql(this.baselineStore.read('local_extras.sql'), { stopOnError: true })
@@ -523,6 +604,7 @@ class ServiceManager {
     }
 
     step('Database ready');
+    this._resetPostgresLog();                                                  // the bootstrap's error lines are not kept
     this.baselineStore.release();                                              // the decrypted baseline leaves memory
     bootstrap.writeMarker(this.dataDir, { status: 'ready', readyAt: new Date().toISOString(), verified: v.stats });
     return { baseline: summary, verified: v.stats };
@@ -583,7 +665,7 @@ class ServiceManager {
         ...process.env,
         API_EXTERNAL_URL: `http://localhost:${this.activeApiPort}`,
         GOTRUE_DB_DRIVER: 'postgres',
-        DATABASE_URL: `postgres://supabase_auth_admin:${encodeURIComponent(this.dbPassword)}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
+        DATABASE_URL: `postgres://supabase_auth_admin:${encodeURIComponent(this.authAdminPassword)}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
         GOTRUE_JWT_SECRET: this.jwtSecret,
         GOTRUE_SITE_URL: `http://localhost:${this.activeApiPort}`
       };
@@ -615,7 +697,7 @@ class ServiceManager {
     this.activePostgrestPort = await this._findAvailablePort(DEFAULT_POSTGREST_PORT);
     console.log('[ServiceManager] Starting PostgREST on port', this.activePostgrestPort);
     const logFile = path.join(this.logDir, 'postgrest.log');
-    try { fs.writeFileSync(logFile, ''); } catch {}
+    this._privateLog(logFile);
 
     // PostgREST is configured through its environment (PGRST_*), NOT a config file: the JWT secret and the DB password never touch the disk here
     // (a postgrest.conf next to an encrypted secrets file would make the encryption pointless). anon is the unauthenticated role; whatever it may do is
@@ -625,7 +707,7 @@ class ServiceManager {
     // Build environment: add pg/lib and pg/bin to PATH for libpq.dll on Windows
     const env = {
       ...process.env,
-      PGRST_DB_URI: `postgres://authenticator:${encodeURIComponent(this.dbPassword)}@127.0.0.1:${PG_PORT}/postgres`,
+      PGRST_DB_URI: `postgres://authenticator:${encodeURIComponent(this.authenticatorPassword)}@127.0.0.1:${PG_PORT}/postgres`,
       PGRST_DB_SCHEMAS: 'public',
       PGRST_DB_EXTRA_SEARCH_PATH: 'public, extensions',
       PGRST_DB_ANON_ROLE: 'anon',
@@ -685,7 +767,7 @@ class ServiceManager {
     this.activeGotruePort = await this._findAvailablePort(DEFAULT_GOTRUE_PORT);
     console.log('[ServiceManager] Starting GoTrue on port', this.activeGotruePort);
     const logFile = path.join(this.logDir, 'gotrue.log');
-    try { fs.writeFileSync(logFile, ''); } catch {}
+    this._privateLog(logFile);
 
     const env = {
       ...process.env,
@@ -693,7 +775,7 @@ class ServiceManager {
       GOTRUE_API_PORT: String(this.activeGotruePort),
       API_EXTERNAL_URL: `http://localhost:${this.activeApiPort}`,
       GOTRUE_DB_DRIVER: 'postgres',
-      GOTRUE_DB_DATABASE_URL: `postgres://supabase_auth_admin:${encodeURIComponent(this.dbPassword)}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
+      GOTRUE_DB_DATABASE_URL: `postgres://supabase_auth_admin:${encodeURIComponent(this.authAdminPassword)}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
       GOTRUE_SITE_URL: `http://localhost:${this.activeApiPort}`,
       // 2.0.0: nobody can self-register on a local server — accounts are created by the installer (provisioning.js) and the
       // ERP's own admin flows. (Open signup + a tunnel to the internet = strangers getting accounts.)
@@ -707,7 +789,7 @@ class ServiceManager {
       GOTRUE_SMS_AUTOCONFIRM: 'true',
       GOTRUE_EXTERNAL_EMAIL_ENABLED: 'true',
       GOTRUE_EXTERNAL_PHONE_ENABLED: 'false',
-      DATABASE_URL: `postgres://supabase_auth_admin:${encodeURIComponent(this.dbPassword)}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
+      DATABASE_URL: `postgres://supabase_auth_admin:${encodeURIComponent(this.authAdminPassword)}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
     };
 
     if (this.isWindows) {
@@ -833,6 +915,7 @@ class ServiceManager {
 
     const runner = new MigrationRunner({
       psqlExec: (sql, db) => this.psqlExec(sql, db),
+      pgEnv: () => this._pgEnv(),
       pgBin: this.pgBin,
       isWindows: this.isWindows,
       migrationsDir: this.migrationsDir,
@@ -852,6 +935,7 @@ class ServiceManager {
     }
     const runner = new MigrationRunner({
       psqlExec: (sql, db) => this.psqlExec(sql, db),
+      pgEnv: () => this._pgEnv(),
       migrationsDir: this.migrationsDir,
     });
     return runner.getStatus();
@@ -894,9 +978,7 @@ class ServiceManager {
         // 3'. Existing 2.0 install. If its secrets file was lost the roles are re-keyed with the regenerated password
         //     (loopback trust lets postgres do that); sessions signed with the old JWT secret simply stop being valid.
         if (this.secretsCreated) {
-          await this.psqlExec(`ALTER ROLE authenticator PASSWORD '${this.dbPassword.replace(/'/g, "''")}';
-                               ALTER ROLE supabase_auth_admin PASSWORD '${this.dbPassword.replace(/'/g, "''")}';`);
-          this.secretsCreated = false;
+          this.secretsCreated = false;           // the roles were re-keyed with the regenerated passwords while PostgreSQL started (_hardenAuth)
           console.log('[ServiceManager] secrets regenerated → database roles re-keyed');
         }
         await this.runGoTrueMigrations();
@@ -1252,6 +1334,7 @@ window.__TEXACORE_CONFIG__ = {
     // skipVerify is passed right after a fresh registration: the record was just
     // created and may not have propagated to public DNS yet, but cloudflared
     // still connects to the edge via the token regardless.
+    if (process.env.TEXACORE_CLOUDFLARED_BIN && harnessAllowed(require('electron').app.isPackaged)) skipVerify = true;   // release check: no lookups of the real domain
     if (!skipVerify) {
       try {
         await require('dns').promises.resolve4(`${config.subdomain}.texacore.ai`);
@@ -1302,7 +1385,7 @@ window.__TEXACORE_CONFIG__ = {
 
       if (autoFixResult.success && autoFixResult.tunnel_token) {
         config.tunnelToken = autoFixResult.tunnel_token;
-        fs.writeFileSync(configPath, JSON.stringify(config, null, 2));
+        fs.writeFileSync(configPath, JSON.stringify(config, null, 2), { mode: 0o600 });
         console.log(`[ServiceManager] ✅ Fresh tunnel token obtained (${config.tunnelToken.length} chars)`);
       } else {
         console.error('[ServiceManager] ❌ Token refresh failed:', autoFixResult.error || 'Unknown error');
@@ -1338,7 +1421,12 @@ window.__TEXACORE_CONFIG__ = {
       possiblePaths.push('/usr/bin/cloudflared');
     }
     
+    // (isolated release-check runs only: a stand-in executable, so the way the tunnel process is started can be inspected without a real tunnel)
+    if (process.env.TEXACORE_CLOUDFLARED_BIN && harnessAllowed(require('electron').app.isPackaged) && fs.existsSync(process.env.TEXACORE_CLOUDFLARED_BIN)) {
+      cloudflaredBin = process.env.TEXACORE_CLOUDFLARED_BIN;
+    }
     for (const p of possiblePaths) {
+      if (cloudflaredBin) break;
       if (p && fs.existsSync(p)) { cloudflaredBin = p; break; }
     }
 
@@ -1363,12 +1451,11 @@ window.__TEXACORE_CONFIG__ = {
     console.log(`[ServiceManager] Tunnel will route to localhost:${frontendPort}`);
 
     const startTunnelProcess = () => {
-      const proc = spawn(cloudflaredBin, [
-        'tunnel', '--no-autoupdate', 'run',
-        '--token', config.tunnelToken
-      ], {
+      // The tunnel token is a credential: it goes to cloudflared through its environment (TUNNEL_TOKEN), NOT as `--token <value>` — a command line is
+      // visible to every process on the machine (ps), the environment of a process is not.
+      const proc = spawn(cloudflaredBin, ['tunnel', '--no-autoupdate', 'run'], {
         stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env },
+        env: { ...process.env, TUNNEL_TOKEN: config.tunnelToken },
       });
 
       const logStream = fs.createWriteStream(logFile, { flags: 'a' });
@@ -1573,7 +1660,7 @@ window.__TEXACORE_CONFIG__ = {
   provisioningDeps(extra = {}) {
     const { Client } = require('pg');
     return {
-      connect: async () => { const c = new Client({ host: '127.0.0.1', port: PG_PORT, database: 'postgres', user: 'postgres' }); await c.connect(); return c; },
+      connect: async () => { const c = new Client(this.pgClientOptions()); await c.connect(); return c; },
       gotrueUrl: `http://127.0.0.1:${this.activeGotruePort}`,
       restUrl: `http://127.0.0.1:${this.activePostgrestPort}`,
       anonKey: this.anonKey,
@@ -1600,7 +1687,7 @@ window.__TEXACORE_CONFIG__ = {
 
   _writeConfig(cfg) {
     const p = path.join(this.dataDir, 'config.json');
-    fs.writeFileSync(p, JSON.stringify(cfg, null, 2));
+    fs.writeFileSync(p, JSON.stringify(cfg, null, 2), { mode: 0o600 });
   }
 
   async _withPgClient(fn) {

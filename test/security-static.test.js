@@ -103,3 +103,34 @@ test('create-local-company refuses a dbFileName that is not a plain name before 
   const iCreate = main.indexOf('provisioning.createLocalCompany(provisioningDeps(), companyData)');
   assert.ok(iGuard > 0 && iCreate > 0 && iGuard < iCreate);
 });
+
+test('database authentication: initdb is scram with a pwfile (not argv), nothing in the installer asks for trust except the one-off recovery rule, psql never prompts', () => {
+  const sm = lineCode(all.find((x) => x.f === 'service-manager.js').text);
+  assert.match(sm, /'--auth=scram-sha-256'/);
+  assert.match(sm, /`--pwfile=\$\{pwFile\}`/);
+  assert.doesNotMatch(sm, /--auth=trust|--auth-host=trust|--auth-local=trust/);
+  assert.doesNotMatch(sm, /'host\s+all\s+all\s+127\.0\.0\.1\/32\s+trust'/, 'no hand-written trust rule');
+  assert.match(sm, /_writeHba\(\{ trust: true \}\)/, 'the recovery rule exists, once');
+  assert.equal((sm.match(/_writeHba\(\{ trust: true \}\)/g) || []).length, 1);
+  assert.match(sm, /await this\._hardenAuth\(\);\s*\n\s*return;/);
+  const boot = lineCode(all.find((x) => x.f === 'bootstrap.js').text);
+  assert.match(boot, /scram-sha-256/); assert.doesNotMatch(boot.replace(/function hbaHasTrust[\s\S]*?\n}\n/, ''), /(?:host|local)\s+all\s+all[^\n]*\btrust\b/);
+  // every psql the installer starts passes -w (never wait for a password prompt) and none puts a password in argv
+  for (const m of sm.matchAll(/spawn\(path\.join\(this\.pgBin, psqlExe\), \[([\s\S]*?)\], \{/g)) { assert.match(m[1], /'-w'/); assert.doesNotMatch(m[1], /assword/); }
+  assert.match(sm, /env\.PGPASSWORD = this\.dbPassword/);
+});
+
+test('the tunnel token travels in cloudflared\'s environment (TUNNEL_TOKEN), never as --token on a command line', () => {
+  const sm = lineCode(all.find((x) => x.f === 'service-manager.js').text);
+  assert.doesNotMatch(sm, /'--token'/);
+  assert.match(sm, /TUNNEL_TOKEN: config\.tunnelToken/);
+  assert.match(sm, /spawn\(cloudflaredBin, \['tunnel', '--no-autoupdate', 'run'\]/);
+});
+
+test('the server log never echoes SQL: log_min_error_statement=panic is set at initdb and enforced on start; logs are 0600', () => {
+  const sm = lineCode(all.find((x) => x.f === 'service-manager.js').text);
+  assert.match(sm, /"log_min_error_statement = panic"/);
+  assert.match(sm, /ALTER SYSTEM SET log_min_error_statement = 'panic'/);
+  assert.match(sm, /_privateLog\(logFile\)/);
+  assert.match(sm, /mode: 0o600/);
+});

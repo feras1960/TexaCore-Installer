@@ -76,8 +76,13 @@ function getOrCreateSecrets(dataDir, vault = null) {
   const secretsPath = path.join(dataDir, 'secrets.json');
   const encPath = path.join(dataDir, 'secrets.enc');
   const addAdminSecret = (s, persist) => {
-    // secrets written by an earlier 2.0 build have no admin-API secret yet: add one (everything else is untouched)
-    if (!s.localApiSecret) { s.localApiSecret = crypto.randomBytes(32).toString('hex'); try { persist(s); } catch { /* in-memory only */ } }
+    // secrets written by an earlier 2.0 build lack the admin-API secret and the separate database-role passwords: add them (everything else is untouched).
+    // dbPassword is the password of the PostgreSQL superuser `postgres`; the two login roles the services use get their OWN passwords.
+    let changed = false;
+    if (!s.localApiSecret) { s.localApiSecret = crypto.randomBytes(32).toString('hex'); changed = true; }
+    if (!s.authenticatorPassword) { s.authenticatorPassword = b64url(crypto.randomBytes(24)); changed = true; }
+    if (!s.authAdminPassword) { s.authAdminPassword = b64url(crypto.randomBytes(24)); changed = true; }
+    if (changed) { try { persist(s); } catch { /* in-memory only */ } }
     return s;
   };
 
@@ -114,7 +119,9 @@ function getOrCreateSecrets(dataDir, vault = null) {
   const keys = makeKeys(jwtSecret);
   const secrets = {
     jwtSecret,
-    dbPassword: b64url(crypto.randomBytes(24)),
+    dbPassword: b64url(crypto.randomBytes(24)),            // the PostgreSQL superuser `postgres` (every connection authenticates with scram-sha-256)
+    authenticatorPassword: b64url(crypto.randomBytes(24)), // PostgREST's login role
+    authAdminPassword: b64url(crypto.randomBytes(24)),     // GoTrue's login role (supabase_auth_admin)
     anonKey: keys.anonKey,
     serviceKey: keys.serviceKey,
     // the secret the installer's local admin API (create/delete company, backups, …) requires in x-texacore-local-secret

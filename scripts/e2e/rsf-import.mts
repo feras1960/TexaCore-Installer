@@ -83,7 +83,7 @@ const done: any = await completeCompanyProvisioning(co.companyId, operationId);
 log({ phase: 'completed', done: done?.success ?? done });
 
 // ── verify independently, straight from the database ──
-const pool = new pg.Pool({ host: '127.0.0.1', port: PG_PORT, user: 'postgres', database: 'postgres', max: 2 });
+const pool = new pg.Pool({ host: '127.0.0.1', port: PG_PORT, user: 'postgres', password: env('PG_PASSWORD'), database: 'postgres', max: 2 });
 const q = async (sql: string, p: unknown[] = []) => (await pool.query(sql, p)).rows;
 const cid = co.companyId;
 const entries = (await q(`SELECT count(*)::int n FROM public.journal_entries WHERE company_id=$1 AND COALESCE(is_deleted,false)=false`, [cid]))[0].n;

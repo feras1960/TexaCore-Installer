@@ -10,6 +10,11 @@ const ROOT = path.join(__dirname, '..', '..');
 const PORT_BASE = 47391;
 const PORTS = { pg: PORT_BASE, postgrest: PORT_BASE + 1, gotrue: PORT_BASE + 2, api: PORT_BASE + 3, ui: PORT_BASE + 4, admin: PORT_BASE + 5 };
 
+// The superuser password of the install under test (secrets.json → dbPassword): every connection to PostgreSQL authenticates (scram-sha-256).
+let _pgPassword = '';
+function setPgPassword(p) { _pgPassword = p || ''; }
+function pgOptions(extra = {}) { return { host: '127.0.0.1', port: PORT_BASE, database: 'postgres', user: 'postgres', password: _pgPassword, ...extra }; }
+
 class Results {
   constructor() { this.rows = []; this.warnings = []; }
   async check(name, fn) {
@@ -101,4 +106,4 @@ async function stopApp(child, userData) {
   }
 }
 
-module.exports = { ROOT, PORTS, PORT_BASE, Results, portFree, request, startApp, stopApp };
+module.exports = { ROOT, PORTS, PORT_BASE, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions };
