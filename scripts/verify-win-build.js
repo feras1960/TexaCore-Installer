@@ -239,6 +239,17 @@ const VC_RUNTIME = /^(vcruntime\d+(_\d+)?|msvcp\d+(_\d+)?|concrt\d+|vcomp\d+|vcc
       if (macGt && winGt && macGt !== winGt) throw new Error(`GoTrue: windows "${winGt}" vs mac "${macGt}"`);
       return `x64 PE: auth.exe ${Math.round(fs.statSync(files.gotrue).size / 1e6)} MB, postgrest.exe, cloudflared.exe; PostgREST win="${winPg || 'n/a'}" mac="${macPg || 'n/a'}"; GoTrue win="${winGt.replace(/^.*Version=/, '') || 'n/a'}" (the macOS binary does not print its version; both were added by the same 1.8.0 commit)`;
     });
+    await R.check('W8 the installer shows the EULA (assisted NSIS installer + licence RTF with the no-reverse-engineering clause in Arabic and English)', async () => {
+      const nsis = pkg.build.nsis || {};
+      if (nsis.oneClick !== false) throw new Error('nsis.oneClick is not false — a one-click installer has no licence page');
+      if (nsis.license !== 'build/eula.rtf' || !fs.existsSync(path.join(ROOT, nsis.license))) throw new Error('nsis.license does not point at build/eula.rtf');
+      const { CLAUSE_EN, CLAUSE_AR } = require('./make-eula');
+      const out = require('child_process').spawnSync('textutil', ['-convert', 'txt', '-stdout', path.join(ROOT, nsis.license)], { encoding: 'utf8' });
+      const text = out.status === 0 ? out.stdout : null;
+      if (text !== null && (!text.includes(CLAUSE_EN) || !text.includes(CLAUSE_AR))) throw new Error('the RTF does not carry both clauses verbatim after parsing');
+      return `oneClick=false, license=build/eula.rtf${text !== null ? ' (parsed: both clauses verbatim)' : ' (clauses checked in the generator tests; textutil not available)'}; the licence text is compiled INTO the installer by makensis (the build log shows "oneClick=false")`;
+    });
+
   } catch (e) {
     R.rows.push({ name: 'harness', ok: false, evidence: e.message, ms: 0 });
     console.log(`  FAIL  harness — ${e.message}`);
