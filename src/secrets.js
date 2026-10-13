@@ -1,11 +1,11 @@
 // ════════════════════════════════════════════════════════════════
-// 🔐 Per-install secrets — unique JWT secret / keys / DB password for
-// each installation, so extracting them from one DMG can't forge tokens
-// against another install (the old model shared one static set everywhere).
+// 🔐 Per-install secrets — a unique JWT secret, anon/service keys and DB password for each installation, so extracting
+// them from one DMG can't forge tokens against another install.
 //
-// Safe migration: installs that ALREADY have a pgdata (created with the old
-// shared secret) keep the legacy values, so their PG roles + existing
-// sessions keep working. Only FRESH installs get unique random secrets.
+// 2.0.0: there is NO legacy path any more. 1.x gave an already-provisioned data dir the shared, public values below so its
+// roles kept working; a 1.x data dir is now moved aside at startup (bootstrap.prepareDataDir) and never reused, so a
+// secrets file is either found (this install's own) or generated fresh. The LEGACY values stay exported ONLY so the
+// release checks can prove no install ever runs with them.
 // ════════════════════════════════════════════════════════════════
 const crypto = require('crypto');
 const fs = require('fs');
@@ -43,40 +43,45 @@ function makeKeys(jwtSecret) {
   };
 }
 
-// Load existing secrets, or create them. Legacy for already-provisioned dirs,
-// unique random for fresh installs.
+// Load this install's secrets, or generate them. `created` tells the caller the DB roles must be (re)keyed.
 function getOrCreateSecrets(dataDir) {
   const secretsPath = path.join(dataDir, 'secrets.json');
   if (fs.existsSync(secretsPath)) {
     try {
       const s = JSON.parse(fs.readFileSync(secretsPath, 'utf8'));
-      if (s && s.jwtSecret && s.dbPassword && s.anonKey && s.serviceKey) return s;
+      if (s && s.jwtSecret && s.dbPassword && s.anonKey && s.serviceKey && !isLegacySecrets(s)) {
+        // secrets.json written by an earlier 2.0 build has no admin-API secret yet: add one (everything else is untouched)
+        if (!s.localApiSecret) {
+          s.localApiSecret = crypto.randomBytes(32).toString('hex');
+          try { fs.writeFileSync(secretsPath, JSON.stringify(s, null, 2), { mode: 0o600 }); } catch { /* in-memory only */ }
+        }
+        return { ...s, created: false };
+      }
     } catch { /* fall through to regenerate */ }
   }
 
-  const provisioned = fs.existsSync(path.join(dataDir, 'pgdata', 'PG_VERSION'));
-  let secrets;
-  if (provisioned) {
-    // Existing install: its PG roles + sessions were made with legacy values.
-    secrets = { ...LEGACY, legacy: true };
-  } else {
-    // Fresh install: unique per-install secrets.
-    const jwtSecret = b64url(crypto.randomBytes(48));
-    const keys = makeKeys(jwtSecret);
-    secrets = {
-      jwtSecret,
-      dbPassword: b64url(crypto.randomBytes(24)),
-      anonKey: keys.anonKey,
-      serviceKey: keys.serviceKey,
-      legacy: false,
-    };
-  }
-
+  const jwtSecret = b64url(crypto.randomBytes(48));
+  const keys = makeKeys(jwtSecret);
+  const secrets = {
+    jwtSecret,
+    dbPassword: b64url(crypto.randomBytes(24)),
+    anonKey: keys.anonKey,
+    serviceKey: keys.serviceKey,
+    // the secret the installer's local admin API (create/delete company, backups, …) requires in x-texacore-local-secret
+    localApiSecret: crypto.randomBytes(32).toString('hex'),
+    legacy: false,
+  };
   try {
     fs.mkdirSync(dataDir, { recursive: true });
     fs.writeFileSync(secretsPath, JSON.stringify(secrets, null, 2), { mode: 0o600 });
   } catch { /* best effort; caller still gets in-memory secrets */ }
-  return secrets;
+  return { ...secrets, created: true };
 }
 
-module.exports = { getOrCreateSecrets, signJwt, makeKeys, LEGACY };
+/** True when a secrets object is (or contains) one of the shared 1.x values. */
+function isLegacySecrets(s) {
+  return !!s && (s.legacy === true || s.jwtSecret === LEGACY.jwtSecret || s.dbPassword === LEGACY.dbPassword
+    || s.anonKey === LEGACY.anonKey || s.serviceKey === LEGACY.serviceKey);
+}
+
+module.exports = { getOrCreateSecrets, signJwt, makeKeys, isLegacySecrets, LEGACY };

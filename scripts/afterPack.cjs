@@ -9,6 +9,27 @@ const path = require('path');
 exports.default = async function afterPack(context) {
   const srcModules = path.join(__dirname, '..', 'node_modules');
 
+  // ── 2.0.0 gate: refuse to produce an app that cannot bootstrap its database ──
+  // (1.9.0's first trial died because the pinned baseline was not packaged.) Runs first; a throw fails the build.
+  {
+    const { verifyPacked } = require('./lib/verify-packed');
+    const isMac = context.electronPlatformName === 'darwin';
+    const appName = context.packager.appInfo.productFilename + '.app';
+    const resourcesDir = isMac
+      ? path.join(context.appOutDir, appName, 'Contents', 'Resources')
+      : path.join(context.appOutDir, 'resources');
+    const problems = verifyPacked({
+      resourcesDir,
+      appCodeDir: path.join(resourcesDir, 'app'),
+      repoRoot: path.join(__dirname, '..'),
+      platform: context.electronPlatformName === 'darwin' ? 'darwin' : 'win32',
+    });
+    if (problems.length) {
+      throw new Error(`afterPack: the packaged app is incomplete —\n  - ${problems.join('\n  - ')}`);
+    }
+    console.log('  • afterPack: bootstrap files verified against BASELINE_PIN.json ✅');
+  }
+
   // Determine the correct node_modules path based on platform
   let appDir;
   if (context.electronPlatformName === 'darwin') {

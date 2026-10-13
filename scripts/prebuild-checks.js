@@ -1,0 +1,80 @@
+#!/usr/bin/env node
+'use strict';
+// ════════════════════════════════════════════════════════════════
+// prebuild-checks — run before every electron-builder build/publish. A build that would ship an install that cannot
+// bootstrap is refused HERE, not discovered on a customer's machine (1.9.0's first trial died because the pinned
+// baseline was never packaged).
+//
+//   node scripts/prebuild-checks.js [--platform mac|win|all]    (REQUIRE_LOCAL_FONTS=1 is implied)
+//
+// Checks: baseline files vs BASELINE_PIN.json · the web bundle exists, carries package.json's version and local fonts ·
+// the bundled PostgreSQL is 17.x for each target platform · no secret-looking env file is about to be packaged.
+// ════════════════════════════════════════════════════════════════
+const fs = require('fs');
+const path = require('path');
+const { spawnSync } = require('child_process');
+const { verifyDir } = require('./sync-baseline');
+
+const ROOT = path.join(__dirname, '..');
+const pkg = require('../package.json');
+
+function checkBaseline(problems) {
+  const dir = path.join(ROOT, 'baseline');
+  let pin = null;
+  try { pin = JSON.parse(fs.readFileSync(path.join(dir, 'BASELINE_PIN.json'), 'utf8')); } catch { /* reported below */ }
+  for (const p of verifyDir(dir, pin)) problems.push(`baseline: ${p} — run: node scripts/sync-baseline.js --erp <ERP checkout>`);
+}
+
+function checkFrontend(problems) {
+  const dir = path.join(ROOT, 'frontend');
+  const index = path.join(dir, 'index.html');
+  if (!fs.existsSync(index)) { problems.push('frontend/ is missing — build the ERP and run: node scripts/sync-frontend.js --erp <ERP checkout>'); return; }
+  const html = fs.readFileSync(index, 'utf8');
+  const m = /<meta[^>]*name=["']texacore-app-version["'][^>]*content=["']([^"']+)["']/i.exec(html) || /<meta[^>]*content=["']([^"']+)["'][^>]*name=["']texacore-app-version["']/i.exec(html);
+  if (!m) problems.push('frontend: index.html carries no texacore-app-version stamp (built from an ERP without the 2.0.0 checker support)');
+  else if (m[1].replace(/^v/i, '') !== pkg.version) problems.push(`frontend: bundle is ${m[1]} but package.json is ${pkg.version}`);
+  if (!fs.existsSync(path.join(dir, 'fonts', 'fonts.css'))) problems.push('frontend: local fonts are missing (frontend/fonts/fonts.css) — run sync-frontend with REQUIRE_LOCAL_FONTS=1');
+  if (/fonts\.(?:googleapis|gstatic)\.com/.test(html)) problems.push('frontend: index.html still references Google Fonts');
+}
+
+function checkPg(platform, problems) {
+  if (platform === 'mac') {
+    const bin = path.join(ROOT, 'bin', 'macos-arm64', 'pg', 'bin', 'postgres');
+    if (!fs.existsSync(bin)) { problems.push('mac: bin/macos-arm64/pg is missing — run scripts/prepare-pg-mac.sh'); return; }
+    const r = spawnSync(bin, ['--version'], { encoding: 'utf8' });
+    if (!/PostgreSQL\) 17\./.test(r.stdout || '')) problems.push(`mac: bundled PostgreSQL is "${(r.stdout || r.stderr || '').trim()}", expected 17.x`);
+  } else {
+    const marker = path.join(ROOT, 'bin', 'windows-x64', 'pg', 'PG_BUNDLE_VERSION');
+    if (!fs.existsSync(marker)) { problems.push('win: bin/windows-x64/pg has no PG_BUNDLE_VERSION — run scripts/prepare-pg-win.js with the EDB 17.6 zip'); return; }
+    const v = fs.readFileSync(marker, 'utf8').trim();
+    if (!/^17\./.test(v)) problems.push(`win: bundled PostgreSQL is ${v}, expected 17.x`);
+  }
+}
+
+function checkNoSecrets(problems) {
+  for (const f of ['.env', '.env.local', '.env.selfhosted', '.env.production']) {
+    if (fs.existsSync(path.join(ROOT, f))) problems.push(`${f} exists in the installer folder — remove it (it would be packaged by "src/**" rules in some setups)`);
+  }
+}
+
+function run(platforms) {
+  const problems = [];
+  checkBaseline(problems);
+  checkFrontend(problems);
+  for (const p of platforms) checkPg(p, problems);
+  checkNoSecrets(problems);
+  return problems;
+}
+
+module.exports = { run };
+if (require.main === module) {
+  const i = process.argv.indexOf('--platform');
+  const plat = i >= 0 ? process.argv[i + 1] : 'all';
+  const platforms = plat === 'mac' ? ['mac'] : plat === 'win' ? ['win'] : ['mac', 'win'];
+  const problems = run(platforms);
+  if (problems.length) {
+    console.error(`prebuild checks FAILED (${problems.length}):\n  - ${problems.join('\n  - ')}`);
+    process.exit(1);
+  }
+  console.log(`prebuild checks OK (${platforms.join('+')}, v${pkg.version})`);
+}

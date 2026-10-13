@@ -153,3 +153,13 @@ migrations/
 
 # ═══ Fix scripts (already applied) ═══
 fix-*.sql
+
+# ═══ 2.0.0: build inputs synced from elsewhere at build time — never committed ═══
+# The private production baseline (only baseline/BASELINE_PIN.json is committed); see scripts/sync-baseline.js.
+baseline/*
+!baseline/BASELINE_PIN.json
+# The web bundle (built by the ERP repo, copied by scripts/sync-frontend.js) and the vendored PostgreSQL trees
+# (scripts/prepare-pg-mac.sh, scripts/prepare-pg-win.js) — large, reproducible, and not secret-bearing but not source either.
+/frontend/
+/bin/macos-arm64/pg/
+/bin/windows-x64/pg/

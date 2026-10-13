@@ -1,8 +1,8 @@
 {
   "name": "texacore-installer",
-  "version": "1.8.0",
-  "buildDate": "2026-07-18",
-  "description": "TexaCore ERP — Self-Hosted Installer",
+  "version": "2.0.0",
+  "buildDate": "2026-10-13",
+  "description": "TexaCore ERP — Local Desktop Server (hybrid)",
   "main": "src/main.js",
   "author": "TexaCore <info@texacore.com>",
   "license": "UNLICENSED",
@@ -10,16 +10,22 @@
   "scripts": {
     "start": "electron .",
     "dev": "electron . --dev",
-    "build:mac": "electron-builder --mac",
-    "build:win": "electron-builder --win",
-    "build:all": "electron-builder --mac --win",
-    "build": "electron-builder",
+    "test": "node --test test/",
+    "sync:baseline": "node scripts/sync-baseline.js",
+    "sync:frontend": "REQUIRE_LOCAL_FONTS=1 node scripts/sync-frontend.js",
+    "prepare:pg:mac": "bash scripts/prepare-pg-mac.sh",
+    "prepare:pg:win": "node scripts/prepare-pg-win.js",
+    "check:build": "node scripts/prebuild-checks.js",
+    "build:mac": "node scripts/prebuild-checks.js --platform mac && electron-builder --mac",
+    "build:win": "node scripts/prebuild-checks.js --platform win && electron-builder --win",
+    "build:all": "node scripts/prebuild-checks.js --platform all && electron-builder --mac --win",
+    "build": "node scripts/prebuild-checks.js --platform all && electron-builder",
     "release:patch": "./release.sh patch",
     "release:minor": "./release.sh minor",
     "release:major": "./release.sh major",
-    "publish:mac": "electron-builder --mac --publish always",
-    "publish:win": "electron-builder --win --publish always",
-    "publish": "electron-builder --mac --win --publish always"
+    "publish:mac": "node scripts/prebuild-checks.js --platform mac && electron-builder --mac --publish always",
+    "publish:win": "node scripts/prebuild-checks.js --platform win && electron-builder --win --publish always",
+    "publish": "node scripts/prebuild-checks.js --platform all && electron-builder --mac --win --publish always"
   },
   "dependencies": {
     "call-bind-apply-helpers": "^1.0.2",
@@ -36,6 +42,10 @@
     "ws": "^8.20.0"
   },
   "devDependencies": {
+    "@fontsource/cairo": "^5.2.7",
+    "@fontsource/inter": "^5.2.8",
+    "@fontsource/jetbrains-mono": "^5.2.8",
+    "@fontsource/tajawal": "^5.2.7",
     "electron": "^33.0.0",
     "electron-builder": "^25.1.8"
   },
@@ -66,8 +76,8 @@
     ],
     "extraResources": [
       {
-        "from": "migrations",
-        "to": "migrations",
+        "from": "baseline",
+        "to": "baseline",
         "filter": [
           "**/*"
         ]
@@ -147,7 +157,8 @@
             "x64"
           ]
         }
-      ]
+      ],
+      "artifactName": "TexaCore-ERP-Setup-${version}.${ext}"
     },
     "nsis": {
       "oneClick": true,
@@ -159,7 +170,8 @@
       "createDesktopShortcut": true,
       "createStartMenuShortcut": true,
       "shortcutName": "TexaCore ERP",
-      "deleteAppDataOnUninstall": false
+      "deleteAppDataOnUninstall": false,
+      "artifactName": "TexaCore-ERP-Setup-${version}.${ext}"
     },
     "dmg": {
       "artifactName": "TexaCore-ERP-${version}-${arch}.${ext}",

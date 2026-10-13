@@ -146,7 +146,7 @@ class MigrationRunner {
               }
               console.log(`[MigrationRunner] Executing: ${psqlPath} -f ${tmpFile}`);
               const psql = spawn(psqlPath, [
-                '-p', '54322', '-h', 'localhost', '-U', 'postgres',
+                '-p', String(require('./ports').PORTS.pg), '-h', '127.0.0.1', '-U', 'postgres',
                 '-d', 'postgres', '-v', 'ON_ERROR_STOP=0',
                 '-f', tmpFile
               ], spawnOpts);

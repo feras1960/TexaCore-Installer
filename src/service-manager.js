@@ -12,16 +12,18 @@ const net = require('net');
 const MigrationRunner = require('./migration-runner');
 const { getOrCreateSecrets } = require('./secrets');
 const { getVendorAccount } = require('./vendor-support');
+const { PORTS } = require('./ports');
+const bootstrap = require('./bootstrap');
+const { validateAdminPassword } = require('./admin-password');
 
-// ─── Constants (defaults — actual ports may change at runtime) ───
-const JWT_SECRET = 'texacore-jwt-secret-at-least-32-characters-long';
-const PG_PORT = 54322;
-const DEFAULT_POSTGREST_PORT = 3000;
-const DEFAULT_GOTRUE_PORT = 9999;
-const DEFAULT_API_PORT = 54321; // Unified API port (replaces Kong)
+// ─── Ports (defaults — TEXACORE_PORT_BASE moves the whole block; see ports.js) ───
+const PG_PORT = PORTS.pg;
+const DEFAULT_POSTGREST_PORT = PORTS.postgrest;
+const DEFAULT_GOTRUE_PORT = PORTS.gotrue;
+const DEFAULT_API_PORT = PORTS.api; // Unified API port (replaces Kong)
+const ADMIN_PORT = PORTS.admin;     // the installer's local admin API (main.js)
 
-const ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1sb2NhbCIsInJlZiI6InRleGFjb3JlLWxvY2FsIiwicm9sZSI6ImFub24iLCJpYXQiOjE3NzcyMzQ1MzUsImV4cCI6MjA5MjU5NDUzNX0.aEuY0oBAUi1C9XHpr_xFEtvPDVXYrIdnjJsZUgWJxSk';
-const SERVICE_ROLE_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZS1sb2NhbCIsInJlZiI6InRleGFjb3JlLWxvY2FsIiwicm9sZSI6InNlcnZpY2Vfcm9sZSIsImlhdCI6MTc3NzIzNDUzNSwiZXhwIjoyMDkyNTk0NTM1fQ.8iGFw0gctL08j8y64qadPceHOR2I0GSGCPg69UJ81gs';
+// 2.0.0: there are NO fixed JWT secret / anon / service keys any more — every install generates its own (secrets.js).
 
 class ServiceManager {
   constructor(appDataDir) {
@@ -43,15 +45,23 @@ class ServiceManager {
 
     this.processes = {};
     this.status = 'stopped'; // stopped | starting | running | error
-    this.dbPassword = 'texacore-local-super-secret';
-    // Per-install secrets: unique JWT secret + anon/service keys per machine so
-    // extracting them from one DMG can't forge tokens against another install.
-    // Existing data dirs (already provisioned) keep the legacy values, so this
-    // is a no-op for them; only fresh installs get unique secrets.
+
+    // 2.0.0: classify the data dir BEFORE anything reads it. A pre-2.0 (PostgreSQL 15/16) data dir is moved aside whole —
+    // never reused, never deleted; an interrupted first run's half-built cluster is moved aside too (see bootstrap.js).
+    const prepared = bootstrap.prepareDataDir(this.dataDir, (m) => console.log(m));
+    this.bootState = prepared.state;            // fresh | interrupted_first_run | ready | legacy_v18  (as found)
+    this.bootMovedTo = prepared.movedTo || null;
+    // from here on a dir that was fresh/interrupted/legacy is a fresh install
+    this.isFreshInstall = prepared.state !== 'ready';
+
+    // Per-install secrets: unique JWT secret, anon/service keys and DB password per machine (no legacy path in 2.0).
     const _secrets = getOrCreateSecrets(this.dataDir);
+    this.secretsCreated = _secrets.created;     // true → the DB roles must be (re)keyed with this password
     this.jwtSecret = _secrets.jwtSecret;
     this.anonKey = _secrets.anonKey;
     this.serviceKey = _secrets.serviceKey;
+    this.dbPassword = _secrets.dbPassword;
+    this.localApiSecret = _secrets.localApiSecret;   // required by the admin API (main.js) — see /config.js
     this.proxyServer = null;
     this.onMigrationProgress = null; // callback: (step, total, name) => void
 
@@ -60,12 +70,16 @@ class ServiceManager {
     this.activeGotruePort = DEFAULT_GOTRUE_PORT;
     this.activeApiPort = DEFAULT_API_PORT;
 
-    // Resolve migrations directory (packaged vs dev)
+    // Resolve migrations directory (packaged vs dev). 2.0.0 ships NO migrations: the database is built from the baseline.
+    // The runner stays for future incremental migrations (applied after the baseline, tracked in _texacore_migrations).
     if (isPackaged) {
       this.migrationsDir = path.join(process.resourcesPath, 'migrations');
     } else {
       this.migrationsDir = path.join(__dirname, '..', 'migrations');
     }
+    // The pinned production baseline (scripts/sync-baseline.js) and the installer-owned SQL beside this file.
+    this.baselineDir = isPackaged ? path.join(process.resourcesPath, 'baseline') : path.join(__dirname, '..', 'baseline');
+    this.bootstrapSqlDir = path.join(__dirname, 'bootstrap');
 
     // Ensure directories
     for (const dir of [this.dataDir, this.logDir]) {
@@ -92,22 +106,26 @@ class ServiceManager {
     const pg = !!this.processes.postgres;
     const rest = !!this.processes.postgrest;
     const auth = !!this.processes.gotrue;
-    let pgReady = false;
-
-    if (pg) {
-      try {
-        const pgIsReady = this.isWindows ? 'pg_isready.exe' : 'pg_isready';
-        const envOpts = this.isWindows ? { timeout: 3000, env: { ...process.env, PATH: this.pgBin + ';' + (process.env.PATH || '') } } : { timeout: 3000 };
-        execSync(`"${path.join(this.pgBin, pgIsReady)}" -p ${PG_PORT} -h localhost`, envOpts);
-        pgReady = true;
-      } catch { /* not ready */ }
-    }
+    const pgReady = pg ? await this._pgAccepting() : false;
 
     return {
       running: pg && rest && auth && pgReady,
       health: pgReady && rest && auth ? 'healthy' : (pg ? 'starting' : 'stopped'),
       services: { postgres: pgReady, postgrest: rest, gotrue: auth }
     };
+  }
+
+  // PostgreSQL 17's bundle has no pg_isready: ask the server itself (a real connection + SELECT 1).
+  async _pgAccepting(timeoutMs = 2500) {
+    const { Client } = require('pg');
+    const client = new Client({ host: '127.0.0.1', port: PG_PORT, database: 'postgres', user: 'postgres', connectionTimeoutMillis: timeoutMs });
+    client.on('error', () => { /* swallowed: reported through the catch below */ });
+    try {
+      await client.connect();
+      await client.query('SELECT 1');
+      return true;
+    } catch { return false; }
+    finally { try { await client.end(); } catch { /* ignore */ } }
   }
 
   // ─── Port Check ──────────────────────────────────────────────
@@ -121,8 +139,13 @@ class ServiceManager {
   }
 
   // ─── Find Available Port ─────────────────────────────────────
-  // Tries the preferred port first, then increments up to maxAttempts
+  // Tries the preferred port first, then increments up to maxAttempts. With TEXACORE_PORT_BASE (test mode) the block is
+  // fixed: a busy port is an error, never a shift outside the block. A foreign process on the port is NEVER killed.
   async _findAvailablePort(preferredPort, maxAttempts = 20) {
+    if (PORTS.custom) {
+      if (await this._isPortFree(preferredPort)) return preferredPort;
+      throw new Error(`Port ${preferredPort} (TEXACORE_PORT_BASE block) is in use`);
+    }
     for (let offset = 0; offset < maxAttempts; offset++) {
       const port = preferredPort + offset;
       if (await this._isPortFree(port)) {
@@ -132,29 +155,22 @@ class ServiceManager {
         return port;
       }
     }
-    // Last resort: try to kill whatever is on the preferred port
-    console.warn(`[ServiceManager] No free port found near ${preferredPort}, attempting to free it...`);
-    await this._killPortProcess(preferredPort);
-    return preferredPort;
-  }
-
-  // ─── Kill Process on Port ────────────────────────────────────
-  async _killPortProcess(port) {
-    try {
-      if (this.isWindows) {
-        execSync(`for /f "tokens=5" %a in ('netstat -ano ^| findstr :${port}') do taskkill /F /PID %a`, { stdio: 'ignore', timeout: 5000 });
-      } else {
-        execSync(`lsof -ti :${port} -P | xargs kill -9 2>/dev/null`, { stdio: 'ignore', timeout: 5000 });
-      }
-      console.log(`[ServiceManager] Freed port ${port}`);
-      // Wait a moment for OS to release the port
-      await this._sleep(500);
-    } catch {
-      console.warn(`[ServiceManager] Could not free port ${port}`);
-    }
+    throw new Error(`No free port found near ${preferredPort}`);
   }
 
   // ─── Initialize Database (first run only) ────────────────────
+  // PostgreSQL 17.6 like production: ICU collation (en-US), UTF8, UTC. The cluster is "trust" on loopback only
+  // (127.0.0.1 / ::1 — listen_addresses is pinned to 127.0.0.1 below); the roles that PostgREST/GoTrue use still carry the
+  // per-install password.
+  _pgEnv() {
+    const env = { ...process.env };
+    if (this.isWindows) {
+      env.PATH = this.pgBin + ';' + path.join(this.binsDir, 'pg', 'lib') + ';' + (env.PATH || '');
+      env.PGSHAREDIR = path.join(this.binsDir, 'pg', 'share');
+    }
+    return env;
+  }
+
   async initDatabase() {
     if (fs.existsSync(path.join(this.pgDataDir, 'PG_VERSION'))) {
       console.log('[ServiceManager] Database already initialized');
@@ -172,53 +188,54 @@ class ServiceManager {
       }
       return;
     }
-    // Auto-fix: if pgdata dir exists but has NO PG_VERSION, it's corrupted/leftover — clean it
-    if (fs.existsSync(this.pgDataDir) && !fs.existsSync(path.join(this.pgDataDir, 'PG_VERSION'))) {
-      console.log('[ServiceManager] pgdata exists but no PG_VERSION — cleaning for fresh init...');
-      try {
-        fs.rmSync(this.pgDataDir, { recursive: true, force: true });
-        fs.mkdirSync(this.pgDataDir, { recursive: true });
-      } catch (cleanErr) {
-        console.warn('[ServiceManager] Could not clean pgdata:', cleanErr.message);
-      }
-    }
+    // bootstrap.prepareDataDir() already moved any half-built cluster aside, so what is here is absent or empty.
+    fs.mkdirSync(this.pgDataDir, { recursive: true });
+    bootstrap.writeMarker(this.dataDir, {
+      status: 'initdb', pgMajor: bootstrap.EXPECTED_PG_MAJOR,
+      appVersion: this._appVersion(), startedAt: new Date().toISOString(), readyAt: null,
+    });
 
-    console.log('[ServiceManager] Initializing database for first time...');
+    console.log('[ServiceManager] Initializing database for first time (PostgreSQL 17, ICU en-US, UTC)...');
     const initdb = path.join(this.pgBin, this.isWindows ? 'initdb.exe' : 'initdb');
 
     return new Promise((resolve, reject) => {
-      // On Windows, DLLs must be loadable — add pg/bin to PATH
-      const spawnEnv = { ...process.env };
-      if (this.isWindows) {
-        spawnEnv.PATH = this.pgBin + ';' + (spawnEnv.PATH || '');
-      }
-
       const proc = spawn(initdb, [
         '-D', this.pgDataDir,
         '-U', 'postgres',
-        '--no-locale',
-        '-E', 'UTF8'
-      ], { env: spawnEnv });
+        '-E', 'UTF8',
+        '--locale-provider=icu',
+        '--icu-locale=en-US',
+        // libc side of the locale (ctype for regex/upper on non-ICU paths). macOS knows en_US.UTF-8; on Windows the
+        // BCP-47 name is the one PostgreSQL accepts for a UTF8 database.
+        `--locale=${this.isWindows ? 'en-US' : 'en_US.UTF-8'}`,
+        '--auth=trust',
+      ], { env: this._pgEnv() });
 
       let errOut = '';
       let stdOut = '';
       proc.stdout.on('data', d => stdOut += d.toString());
       proc.stderr.on('data', d => errOut += d.toString());
+      proc.on('error', err => reject(new Error(`initdb spawn error: ${err.message}`)));
       proc.on('close', code => {
         if (code === 0) {
           console.log('[ServiceManager] Database initialized successfully');
-          // Configure pg_hba.conf for local trust auth
-          const hbaPath = path.join(this.pgDataDir, 'pg_hba.conf');
+          // pg_hba.conf: loopback only, trust (the app's own processes are the only clients).
           const hbaLines = [
             '# TYPE  DATABASE  USER  ADDRESS  METHOD',
             'host    all       all   127.0.0.1/32  trust',
             'host    all       all   ::1/128       trust',
           ];
-          // Unix socket auth — not supported on Windows
-          if (!this.isWindows) {
-            hbaLines.splice(1, 0, 'local   all       all              trust');
-          }
-          fs.writeFileSync(hbaPath, hbaLines.join('\n') + '\n');
+          if (!this.isWindows) hbaLines.splice(1, 0, 'local   all       all              trust');
+          fs.writeFileSync(path.join(this.pgDataDir, 'pg_hba.conf'), hbaLines.join('\n') + '\n');
+          // postgresql.conf: production time zone, loopback listener, no unix socket (no path-length / collision trouble).
+          fs.appendFileSync(path.join(this.pgDataDir, 'postgresql.conf'), [
+            '', '# ── TexaCore 2.0 ──',
+            "timezone = 'UTC'",
+            "log_timezone = 'UTC'",
+            "listen_addresses = '127.0.0.1'",
+            "unix_socket_directories = ''",
+            '',
+          ].join('\n'));
           resolve();
         } else {
           console.error('[ServiceManager] initdb stderr:', errOut);
@@ -229,67 +246,40 @@ class ServiceManager {
     });
   }
 
+  _appVersion() {
+    try { return require('electron').app.getVersion(); } catch { return ''; }
+  }
+
   // ─── Start PostgreSQL ────────────────────────────────────────
   async startPostgres() {
     if (this.processes.postgres) return;
 
-    // Check port — auto-kill stale PostgreSQL if needed
+    // Port busy: only OUR OWN leftover server (the one named by postmaster.pid in our data dir) is stopped, gracefully.
+    // Whatever else holds the port is not ours to kill — fail with a clear message instead.
     if (!await this._isPortFree(PG_PORT)) {
-      console.warn(`[ServiceManager] Port ${PG_PORT} in use — attempting to stop stale PostgreSQL...`);
-      
-      // Try pg_ctl stop first (graceful)
-      try {
-        const pgCtl = path.join(this.pgBin, this.isWindows ? 'pg_ctl.exe' : 'pg_ctl');
-        const stopEnv = { ...process.env };
-        if (this.isWindows) {
-          stopEnv.PATH = this.pgBin + ';' + (stopEnv.PATH || '');
-        }
-        execSync(`"${pgCtl}" stop -D "${this.pgDataDir}" -m fast -w -t 10`, { env: stopEnv, timeout: 15000, stdio: 'ignore' });
-        console.log('[ServiceManager] Stale PostgreSQL stopped via pg_ctl');
-        await this._sleep(1000);
-      } catch {
-        // pg_ctl failed — force kill by port
-        console.warn('[ServiceManager] pg_ctl stop failed — force killing process on port', PG_PORT);
+      console.warn(`[ServiceManager] Port ${PG_PORT} in use — checking for a leftover TexaCore PostgreSQL...`);
+      const pidFile = path.join(this.pgDataDir, 'postmaster.pid');
+      if (fs.existsSync(pidFile)) {
         try {
-          if (this.isWindows) {
-            // Find and kill process on port 54322
-            const netstat = execSync(`netstat -ano | findstr :${PG_PORT}`, { timeout: 5000 }).toString();
-            const lines = netstat.split('\n').filter(l => l.includes('LISTENING'));
-            for (const line of lines) {
-              const pid = line.trim().split(/\s+/).pop();
-              if (pid && !isNaN(pid)) {
-                try { execSync(`taskkill /F /PID ${pid}`, { timeout: 5000 }); } catch {}
-              }
-            }
-          } else {
-            execSync(`lsof -ti:${PG_PORT} | xargs kill -9 2>/dev/null || true`, { timeout: 5000 });
-          }
-          await this._sleep(2000);
-        } catch { /* best effort */ }
+          const pgCtl = path.join(this.pgBin, this.isWindows ? 'pg_ctl.exe' : 'pg_ctl');
+          execSync(`"${pgCtl}" stop -D "${this.pgDataDir}" -m fast -w -t 15`, { env: this._pgEnv(), timeout: 20000, stdio: 'ignore' });
+          console.log('[ServiceManager] Leftover PostgreSQL stopped via pg_ctl');
+          await this._sleep(1000);
+        } catch { /* fall through to the re-check */ }
       }
-      
-      // Re-check
       if (!await this._isPortFree(PG_PORT)) {
-        throw new Error(`Port ${PG_PORT} is still in use after cleanup. Please manually close any PostgreSQL instance and try again.`);
+        throw new Error(`Port ${PG_PORT} is in use by another program. Close it (or the other PostgreSQL instance) and try again.`);
       }
       console.log(`[ServiceManager] Port ${PG_PORT} is now free`);
     }
 
     console.log('[ServiceManager] Starting PostgreSQL on port', PG_PORT);
     const logFile = path.join(this.logDir, 'postgres.log');
-
-    // Clear old log for clean diagnostics
     try { fs.writeFileSync(logFile, ''); } catch {}
 
-    // Build environment
-    const pgEnv = { ...process.env, PGDATA: this.pgDataDir };
-    if (this.isWindows) {
-      // Add pg/bin AND pg/lib to PATH for DLL loading
-      const pgLib = path.join(this.binsDir, 'pg', 'lib');
-      pgEnv.PATH = this.pgBin + ';' + pgLib + ';' + (pgEnv.PATH || '');
-      // Help PostgreSQL find its share directory (timezone, config templates)
-      pgEnv.PGSHAREDIR = path.join(this.binsDir, 'pg', 'share');
-    } else {
+    const pgEnv = this._pgEnv();
+    pgEnv.PGDATA = this.pgDataDir;
+    if (!this.isWindows) {
       pgEnv.LC_ALL = 'en_US.UTF-8';
       pgEnv.LANG = 'en_US.UTF-8';
     }
@@ -314,13 +304,14 @@ class ServiceManager {
 
     // Unix (macOS/Linux)
     const pgExe = 'postgres';
-    const pgArgs = ['-D', this.pgDataDir, '-p', String(PG_PORT), '-k', '/tmp'];
+    const pgArgs = ['-D', this.pgDataDir, '-p', String(PG_PORT)];
 
     console.log('[ServiceManager] PostgreSQL binary:', path.join(this.pgBin, pgExe));
     console.log('[ServiceManager] pgDataDir:', this.pgDataDir);
 
+    const logFd = fs.openSync(logFile, 'a');
     const pgProcess = spawn(path.join(this.pgBin, pgExe), pgArgs, {
-      stdio: ['ignore', fs.openSync(logFile, 'a'), fs.openSync(logFile, 'a')],
+      stdio: ['ignore', logFd, logFd],
       env: pgEnv
     });
 
@@ -339,7 +330,7 @@ class ServiceManager {
     this.processes.postgres = pgProcess;
 
     // Wait for PostgreSQL to be ready
-    for (let i = 0; i < 60; i++) {
+    for (let i = 0; i < 120; i++) {
       await this._sleep(500);
 
       // Check if process died
@@ -349,37 +340,31 @@ class ServiceManager {
         throw new Error(`PostgreSQL process exited unexpectedly.\nLog: ${logContent}`);
       }
 
-      try {
-        const pgIsReady = 'pg_isready';
-        const readyEnv = { timeout: 3000 };
-        execSync(`"${path.join(this.pgBin, pgIsReady)}" -p ${PG_PORT} -h localhost`, readyEnv);
+      if (await this._pgAccepting()) {
         console.log('[ServiceManager] PostgreSQL is ready');
         return;
-      } catch { /* retry */ }
+      }
     }
 
     // Timeout — read log for diagnostics
     let logContent = '';
     try { logContent = fs.readFileSync(logFile, 'utf8').slice(-2000); } catch {}
     console.error('[ServiceManager] PostgreSQL log:\n', logContent);
-    throw new Error(`PostgreSQL failed to start within 30 seconds.\nLog: ${logContent}`);
+    throw new Error(`PostgreSQL failed to start within 60 seconds.\nLog: ${logContent}`);
   }
 
   // ─── Run SQL via psql ────────────────────────────────────────
   psqlExec(sql, dbName = 'postgres') {
     return new Promise((resolve, reject) => {
       const psqlExe = this.isWindows ? 'psql.exe' : 'psql';
-      // On Windows, add pg/bin to PATH for DLL loading
-      const spawnOpts = this.isWindows 
-        ? { env: { ...process.env, PATH: this.pgBin + ';' + (process.env.PATH || '') } }
-        : {};
       const psql = spawn(path.join(this.pgBin, psqlExe), [
+        '-X',
         '-p', String(PG_PORT),
-        '-h', 'localhost',
+        '-h', '127.0.0.1',
         '-U', 'postgres',
         '-d', dbName,
         '-v', 'ON_ERROR_STOP=1'
-      ], spawnOpts);
+      ], { env: this._pgEnv() });
 
       let errOut = '';
       let stdOut = '';
@@ -392,54 +377,146 @@ class ServiceManager {
     });
   }
 
-  // ─── Setup Database Roles & Schema (first run) ───────────────
-  async setupDatabaseRoles() {
-    console.log('[ServiceManager] Setting up database roles...');
+  /** Run a .sql file with psql. stopOnError=false is for the baseline's two passes (errors are collected, not fatal). */
+  runPsqlFile(file, { stopOnError = true, dbName = 'postgres' } = {}) {
+    return new Promise((resolve, reject) => {
+      const psqlExe = this.isWindows ? 'psql.exe' : 'psql';
+      const psql = spawn(path.join(this.pgBin, psqlExe), [
+        '-X', '-q',
+        '-p', String(PG_PORT), '-h', '127.0.0.1', '-U', 'postgres', '-d', dbName,
+        '-v', `ON_ERROR_STOP=${stopOnError ? 1 : 0}`,
+        '-f', file,
+      ], { env: this._pgEnv() });
+      let errOut = '';
+      let stdOut = '';
+      psql.stdout.on('data', d => { stdOut += d.toString(); });
+      psql.stderr.on('data', d => { errOut += d.toString(); });
+      psql.on('error', err => reject(new Error(`psql spawn error: ${err.message}`)));
+      psql.on('close', code => resolve({ code, stdout: stdOut, stderr: errOut }));
+    });
+  }
 
-    // We no longer skip if authenticator exists because we want to ensure
-    // that all schemas have the correct permissions (GRANTs are idempotent).
-    try {
-      await this.psqlExec("SELECT 1 FROM pg_roles WHERE rolname='authenticator'");
-    } catch { /* ignore */ }
+  /** A query through the node client (rows as objects) — for verification and the provisioning code. */
+  async pgQuery(text, params = []) {
+    const { Client } = require('pg');
+    const client = new Client({ host: '127.0.0.1', port: PG_PORT, database: 'postgres', user: 'postgres' });
+    await client.connect();
+    try { return await client.query(text, params); }
+    finally { try { await client.end(); } catch { /* ignore */ } }
+  }
 
-    const rolesSql = `
-      -- Create essential roles for PostgREST and GoTrue
-      DO $$ BEGIN
-        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'anon') THEN CREATE ROLE anon NOLOGIN; END IF;
-        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticated') THEN CREATE ROLE authenticated NOLOGIN; END IF;
-        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'service_role') THEN CREATE ROLE service_role NOLOGIN BYPASSRLS; END IF;
-        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_admin') THEN CREATE ROLE supabase_admin LOGIN SUPERUSER PASSWORD '${this.dbPassword}'; END IF;
-        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'authenticator') THEN 
-          CREATE ROLE authenticator LOGIN PASSWORD '${this.dbPassword}' NOINHERIT;
-          GRANT anon TO authenticator;
-          GRANT authenticated TO authenticator;
-          GRANT service_role TO authenticator;
-        END IF;
-        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_auth_admin') THEN 
-          CREATE ROLE supabase_auth_admin LOGIN PASSWORD '${this.dbPassword}' NOINHERIT;
-        END IF;
-        IF NOT EXISTS (SELECT FROM pg_roles WHERE rolname = 'supabase_storage_admin') THEN 
-          CREATE ROLE supabase_storage_admin LOGIN PASSWORD '${this.dbPassword}' NOINHERIT;
-        END IF;
-      END $$;
+  // ─── Build the database (first run) ──────────────────────────
+  // roles → GoTrue migrate (owns `auth`) → storage stubs → production baseline (2 passes) → installer extras →
+  // reference data → verification → marker "ready". Grants and RLS stay exactly as the baseline creates them.
+  async buildDatabase(progress = () => {}) {
+    const total = 8;
+    let n = 0;
+    const step = (name) => { n += 1; console.log(`[Bootstrap] (${n}/${total}) ${name}`); progress(n, total, name); };
 
-      -- Grant schema permissions
-      GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
-      GRANT ALL ON SCHEMA public TO supabase_admin;
-      GRANT ALL ON SCHEMA public TO supabase_auth_admin;
-      ALTER ROLE supabase_auth_admin CREATEROLE CREATEDB;
+    const fileProblems = bootstrap.verifyBaselineFiles(this.baselineDir);
+    if (fileProblems.length) {
+      throw new Error(`The database baseline is missing or damaged in this build (${fileProblems.join('; ')}). Reinstall TexaCore.`);
+    }
+    const pin = bootstrap.loadPin(this.baselineDir);
+    bootstrap.writeMarker(this.dataDir, { status: 'schema_loading', baselineSha256: pin.files['production_baseline.sql'].sha256, baselineCut: pin.cutTimestamp });
 
-      -- Create auth schema for GoTrue
-      CREATE SCHEMA IF NOT EXISTS auth AUTHORIZATION supabase_auth_admin;
-      GRANT USAGE ON SCHEMA auth TO authenticator, supabase_auth_admin;
+    step('Creating database roles');
+    await this.psqlExec(bootstrap.rolesSql({ dbPassword: this.dbPassword }));
 
-      -- Create extensions
-      CREATE EXTENSION IF NOT EXISTS "uuid-ossp" SCHEMA public;
-      CREATE EXTENSION IF NOT EXISTS pgcrypto SCHEMA public;
-    `;
+    step('Creating the authentication schema');
+    await this.runGoTrueMigrations();
 
-    await this.psqlExec(rolesSql);
-    console.log('[ServiceManager] Database roles created');
+    step('Creating the storage schema');
+    const storage = path.join(this.baselineDir, 'storage_stubs.sql');
+    for (let pass = 1; pass <= 2; pass++) await this.runPsqlFile(storage, { stopOnError: false });
+
+    step('Loading the production schema');
+    const baselineSql = path.join(this.baselineDir, 'production_baseline.sql');
+    const summary = [];
+    for (let pass = 1; pass <= 2; pass++) {
+      const r = await this.runPsqlFile(baselineSql, { stopOnError: false });
+      const errs = bootstrap.parsePsqlErrors(r.stderr);
+      const cls = bootstrap.classifyBaselineErrors(errs, { second: pass === 2 });
+      summary.push({ pass, errors: errs.length, expected: cls.expected.length, unexpected: cls.unexpected.length });
+      if (pass === 2 && cls.unexpected.length) {
+        console.warn(`[Bootstrap] baseline pass 2: ${cls.unexpected.length} unexpected error(s), first: ${cls.unexpected[0].message}`);
+      }
+    }
+    fs.writeFileSync(path.join(this.logDir, 'baseline-load.json'), JSON.stringify(summary, null, 2));
+
+    step('Installing local extras');
+    await this.runPsqlFile(path.join(this.bootstrapSqlDir, 'local_extras.sql'), { stopOnError: true })
+      .then((r) => { if (r.code !== 0) throw new Error(`local_extras.sql failed: ${r.stderr.slice(-600)}`); });
+
+    step('Loading reference data');
+    // production's own export first (optional — written at the baseline re-cut), then the installer's defaults fill any gap
+    // (both are ON CONFLICT DO NOTHING / NOT EXISTS, so the first writer of a row wins).
+    const seeds = [];
+    const exported = path.join(this.baselineDir, 'reference_data.sql');
+    if (fs.existsSync(exported)) seeds.push(exported);
+    seeds.push(path.join(this.bootstrapSqlDir, 'reference_seed.sql'));
+    for (const f of seeds) {
+      const r = await this.runPsqlFile(f, { stopOnError: true });
+      if (r.code !== 0) throw new Error(`${path.basename(f)} failed: ${r.stderr.slice(-600)}`);
+    }
+    await this.psqlExec(bootstrap.postBaselineSql());
+
+    step('Verifying the database');
+    const v = await this.verifyBaselineInstall();
+    if (!v.ok) {
+      bootstrap.writeMarker(this.dataDir, { status: 'verify_failed', verifyProblems: v.problems.slice(0, 20) });
+      throw new Error(`The database did not verify against the baseline: ${v.problems.slice(0, 5).join('; ')}`);
+    }
+
+    step('Database ready');
+    bootstrap.writeMarker(this.dataDir, { status: 'ready', readyAt: new Date().toISOString(), verified: v.stats });
+    return { baseline: summary, verified: v.stats };
+  }
+
+  /** Counts + every function body against the inventory that ships with the baseline. */
+  async verifyBaselineInstall() {
+    const inv = JSON.parse(fs.readFileSync(path.join(this.baselineDir, 'production_baseline.inventory.json'), 'utf8'));
+    const problems = [];
+    const schemas = inv.app_schemas || ['public', 'licensing', 'newpost', 'tomgenerators'];
+    const q = await this.pgQuery(`
+      SELECT
+        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname = ANY($1) AND c.relkind IN ('r','p')) AS tables,
+        (SELECT count(*) FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace WHERE n.nspname = ANY($1)
+            AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid=p.oid AND d.deptype='e')) AS functions,
+        (SELECT count(*) FROM pg_trigger t JOIN pg_class c ON c.oid=t.tgrelid JOIN pg_namespace n ON n.oid=c.relnamespace
+            WHERE n.nspname = ANY($1) AND NOT t.tgisinternal) AS triggers,
+        (SELECT count(*) FROM pg_policy pl JOIN pg_class c ON c.oid=pl.polrelid JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname = ANY($1)) AS policies,
+        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname = ANY($1) AND c.relkind IN ('i','I')) AS indexes,
+        (SELECT count(*) FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname = ANY($1) AND c.relkind IN ('v','m')) AS views`, [schemas]);
+    const measured = Object.fromEntries(Object.entries(q.rows[0]).map(([k, v]) => [k, Number(v)]));
+    // inventory counts policies of the stub schemas too in some fields; catalog_totals is app-schema only (matches the CI fingerprint)
+    problems.push(...bootstrap.compareTotals(inv.catalog_totals || {}, measured));
+
+    const fn = await this.pgQuery(`
+      SELECT n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')' AS sig, md5(p.prosrc) AS md5
+        FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
+       WHERE n.nspname = ANY($1) AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid=p.oid AND d.deptype='e')`, [schemas]);
+    const cmp = bootstrap.compareFunctionInventory(inv.functions_md5, fn.rows);
+    if (!cmp.ok) {
+      problems.push(`functions: ${cmp.missing.length} missing, ${cmp.extra.length} extra, ${cmp.mismatched.length} differ (e.g. ${[...cmp.missing, ...cmp.extra, ...cmp.mismatched][0]})`);
+    }
+    const rls = await this.pgQuery(`SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+                                     WHERE n.nspname = ANY($1) AND c.relkind IN ('r','p') AND c.relrowsecurity`, [schemas]);
+    if (inv.main && inv.main.rls_enabled && Number(inv.main.rls_enabled) + bootstrap.LOCAL_EXTRAS.rlsTables !== rls.rows[0].n) {
+      problems.push(`row level security: expected ${Number(inv.main.rls_enabled) + bootstrap.LOCAL_EXTRAS.rlsTables} protected tables, installed ${rls.rows[0].n}`);
+    }
+    // extensions production has and the app calls as extensions.*: they must be real, not swallowed-away
+    const ext = await this.pgQuery(`SELECT (SELECT count(*) FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname='extensions' AND e.extname IN ('uuid-ossp','pgcrypto'))::int AS n,
+                                           (extensions.uuid_generate_v4() IS NOT NULL) AS uuid_ok,
+                                           (length(extensions.gen_salt('bf')) > 0) AS crypt_ok`);
+    if (ext.rows[0].n !== 2 || !ext.rows[0].uuid_ok || !ext.rows[0].crypt_ok) problems.push('extensions.uuid_generate_v4 / extensions.crypt are not usable (uuid-ossp and pgcrypto must live in schema "extensions")');
+    // the one rule that must never regress: PUBLIC/anon get nothing the baseline did not give, and RLS is on.
+    const anonAll = await this.pgQuery(`SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
+        WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity AND has_table_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE,DELETE')`);
+    return {
+      ok: problems.length === 0, problems,
+      stats: { ...measured, rlsTables: rls.rows[0].n, anonAccessibleWithoutRls: anonAll.rows[0].n, functionsVerified: cmp.installed - cmp.mismatched.length },
+    };
   }
 
   // ─── Run GoTrue Migrations ───────────────────────────────────
@@ -450,23 +527,24 @@ class ServiceManager {
         ...process.env,
         API_EXTERNAL_URL: `http://localhost:${this.activeApiPort}`,
         GOTRUE_DB_DRIVER: 'postgres',
-        DATABASE_URL: `postgres://supabase_auth_admin:${this.dbPassword}@localhost:${PG_PORT}/postgres?search_path=auth`,
+        DATABASE_URL: `postgres://supabase_auth_admin:${encodeURIComponent(this.dbPassword)}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
         GOTRUE_JWT_SECRET: this.jwtSecret,
         GOTRUE_SITE_URL: `http://localhost:${this.activeApiPort}`
       };
 
       const proc = spawn(this.gotrueBin, ['migrate'], { env });
-      
+
       let out = '';
       proc.stdout.on('data', d => out += d.toString());
       proc.stderr.on('data', d => out += d.toString());
-      
+      proc.on('error', err => reject(new Error(`GoTrue migrate spawn error: ${err.message}`)));
+
       proc.on('close', code => {
         if (code === 0) {
           console.log('[ServiceManager] GoTrue migrations completed');
           resolve();
         } else {
-          console.error('[ServiceManager] GoTrue migrate failed:', out);
+          console.error('[ServiceManager] GoTrue migrate failed:', out.slice(-1500));
           reject(new Error(`GoTrue migrate failed with code ${code}`));
         }
       });
@@ -483,18 +561,21 @@ class ServiceManager {
     const logFile = path.join(this.logDir, 'postgrest.log');
     try { fs.writeFileSync(logFile, ''); } catch {}
 
-    // Write PostgREST config file
+    // Write PostgREST config file (secrets in it: 0600). anon is the unauthenticated role; whatever it may do is
+    // decided by the baseline's grants and RLS policies — exactly as on production. max-rows matches Supabase's 1000.
     const configPath = path.join(this.dataDir, 'postgrest.conf');
     fs.writeFileSync(configPath, [
-      `db-uri = "postgres://authenticator:${this.dbPassword}@127.0.0.1:${PG_PORT}/postgres"`,
+      `db-uri = "postgres://authenticator:${encodeURIComponent(this.dbPassword)}@127.0.0.1:${PG_PORT}/postgres"`,
       `db-schemas = "public"`,
+      `db-extra-search-path = "public, extensions"`,
       `db-anon-role = "anon"`,
       `jwt-secret = "${this.jwtSecret}"`,
       `server-port = ${this.activePostgrestPort}`,
       `server-host = "127.0.0.1"`,
       `db-use-legacy-gucs = false`,
+      `db-max-rows = 1000`,
       `app-settings.jwt_secret = "${this.jwtSecret}"`,
-    ].join('\n') + '\n');
+    ].join('\n') + '\n', { mode: 0o600 });
 
     // Build environment: add pg/lib and pg/bin to PATH for libpq.dll on Windows
     const env = { ...process.env };
@@ -555,9 +636,11 @@ class ServiceManager {
       GOTRUE_API_PORT: String(this.activeGotruePort),
       API_EXTERNAL_URL: `http://localhost:${this.activeApiPort}`,
       GOTRUE_DB_DRIVER: 'postgres',
-      GOTRUE_DB_DATABASE_URL: `postgres://supabase_auth_admin:${this.dbPassword}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
+      GOTRUE_DB_DATABASE_URL: `postgres://supabase_auth_admin:${encodeURIComponent(this.dbPassword)}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
       GOTRUE_SITE_URL: `http://localhost:${this.activeApiPort}`,
-      GOTRUE_DISABLE_SIGNUP: 'false',
+      // 2.0.0: nobody can self-register on a local server — accounts are created by the installer (provisioning.js) and the
+      // ERP's own admin flows. (Open signup + a tunnel to the internet = strangers getting accounts.)
+      GOTRUE_DISABLE_SIGNUP: 'true',
       GOTRUE_JWT_ADMIN_ROLES: 'service_role',
       GOTRUE_JWT_AUD: 'authenticated',
       GOTRUE_JWT_DEFAULT_GROUP_NAME: 'authenticated',
@@ -567,7 +650,7 @@ class ServiceManager {
       GOTRUE_SMS_AUTOCONFIRM: 'true',
       GOTRUE_EXTERNAL_EMAIL_ENABLED: 'true',
       GOTRUE_EXTERNAL_PHONE_ENABLED: 'false',
-      DATABASE_URL: `postgres://supabase_auth_admin:${this.dbPassword}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
+      DATABASE_URL: `postgres://supabase_auth_admin:${encodeURIComponent(this.dbPassword)}@127.0.0.1:${PG_PORT}/postgres?search_path=auth`,
     };
 
     if (this.isWindows) {
@@ -676,10 +759,22 @@ class ServiceManager {
   }
 
   // ─── Run Migrations ──────────────────────────────────────────
+  // 2.0.0 builds its database from the baseline; incremental migrations are for FUTURE releases and must be written for
+  // that exact baseline: the manifest has to say so ("baselineSha256"). A manifest without it — in particular the 1.x
+  // one, whose ~1,300 files re-define functions the baseline already carries at newer versions — is REFUSED, never
+  // replayed (that replay is how a first 2.0 trial ended up with 118 production functions rolled back to old bodies).
   async runMigrations() {
-    if (!fs.existsSync(path.join(this.migrationsDir, 'migrations.json'))) {
+    const manifestPath = path.join(this.migrationsDir, 'migrations.json');
+    if (!fs.existsSync(manifestPath)) {
       console.log('[ServiceManager] No migrations.json found — skipping migrations');
       return { applied: 0, total: 0 };
+    }
+    let manifest = null;
+    try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); } catch { /* handled below */ }
+    const marker = bootstrap.readMarker(this.dataDir) || {};
+    if (!manifest || !manifest.baselineSha256 || manifest.baselineSha256 !== marker.baselineSha256) {
+      console.warn('[ServiceManager] migrations.json is not for this baseline (missing/different baselineSha256) — NOT applying it');
+      return { applied: 0, total: 0, skipped: 'manifest-not-for-this-baseline' };
     }
 
     const runner = new MigrationRunner({
@@ -722,52 +817,42 @@ class ServiceManager {
   async _startAllInner(options = {}) {
     if (this.status === 'running') return { success: true };
     this.status = 'starting';
-    this.dbPassword = options.dbPassword || this.dbPassword;
+    // NB: options.dbPassword (a 1.x leftover in config.json) is deliberately ignored — the DB password is the per-install
+    // one in secrets.json; overriding it would lock PostgREST/GoTrue out of their own roles.
     this.onMigrationProgress = options.onMigrationProgress || null;
 
     try {
-      // 1. Initialize database if needed
+      const fresh = this.isFreshInstall;
+      // 1. Initialize the cluster if this is a first run
       await this.initDatabase();
 
       // 2. Start PostgreSQL
       await this.startPostgres();
 
-      // 3. Setup roles (first run)
-      await this.setupDatabaseRoles();
+      let buildResult = null;
+      if (fresh) {
+        // 3. First run: roles → auth → storage → production baseline → reference data → verified → marker ready.
+        buildResult = await this.buildDatabase((step, total, name) => {
+          if (this.onMigrationProgress) this.onMigrationProgress(step, total, name);
+        });
+        this.isFreshInstall = false;
+      } else {
+        // 3'. Existing 2.0 install. If its secrets file was lost the roles are re-keyed with the regenerated password
+        //     (loopback trust lets postgres do that); sessions signed with the old JWT secret simply stop being valid.
+        if (this.secretsCreated) {
+          await this.psqlExec(`ALTER ROLE authenticator PASSWORD '${this.dbPassword.replace(/'/g, "''")}';
+                               ALTER ROLE supabase_auth_admin PASSWORD '${this.dbPassword.replace(/'/g, "''")}';`);
+          this.secretsCreated = false;
+          console.log('[ServiceManager] secrets regenerated → database roles re-keyed');
+        }
+        await this.runGoTrueMigrations();
+      }
 
-      // 3.5. Run GoTrue migrations to create auth.users
-      await this.runGoTrueMigrations();
-
-      // 4. Apply pending migrations
+      // 4. Incremental migrations after the baseline (none ship in 2.0.0 — the runner skips when there is no manifest)
       const migrationResult = await this.runMigrations();
       console.log(`[ServiceManager] Migrations: ${migrationResult.applied} applied, ${migrationResult.failed || 0} failed`);
 
-      // 4.5. Ensure PostgREST roles have access to all migrated objects
-      await this.psqlExec(`
-        GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
-        GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated, service_role;
-        GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
-        GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO anon, authenticated, service_role;
-      `);
-      console.log('[ServiceManager] PostgREST role grants applied');
-
-      // 4.6. Disable RLS on all public tables (self-hosted = trusted local environment)
-      //      Production RLS policies use auth.uid() which doesn't work reliably with local GoTrue
-      await this.psqlExec(`
-        DO $$ 
-        DECLARE r RECORD;
-        BEGIN
-          FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
-            EXECUTE 'ALTER TABLE public.' || quote_ident(r.tablename) || ' DISABLE ROW LEVEL SECURITY';
-          END LOOP;
-          RAISE NOTICE 'RLS disabled on all public tables for self-hosted mode';
-        END $$;
-        -- Reload PostgREST schema cache
-        NOTIFY pgrst, 'reload schema';
-      `);
-      console.log('[ServiceManager] RLS disabled for self-hosted mode + schema cache reloaded');
-
-      // 5. Start PostgREST
+      // 5. Start PostgREST — grants and RLS are production's, untouched (no GRANT ... TO anon, no DISABLE ROW LEVEL SECURITY)
       await this.startPostgREST();
 
       // 6. Start GoTrue
@@ -777,16 +862,20 @@ class ServiceManager {
       this.activeApiPort = await this._findAvailablePort(DEFAULT_API_PORT);
       this.startApiProxy();
 
-      // 7.5. Ensure super admin user exists
+      // 7.5. Ensure super admin user exists (vendor machines only)
       await this._ensureSuperAdmin();
 
-      // 7.6. Sync the admin-portal password into the DB (default = license key,
-      // or the manager's custom value). Idempotent; keeps the gate correct even
-      // after a restore replaced the DB.
+      // 7.6. Sync the admin-portal password into the DB. Idempotent; keeps the gate correct even after a restore.
       await this.syncAdminPassword();
 
+      // 7.7. Heal tenant ownership: every tenant keeps an owner_email and its first user a tenant-admin flag.
+      try {
+        const healed = await require('./provisioning').healTenantOwners({ pgQuery: (t, p) => this.pgQuery(t, p), log: (m) => console.log(m) });
+        if (healed.tenants || healed.profiles) console.log(`[ServiceManager] healTenantOwners: ${healed.tenants} tenant(s), ${healed.profiles} profile(s) repaired`);
+      } catch (e) { console.warn('[ServiceManager] healTenantOwners failed (non-fatal):', e.message); }
+
       // 8. Start Frontend Web Server
-      const uiPort = options.port || 80;
+      const uiPort = options.port || PORTS.ui;
       await this.startFrontendServer(uiPort);
 
       // 9. Start Cloudflare Tunnel (if configured)
@@ -802,7 +891,7 @@ class ServiceManager {
 
       this.status = 'running';
       console.log('[ServiceManager] ✅ All services started successfully');
-      return { success: true, migrations: migrationResult };
+      return { success: true, migrations: migrationResult, bootstrap: buildResult, firstRun: !!buildResult };
     } catch (err) {
       console.error('[ServiceManager] ❌ Failed to start:', err.message);
       this.status = 'error';
@@ -861,13 +950,25 @@ class ServiceManager {
         let shellVersion = '';
         try { shellVersion = require('electron').app.getVersion() || ''; } catch { /* dev */ }
 
+        // The admin-API secret is handed ONLY to a same-origin page load of this server (a browser says so in Sec-Fetch-Site).
+        // <script src="http://localhost:8080/config.js"> on any other website is "cross-site" and must never receive it (the
+        // anon key is public by design; this one is not). Over the tunnel it is never served at all.
+        const site = String(req.headers['sec-fetch-site'] || '');
+        const origin = String(req.headers['origin'] || '');
+        const sameOrigin = site === 'same-origin' || site === 'none' || (!site && !origin);
+        const adminBits = (!isCloudAccess && sameOrigin)
+          ? `
+  localApiBase: "",
+  localApiSecret: "${this.localApiSecret}",`
+          : '';
+
         const configJs = `
 // Auto-generated by TexaCore Service Manager
 window.__TEXACORE_CONFIG__ = {
   supabaseUrl: "${supabaseUrl}",
   supabaseKey: "${anonKey}",
   mode: "selfhosted",
-  appVersion: "${shellVersion}",
+  appVersion: "${shellVersion}",${adminBits}
   VITE_SUPABASE_URL: "${supabaseUrl}",
   VITE_SUPABASE_ANON_KEY: "${anonKey}"
 };
@@ -926,29 +1027,26 @@ window.__TEXACORE_CONFIG__ = {
       });
 
       // Admin API proxy (/api/companies, /api/delete-company, etc.)
-      // These are served by the Electron admin server on port 1960.
-      // Destructive/admin operations must NOT be reachable over the public
-      // tunnel (subdomain.texacore.ai) — only locally. The full set of
-      // destructive paths is also CSRF-guarded inside the 1960 server.
-      const ADMIN_LOCAL_ONLY = new Set([
-        '/api/delete-company', '/api/restore-tcdb', '/api/import-rsf', '/api/import-rsf-path',
-        '/api/create-local-company', '/api/backup', '/api/open-tcdb', '/api/tunnel-fix', '/api/tunnel-restart',
-        '/api/update/install',
-      ]);
+      // These are served by the Electron admin server (main.js, PORTS.admin). The installer's admin API is a LOCAL
+      // control surface (create/delete companies, backups, restores, tunnel control): over the public tunnel
+      // (subdomain.texacore.ai) NOTHING of it is reachable except /api/ping. (1.8 blocked a list of destructive paths and let
+      // everything else through; 2.0 is default-deny for cloud-origin requests.) The destructive paths are also CSRF-guarded
+      // inside the admin server itself.
+      const CLOUD_API_ALLOW = new Set(['/api/ping']);
       app.all('/api/*', (req, res) => {
         const host = req.headers.host || '';
         const isCloudAccess = host.includes('.texacore.ai') || host.includes('.texacore.com');
         const urlPath = (req.url || '').split('?')[0];
-        if (isCloudAccess && ADMIN_LOCAL_ONLY.has(urlPath)) {
+        if (isCloudAccess && !CLOUD_API_ALLOW.has(urlPath)) {
           res.status(403).json({ error: 'This administrative operation is local-only and cannot be performed remotely.' });
           return;
         }
         const proxyOptions = {
           hostname: '127.0.0.1',
-          port: 1960,
+          port: ADMIN_PORT,
           path: req.url,
           method: req.method,
-          headers: { ...req.headers, host: '127.0.0.1:1960' },
+          headers: { ...req.headers, host: `127.0.0.1:${ADMIN_PORT}` },
         };
 
         const proxyReq = http.request(proxyOptions, (proxyRes) => {
@@ -1058,6 +1156,11 @@ window.__TEXACORE_CONFIG__ = {
   // ─── Start Cloudflare Tunnel ─────────────────────────────────
   async startCloudflared({ skipReregister = false, skipVerify = false } = {}) {
     if (this.processes.cloudflared) return;
+    // Test/launch-check stub: never open a tunnel (and never call the cloud) from a harness run.
+    if (process.env.TEXACORE_STUB_TUNNEL === '1' && !require('electron').app.isPackaged) {
+      console.log('[ServiceManager] TEXACORE_STUB_TUNNEL=1 — cloudflared stubbed (dev mode only)');
+      return;
+    }
 
     // Read config to check if cloud access is enabled
     const configPath = path.join(this.dataDir, 'config.json');
@@ -1268,6 +1371,10 @@ window.__TEXACORE_CONFIG__ = {
 
   // ─── Install/Start MeshAgent (TexaCore MDM) ──────────────────
   async installMeshAgent() {
+    if (process.env.TEXACORE_STUB_MDM === '1' && !require('electron').app.isPackaged) {
+      console.log('[ServiceManager] TEXACORE_STUB_MDM=1 — MeshAgent stubbed (dev mode only)');
+      return;
+    }
     // Read config to check for subdomain and license
     const configPath = path.join(this.dataDir, 'config.json');
     let config = {};
@@ -1387,67 +1494,30 @@ window.__TEXACORE_CONFIG__ = {
       console.log('[ServiceManager] No vendor-support account on this machine — skipping vendor super-admin (customer install).');
       return;
     }
-    const ADMIN_EMAIL = vendor.email;
-    const ADMIN_PASSWORD = vendor.password;
-    const ADMIN_NAME = vendor.name || 'TexaCore Support';
-
     try {
-      // Generate service role JWT
-      const crypto = require('crypto');
-      const header = Buffer.from(JSON.stringify({alg:'HS256',typ:'JWT'})).toString('base64url');
-      const payload = Buffer.from(JSON.stringify({
-        iss:'texacore', role:'service_role', 
-        exp: Math.floor(Date.now()/1000) + 3600
-      })).toString('base64url');
-      const sig = crypto.createHmac('sha256', this.jwtSecret)
-        .update(header + '.' + payload).digest('base64url');
-      const serviceKey = header + '.' + payload + '.' + sig;
-
-      // Check if user exists
-      const listRes = await this._httpRequest('GET', 
-        `http://127.0.0.1:${this.activeApiPort}/auth/v1/admin/users`, null, serviceKey);
-      const users = JSON.parse(listRes).users || [];
-      const existing = users.find(u => u.email === ADMIN_EMAIL);
-
-      let userId;
-      if (existing) {
-        userId = existing.id;
-        console.log(`[ServiceManager] Super admin already exists: ${userId}`);
-      } else {
-        // Create super admin
-        const createRes = await this._httpRequest('POST',
-          `http://127.0.0.1:${this.activeApiPort}/auth/v1/admin/users`,
-          JSON.stringify({
-            email: ADMIN_EMAIL, password: ADMIN_PASSWORD,
-            email_confirm: true,
-            user_metadata: { full_name: ADMIN_NAME, role: 'admin' }
-          }), serviceKey);
-        userId = JSON.parse(createRes).id;
-        console.log(`[ServiceManager] Super admin created: ${userId}`);
-      }
-
-      // Link to first company via user_profiles (with triggers disabled)
-      await this.psqlExec(`
-        ALTER TABLE user_profiles DISABLE TRIGGER ALL;
-        INSERT INTO user_profiles (id, tenant_id, company_id, email, full_name, role)
-        SELECT '${userId}', c.tenant_id, c.id, '${ADMIN_EMAIL}', '${ADMIN_NAME}', 'admin'
-        FROM companies c LIMIT 1
-        ON CONFLICT (id) DO UPDATE SET role = 'admin';
-        ALTER TABLE user_profiles ENABLE TRIGGER ALL;
-
-        -- Ensure super_admin role assignment exists
-        INSERT INTO user_roles (user_id, role_id, tenant_id, company_id, is_active)
-        SELECT '${userId}', r.id, c.tenant_id, c.id, true
-        FROM roles r, companies c
-        WHERE r.code = 'super_admin'
-        LIMIT 1
-        ON CONFLICT DO NOTHING;
-      `);
-      console.log(`[ServiceManager] Super admin linked to company`);
+      const { ensureVendorSupport } = require('./provisioning');
+      const first = await this.pgQuery('SELECT tenant_id, id FROM public.companies ORDER BY created_at LIMIT 1');
+      const row = first.rows[0] || {};
+      const userId = await ensureVendorSupport(this.provisioningDeps(), { vendor, tenantId: row.tenant_id || null, companyId: row.id || null });
+      console.log(`[ServiceManager] Vendor support account ensured: ${userId}`);
     } catch (err) {
-      console.warn('[ServiceManager] Could not ensure super admin:', err.message);
+      console.warn('[ServiceManager] Could not ensure vendor support account:', err.message);
       // Non-fatal — don't crash startup
     }
+  }
+
+  /** What provisioning.js needs from this manager (loopback URLs of the running services + a superuser DB connection). */
+  provisioningDeps(extra = {}) {
+    const { Client } = require('pg');
+    return {
+      connect: async () => { const c = new Client({ host: '127.0.0.1', port: PG_PORT, database: 'postgres', user: 'postgres' }); await c.connect(); return c; },
+      gotrueUrl: `http://127.0.0.1:${this.activeGotruePort}`,
+      restUrl: `http://127.0.0.1:${this.activePostgrestPort}`,
+      anonKey: this.anonKey,
+      serviceKey: this.serviceKey,
+      log: (m) => console.log(m),
+      ...extra,
+    };
   }
 
   // ─── Admin portal password (بوابة الإدارة) ──────────────────
@@ -1485,14 +1555,15 @@ window.__TEXACORE_CONFIG__ = {
   // hash in both config (source of truth, survives restore) and the DB. No old
   // password required — physical control of the installer is the authority.
   async setAdminPassword(plain) {
-    if (!plain || String(plain).length < 4) throw new Error('كلمة المرور قصيرة جداً (4 أحرف على الأقل)');
+    const bad = validateAdminPassword(plain, { licenseKey: this._readConfig().licenseKey });
+    if (bad) throw new Error(bad);
     return this._withPgClient(async (client) => {
-      const r = await client.query(`SELECT crypt($1, gen_salt('bf')) AS h`, [String(plain)]);
+      const r = await client.query(`SELECT extensions.crypt($1, extensions.gen_salt('bf')) AS h`, [String(plain)]);
       const hash = r.rows[0].h;
       await client.query(
         `INSERT INTO public.platform_admin(id, password_hash, updated_at)
          VALUES (1, $1, now())
-         ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`,
+         ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now(), failed_attempts = 0, locked_until = NULL`,
         [hash]
       );
       const cfg = this._readConfig();
@@ -1503,22 +1574,14 @@ window.__TEXACORE_CONFIG__ = {
     });
   }
 
-  // Push the current admin password into the DB. Custom hash from config if set,
-  // otherwise default = the license key (unique per install, the manager has it,
-  // and not the old guessable "admin"). Runs on startup + after every restore.
+  // Push the current admin password into the DB. Custom hash from config if set, otherwise default = the license key
+  // (unique per install, the manager has it). With NEITHER there is no password at all and the portal stays locked —
+  // the old "admin" fallback is gone. The table and verify_admin_password() come from src/bootstrap/local_extras.sql.
+  // Runs on startup + after every restore.
   async syncAdminPassword() {
     const cfg = this._readConfig();
     try {
       await this._withPgClient(async (client) => {
-        // Make sure the table/function exist even if migrations haven't (idempotent).
-        await client.query(`CREATE EXTENSION IF NOT EXISTS pgcrypto`);
-        await client.query(
-          `CREATE TABLE IF NOT EXISTS public.platform_admin (
-             id smallint PRIMARY KEY DEFAULT 1,
-             password_hash text,
-             updated_at timestamptz NOT NULL DEFAULT now(),
-             CONSTRAINT platform_admin_singleton CHECK (id = 1))`
-        );
         if (cfg.adminPasswordHash) {
           await client.query(
             `INSERT INTO public.platform_admin(id, password_hash, updated_at)
@@ -1526,19 +1589,22 @@ window.__TEXACORE_CONFIG__ = {
              ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`,
             [cfg.adminPasswordHash]
           );
-        } else {
-          const def = cfg.licenseKey || 'admin';
+        } else if (cfg.licenseKey) {
           await client.query(
             `INSERT INTO public.platform_admin(id, password_hash, updated_at)
-             VALUES (1, crypt($1, gen_salt('bf')), now())
-             ON CONFLICT (id) DO UPDATE SET password_hash = crypt($1, gen_salt('bf')), updated_at = now()`,
-            [def]
+             VALUES (1, extensions.crypt($1, extensions.gen_salt('bf')), now())
+             ON CONFLICT (id) DO UPDATE SET password_hash = extensions.crypt($1, extensions.gen_salt('bf')), updated_at = now()`,
+            [String(cfg.licenseKey)]
+          );
+        } else {
+          await client.query(
+            `INSERT INTO public.platform_admin(id, password_hash, updated_at) VALUES (1, NULL, now())
+             ON CONFLICT (id) DO UPDATE SET password_hash = NULL, updated_at = now()`
           );
         }
-        // Make sure PostgREST exposes verify_admin_password() (new on first install).
         try { await client.query(`NOTIFY pgrst, 'reload schema'`); } catch { /* ignore */ }
       });
-      console.log(`[ServiceManager] 🔐 Admin portal password synced (${cfg.adminPasswordHash ? 'custom' : 'default = license key'}).`);
+      console.log(`[ServiceManager] 🔐 Admin portal password synced (${cfg.adminPasswordHash ? 'custom' : cfg.licenseKey ? 'default = license key' : 'none — portal locked'}).`);
     } catch (e) {
       console.warn('[ServiceManager] syncAdminPassword failed (non-fatal):', e.message);
     }
@@ -1569,13 +1635,12 @@ window.__TEXACORE_CONFIG__ = {
   }
 }
 
-// Export constants for use in main.js
-ServiceManager.JWT_SECRET = JWT_SECRET;
+// Export constants for use in main.js (ports only — 2.0.0 has no fixed keys or secrets to export)
 ServiceManager.PG_PORT = PG_PORT;
 ServiceManager.POSTGREST_PORT = DEFAULT_POSTGREST_PORT;
 ServiceManager.GOTRUE_PORT = DEFAULT_GOTRUE_PORT;
 ServiceManager.API_PORT = DEFAULT_API_PORT;
-ServiceManager.ANON_KEY = ANON_KEY;
-ServiceManager.SERVICE_ROLE_KEY = SERVICE_ROLE_KEY;
+ServiceManager.ADMIN_PORT = ADMIN_PORT;
+ServiceManager.PORTS = PORTS;
 
 module.exports = ServiceManager;

@@ -17,6 +17,19 @@ const BackupManager = require('./backup-manager');
 const { RsfReader, detectFileType } = require('./rsf-reader');
 const { RsfMapper } = require('./rsf-mapper');
 const { RsfExporter, RsfSyncManager } = require('./rsf-exporter');
+const { PORTS } = require('./ports');
+const provisioning = require('./provisioning');
+const planSync = require('./plan-sync');
+
+// ─── Test / launch-check harness switches (DEV MODE ONLY — ignored in a packaged app) ───
+// TEXACORE_USER_DATA  use this folder as the app's userData (so a test never touches the real one)
+// TEXACORE_PORT_BASE  move every port into one block (see ports.js)
+// TEXACORE_HEADLESS   no window, no tray, no auto-updater, no cloud presence/diagnostics
+// TEXACORE_E2E_AUTOSTART=1  start the services at launch without a license check (the license is minted per TEXACORE_E2E_LICENSE)
+const DEV_HARNESS = !app.isPackaged && process.env.TEXACORE_HEADLESS === '1';
+if (!app.isPackaged && process.env.TEXACORE_USER_DATA) {
+  app.setPath('userData', process.env.TEXACORE_USER_DATA);
+}
 
 // ─── File Logger ─────────────────────────────────────────────
 // Saves all console output to a log file for debugging
@@ -52,7 +65,7 @@ process.on('unhandledRejection', (reason) => {
 const LICENSING_URL = 'https://wzkklenfsaepegymfxfz.supabase.co/functions/v1';
 const SUPABASE_URL = 'wzkklenfsaepegymfxfz.supabase.co';
 const SUPABASE_ANON_KEY = 'eyJhbGciOiJIUzI1NiIsInR5cCI6IkpXVCJ9.eyJpc3MiOiJzdXBhYmFzZSIsInJlZiI6Ind6a2tsZW5mc2FlcGVneW1meGZ6Iiwicm9sZSI6ImFub24iLCJpYXQiOjE3Njg3NTIxNzcsImV4cCI6MjA4NDMyODE3N30.ATYSK_WvOfbqEaInbg5nKau-wgixF0lIGaue3m8AJtI';
-const APP_PORT = 8080;
+const APP_PORT = PORTS.custom ? PORTS.ui : 8080;
 
 // ─── Realtime Presence (instant online/offline like messaging apps) ──
 class RealtimePresence {
@@ -365,7 +378,7 @@ async function getLocalDbStats() {
       port: (typeof ServiceManager !== 'undefined' && ServiceManager.PG_PORT) || 54322,
       database: 'postgres',
       user: 'postgres',
-      password: (svcManager && svcManager.dbPassword) || (typeof ServiceManager !== 'undefined' && ServiceManager.DB_PASSWORD) || 'texacore-local-super-secret',
+      password: (svcManager && svcManager.dbPassword) || (typeof ServiceManager !== 'undefined' && ServiceManager.DB_PASSWORD) || '',
     });
     await client.connect();
     const { rows } = await client.query(`
@@ -1124,6 +1137,8 @@ const heartbeatSender = new HeartbeatSender();
 // ─── IPC Handlers ────────────────────────────────────────────
 
 // Get app version + build date
+ipcMain.on('get-local-api-secret', (event) => { event.returnValue = (svcManager && svcManager.localApiSecret) || ''; });
+
 ipcMain.handle('get-version', () => {
   const pkg = require('../package.json');
   return {
@@ -1358,7 +1373,7 @@ function gotrueRequest(method, reqPath, body, { serviceRoleKey, apiPort }) {
     const payload = body ? JSON.stringify(body) : '';
     // Connect directly to GoTrue (port 9999) instead of via API Proxy (54321)
     // because the proxy may not be running yet during RSF import
-    const gotruePort = ServiceManager.GOTRUE_PORT || 9999;
+    const gotruePort = (svcManager && svcManager.activeGotruePort) || ServiceManager.GOTRUE_PORT;
     const options = {
       hostname: '127.0.0.1',
       port: gotruePort,
@@ -1386,50 +1401,40 @@ function gotrueRequest(method, reqPath, body, { serviceRoleKey, apiPort }) {
 }
 
 // ── Main Company Creation Logic ─────────────────────────────────────────────
+// 2.0.0: tenant + owner + company are created by src/provisioning.js (owner_email / is_tenant_admin set on every path, the
+// company created through the SERVER functions signed in as that admin, EMAIL_EXISTS refused before any write, no GoTrue
+// lookup-by-email). This wrapper adds the installer-side bookkeeping: the .tcdb backup file and the vendor support account.
+
+/** What provisioning.js needs: loopback service URLs + a DB connection + the plan sync for the new tenant. */
+function provisioningDeps() {
+  return svcManager.provisioningDeps({
+    ensureSubscription: (tenantId) => syncActivePlan(undefined, { tenantId, throwOnError: true }),
+  });
+}
 
 async function handleCreateLocalCompany(companyData) {
   try {
-    fileLog('[TexaCore] Starting company creation:', companyData.companyName);
+    fileLog('[TexaCore] Starting company creation:', companyData && companyData.companyName);
 
     // ── Guard: Services must be running ─────────────────────────
     if (!svcManager || !svcManager.isRunning()) {
       return { success: false, error: 'الخدمات غير شغّالة. يرجى تشغيل النظام أولاً.' };
     }
 
-    // ── Read config & keys from .env ────────────────────────────
-    let anonKey = (svcManager && svcManager.anonKey) || ServiceManager.ANON_KEY;
-    let serviceRoleKey = (svcManager && svcManager.serviceKey) || ServiceManager.SERVICE_ROLE_KEY;
-    let apiPort = String(ServiceManager.GOTRUE_PORT || 9999);
+    // ── 1. Create tenant, owner, company (server functions, as the admin) ──
+    const result = await provisioning.createLocalCompany(provisioningDeps(), companyData);
+    if (!result.success) {
+      fileLog('[TexaCore] Company creation refused/failed:', result.code, result.error);
+      return result;
+    }
+    const { tenantId, companyId, adminEmail, accessToken, refreshToken } = result;
+    const anonKey = svcManager.anonKey;
+    fileLog('[TexaCore] Tenant, admin and company created:', companyId);
 
-    const ctx = { serviceRoleKey, apiPort };
-
-    // Save storage path
+    // ── 2. Where the .tcdb backup file lives + remember the company for backup auto-resume ──
+    let tcdbFilePath = null;
     const config = loadConfig();
     config.storagePath = companyData.storagePath;
-    // Save company info for backup auto-resume
-    if (!config.companies) config.companies = [];
-    const fileName = (companyData.dbFileName || 'my_company') + '.tcdb';
-    let tcdbFullPath = null;
-    if (companyData.storagePath) {
-      let bp = companyData.storagePath;
-      if (bp.startsWith('~')) bp = path.join(require('os').homedir(), bp.slice(1));
-      tcdbFullPath = path.join(bp, fileName);
-    }
-    config.companies = [{ name: companyData.companyName, tcdbPath: tcdbFullPath, storagePath: companyData.storagePath }];
-    saveConfig(config);
-
-    // ── 1. Prepare IDs & email ───────────────────────────────────
-    const tenantId  = require('crypto').randomUUID();
-    const companyId = require('crypto').randomUUID();
-    // Use provided email, or generate from username using companyId for uniqueness
-    const adminEmail = companyData.adminEmail
-      ? companyData.adminEmail
-      : `${(companyData.adminUsername || 'admin').replace(/\s+/g, '_')}@texacore.local`;
-
-    fileLog('[TexaCore] Admin email:', adminEmail);
-
-    // ── 2. Setup .tcdb backup file path ──────────────────────────
-    let tcdbFilePath = null;
     if (companyData.storagePath) {
       try {
         let basePath = companyData.storagePath;
@@ -1442,340 +1447,36 @@ async function handleCreateLocalCompany(companyData) {
         console.warn('[TexaCore] Could not setup backup path:', err.message);
       }
     }
+    config.companies = [{ name: companyData.companyName, tcdbPath: tcdbFilePath, storagePath: companyData.storagePath }];
+    saveConfig(config);
 
-    // ── 3. Create Tenant & Company in DB ────────────────────────
-    const localCurrency = companyData.localCurrency || 'SAR';
-    const mainCurrency = companyData.mainCurrency || 'USD';
-    const chartType = companyData.chartTemplate || 'extended';
-
-    // Read enabled modules from license — falls back to defaults for trial
-    let enabledModules = ['accounting', 'inventory', 'sales', 'purchases'];
-    let isFreeInstall = false;
-    try {
-      if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
-      const licInfo = licenseGuard.loadLicense();
-      isFreeInstall = !!(licInfo && licInfo.tier === 'free');
-      if (licInfo && licInfo.enabled_modules && Array.isArray(licInfo.enabled_modules) && licInfo.enabled_modules.length > 0) {
-        enabledModules = licInfo.enabled_modules;
-        fileLog('[TexaCore] License modules:', enabledModules.join(', '));
-      } else {
-        fileLog('[TexaCore] No license modules found — using defaults');
-      }
-    } catch (e) {
-      console.warn('[TexaCore] Could not read license modules:', e.message);
-    }
-
-    // Always seed an ACTIVE local subscription. Without one, get_all_plan_limits
-    // returns {error:'no_active_subscription'} → the UI shows "0/0" and BLOCKS
-    // invoice creation on every screen. Free installs get the enforced free plan
-    // (200 invoices/mo — the enforcement triggers act only on plan_type='free', so
-    // this is the upsell teaser). Paid/trial installs get the local-unlimited plan
-    // (all -1) so the owner's own server is never capped. end_date far = "forever".
-    const installPlanCode = isFreeInstall ? 'free' : 'local-unlimited';
-    const subscriptionSql = `
-      INSERT INTO public.tenant_subscriptions (tenant_id, plan_id, status, start_date, end_date)
-      SELECT '${tenantId}', sp.id, 'active', CURRENT_DATE, DATE '2099-12-31'
-      FROM public.subscription_plans sp WHERE sp.code = '${installPlanCode}' LIMIT 1
-      ON CONFLICT DO NOTHING;
-`;
-
-    const modulesSql = enabledModules
-      .map(mod => `('${require('crypto').randomUUID()}', '${tenantId}', '${mod}', true)`)
-      .join(', ');
-
-    await psqlExec(`
-      INSERT INTO public.tenants (id, code, name, email, country, default_language, status)
-      VALUES ('${tenantId}', 'tc_${Date.now()}',
-              '${companyData.companyName.replace(/'/g, "''")}',
-              '${adminEmail}', '${companyData.country || 'SA'}', 'ar', 'active')
-      ON CONFLICT DO NOTHING;
-
-      INSERT INTO public.tenant_modules (id, tenant_id, module_code, is_active)
-      VALUES ${modulesSql}
-      ON CONFLICT DO NOTHING;
-${subscriptionSql}
-      -- Ensure accounting_settings column exists (may be missing on older schemas)
-      DO $$ BEGIN
-        IF NOT EXISTS (
-          SELECT 1 FROM information_schema.columns
-          WHERE table_schema = 'public' AND table_name = 'companies' AND column_name = 'accounting_settings'
-        ) THEN
-          ALTER TABLE public.companies ADD COLUMN accounting_settings jsonb DEFAULT '{}'::jsonb;
-        END IF;
-      END $$;
-
-      -- Disable triggers that may reference missing functions
-      ALTER TABLE public.companies DISABLE TRIGGER ALL;
-
-      INSERT INTO public.companies (id, tenant_id, code, name, name_en, email, country, city, default_currency, accounting_settings)
-      VALUES ('${companyId}', '${tenantId}',
-              'CO_${Date.now()}',
-              '${companyData.companyName.replace(/'/g, "''")}',
-              '${companyData.companyName.replace(/'/g, "''")}',
-              '${adminEmail}',
-              '${companyData.country || 'SA'}',
-              '${(companyData.city || '').replace(/'/g, "''")}',
-              '${localCurrency}',
-              '{"base_currency":"${localCurrency}","local_currency":"${localCurrency}","default_international_purchase_currency":"${mainCurrency}","supported_currencies":["${localCurrency}", "${mainCurrency}"],"fiscal_year_start":"${companyData.fiscalYearStart || '1'}","chart_type":"${chartType}"}'::jsonb)
-      ON CONFLICT (id) DO NOTHING;
-
-      -- Re-enable triggers
-      ALTER TABLE public.companies ENABLE TRIGGER ALL;
-
-      -- Try to create chart of accounts manually (safe — ignores if function missing)
-      DO $$ BEGIN
-        IF '${chartType}' = 'extended' THEN
-          PERFORM create_extended_chart('${companyId}'::uuid);
-        ELSE
-          PERFORM create_simple_chart('${companyId}'::uuid);
-        END IF;
-      EXCEPTION WHEN undefined_function THEN
-        RAISE NOTICE 'Chart function not available — chart will be created on first login';
-      WHEN OTHERS THEN
-        RAISE NOTICE 'Chart creation error: % — will retry on first login', SQLERRM;
-      END $$;
-
-      -- Company defaults: company_accounting_settings ROW + default warehouse + branch.
-      -- create_extended_chart builds ONLY the chart; without this the settings row never
-      -- exists → company_accounting_settings returns 0 rows → 406 errors across every
-      -- screen + no default warehouse + cannot create invoices (exactly the broken
-      -- fresh-company symptom). Run with triggers ON so trg_set_cas_tenant_id fills
-      -- tenant_id (replica role would leave it NULL → NOT NULL violation); auth.uid() is
-      -- NULL on this admin connection so the audit trigger writes user_id=NULL (nullable).
-      DO $$ BEGIN
-        PERFORM setup_company_defaults('${companyId}'::uuid);
-      EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE 'Company defaults error: % — will retry on first login', SQLERRM;
-      END $$;
-
-      -- Link the default posting accounts (cash/bank/revenue/inventory/COGS…) by code,
-      -- now that BOTH the chart and the settings row exist.
-      DO $$ BEGIN
-        PERFORM auto_set_default_accounts('${companyId}'::uuid);
-      EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE 'Default account linking error: %', SQLERRM;
-      END $$;
-
-      -- Sync the chosen currencies into the settings row. setup_company_defaults
-      -- seeds only the base currency, but the user picked both a local and a main
-      -- currency (e.g. UAH + USD) — carry the full list from the company jsonb so
-      -- the importer can transact in the foreign currency.
-      DO $$ BEGIN
-        UPDATE public.company_accounting_settings cas
-        SET supported_currencies = ARRAY(SELECT jsonb_array_elements_text(c.accounting_settings->'supported_currencies'))
-        FROM public.companies c
-        WHERE cas.company_id = c.id AND c.id = '${companyId}'::uuid
-          AND c.accounting_settings ? 'supported_currencies';
-      EXCEPTION WHEN OTHERS THEN
-        RAISE NOTICE 'Currency sync error: %', SQLERRM;
-      END $$;
-
-      -- Note: accounting_settings jsonb already set in companies INSERT above
-
-      -- Reload PostgREST schema cache so new objects are available
-      NOTIFY pgrst, 'reload schema';
-    `);
-    fileLog('[TexaCore] Tenant & company created in DB');
-
-
-    // ── 4. Create auth user via GoTrue Admin API ─────────────────
-    //       Handles email_exists by deleting the old user first
-    let adminUserId;
-    const createRes = await gotrueRequest('POST', '/admin/users', {
-      email: adminEmail,
-      password: companyData.adminPassword,
-      email_confirm: true,
-      user_metadata: {
-        role: 'admin',
-        full_name: companyData.adminName || companyData.adminUsername || 'Admin',
-        tenant_id: tenantId,
-        company_id: companyId
-      },
-      app_metadata: { provider: 'email', providers: ['email'], tenant_id: tenantId, company_id: companyId, role: 'admin' }
-    }, ctx);
-
-    if (createRes.status === 200 || createRes.status === 201) {
-      adminUserId = createRes.body.id;
-      fileLog('[TexaCore] Auth user created:', adminUserId);
-
-    } else if (createRes.body?.error_code === 'email_exists') {
-      // User exists from a previous failed attempt — find & delete, then recreate
-      fileLog('[TexaCore] Email exists, finding user to replace...');
-      const listRes = await gotrueRequest('GET', `/admin/users?email=${encodeURIComponent(adminEmail)}&page=1&per_page=1`, null, ctx);
-      const existingUser = listRes.body?.users?.[0];
-
-      if (existingUser) {
-        fileLog('[TexaCore] Deleting old user:', existingUser.id);
-        await gotrueRequest('DELETE', `/admin/users/${existingUser.id}`, null, ctx);
-      }
-
-      // Recreate fresh
-      const recreateRes = await gotrueRequest('POST', '/admin/users', {
-        email: adminEmail,
-        password: companyData.adminPassword,
-        email_confirm: true,
-        user_metadata: { role: 'admin', full_name: companyData.adminName || 'Admin', tenant_id: tenantId, company_id: companyId },
-        app_metadata: { provider: 'email', providers: ['email'], tenant_id: tenantId, company_id: companyId, role: 'admin' }
-      }, ctx);
-
-      if (recreateRes.status !== 200 && recreateRes.status !== 201) {
-        throw new Error(`Auth user creation failed (${recreateRes.status}): ${JSON.stringify(recreateRes.body)}`);
-      }
-      adminUserId = recreateRes.body.id;
-      fileLog('[TexaCore] Auth user recreated:', adminUserId);
-
-    } else {
-      throw new Error(`Auth user creation failed (${createRes.status}): ${JSON.stringify(createRes.body)}`);
-    }
-
-    // ── 5. Create user profile in DB ────────────────────────────
-    //       user_profiles may or may not have tenant_id column depending on migrations
-    await psqlExec(`
-      -- Ensure tenant_id column exists on user_profiles (may be missing in base schema)
-      ALTER TABLE public.user_profiles ADD COLUMN IF NOT EXISTS tenant_id UUID;
-
-      INSERT INTO public.user_profiles (id, tenant_id, company_id, email, full_name, role)
-      VALUES ('${adminUserId}', '${tenantId}', '${companyId}', '${adminEmail}',
-              '${(companyData.adminName || companyData.adminUsername || 'Admin').replace(/'/g, "''")}', 'admin')
-      ON CONFLICT (id) DO UPDATE
-        SET tenant_id  = EXCLUDED.tenant_id,
-            company_id = EXCLUDED.company_id,
-            email      = EXCLUDED.email;
-
-      -- ✅ Ensure company_owner role exists (in case seed data didn't load)
-      DO $$
-      DECLARE
-        v_role_id uuid;
-      BEGIN
-        SELECT id INTO v_role_id FROM public.roles WHERE code = 'company_owner' LIMIT 1;
-        IF v_role_id IS NULL THEN
-          INSERT INTO public.roles (id, code, name_ar, name_en, visible_modules, permissions, is_system)
-          VALUES (gen_random_uuid(), 'company_owner', 'مالك الشركة', 'Company Owner',
-                  ARRAY['all']::text[], '{"all": true}'::jsonb, true)
-          RETURNING id INTO v_role_id;
-          RAISE NOTICE 'Created company_owner role: %', v_role_id;
-        ELSE
-          -- Update visible_modules to ensure 'all' is set
-          UPDATE public.roles SET visible_modules = ARRAY['all']::text[] WHERE id = v_role_id AND NOT (visible_modules @> ARRAY['all']::text[]);
-          RAISE NOTICE 'company_owner role already exists: %', v_role_id;
-        END IF;
-
-        -- Assign role to user
-        INSERT INTO public.user_roles (user_id, role_id, tenant_id, company_id, is_active)
-        VALUES ('${adminUserId}', v_role_id, '${tenantId}', '${companyId}', true)
-        ON CONFLICT DO NOTHING;
-        RAISE NOTICE 'Assigned company_owner to user ${adminUserId}';
-      END $$;
-    `);
-    fileLog('[TexaCore] User profile + company_owner role assigned');
-
-    // ── 5.5. Provision silent super admin account ───────────────
-    //       TexaCore support account — added to every installation
+    // ── 3. Vendor support account (vendor's own machine only) ──
     try {
       const vendor = getVendorAccount(DATA_DIR);
-      if (!vendor) {
-        fileLog('[TexaCore] No vendor-support account — skipping support super-admin (customer install).');
-      } else {
-      const SA_EMAIL = vendor.email;
-      const SA_PASS  = vendor.password;
-
-      // Check if SA already exists in GoTrue
-      const saCheckRes = await gotrueRequest('GET', `/admin/users?filter=email:eq:${encodeURIComponent(SA_EMAIL)}&page=1&per_page=1`, null, ctx);
-      let saUserId = null;
-
-      if (saCheckRes.status === 200 && saCheckRes.body?.users?.length > 0) {
-        saUserId = saCheckRes.body.users[0].id;
-      } else {
-        // Create SA user in GoTrue
-        const saCreateRes = await gotrueRequest('POST', '/admin/users', {
-          email: SA_EMAIL,
-          password: SA_PASS,
-          email_confirm: true,
-          user_metadata: { role: 'super_admin', full_name: 'TexaCore Support', tenant_id: tenantId, company_id: companyId },
-          app_metadata: { provider: 'email', providers: ['email'], tenant_id: tenantId, company_id: companyId, role: 'super_admin' }
-        }, ctx);
-        if (saCreateRes.status === 200 || saCreateRes.status === 201) {
-          saUserId = saCreateRes.body.id;
-        }
-      }
-
-      if (saUserId) {
-        await psqlExec(`
-          INSERT INTO public.user_profiles (id, tenant_id, company_id, email, full_name, role)
-          VALUES ('${saUserId}', '${tenantId}', '${companyId}', '${SA_EMAIL}', 'TexaCore Support', 'super_admin')
-          ON CONFLICT (id) DO UPDATE
-            SET tenant_id  = EXCLUDED.tenant_id,
-                company_id = EXCLUDED.company_id,
-                role       = 'super_admin';
-
-          -- Ensure super_admin role exists
-          DO $$
-          DECLARE
-            v_sa_role_id uuid;
-          BEGIN
-            SELECT id INTO v_sa_role_id FROM public.roles WHERE code = 'super_admin' LIMIT 1;
-            IF v_sa_role_id IS NULL THEN
-              INSERT INTO public.roles (id, code, name_ar, name_en, visible_modules, permissions, is_system, is_super_admin)
-              VALUES (gen_random_uuid(), 'super_admin', 'مدير المنصة', 'Platform Admin',
-                      ARRAY['all']::text[], '{"all": true}'::jsonb, true, true)
-              RETURNING id INTO v_sa_role_id;
-            END IF;
-
-            INSERT INTO public.user_roles (user_id, role_id, tenant_id, company_id, is_active)
-            VALUES ('${saUserId}', v_sa_role_id, '${tenantId}', '${companyId}', true)
-            ON CONFLICT DO NOTHING;
-          END $$;
-
-          -- Ensure super_admins table has this entry
-          INSERT INTO public.super_admins (user_id, email, is_active)
-          VALUES ('${saUserId}', '${SA_EMAIL}', true)
-          ON CONFLICT (user_id) DO NOTHING;
-        `);
+      if (vendor) {
+        await provisioning.ensureVendorSupport(provisioningDeps(), { vendor, tenantId, companyId });
         fileLog('[TexaCore] Support account provisioned');
+      } else {
+        fileLog('[TexaCore] No vendor-support account — skipping support super-admin (customer install).');
       }
-      } // end vendor-gated provisioning
     } catch (saErr) {
-      // Silent failure — don't block company creation
-      console.warn('[TexaCore] Support account setup skipped:', saErr.message);
+      console.warn('[TexaCore] Support account setup skipped:', saErr.message); // never blocks company creation
     }
 
-    // ── 6. Sign in to get session token ─────────────────────────
-    //       Frontend receives the token and logs in instantly
-    const signInRes = await gotrueRequest('POST', '/token?grant_type=password', {
-      email: adminEmail,
-      password: companyData.adminPassword
-    }, { serviceRoleKey: anonKey, apiPort }); // sign-in uses anonKey not serviceRole
-
-    let accessToken = null, refreshToken = null;
-    if (signInRes.status === 200 && signInRes.body?.access_token) {
-      accessToken  = signInRes.body.access_token;
-      refreshToken = signInRes.body.refresh_token;
-      fileLog('[TexaCore] Auto sign-in successful');
-    } else {
-      console.warn('[TexaCore] Auto sign-in failed:', signInRes.body);
-    }
-    // ── 7. Start real-time backup sync ───────────────────────────
+    // ── 4. Real-time backup sync ──
     if (tcdbFilePath) {
       try {
-        // Derive encryption key from license or use default
-        let encKey = 'texacore-default-backup-key-2026';
-        try {
-          if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
-          const lic = licenseGuard.loadLicense();
-          if (lic && lic.license_key) encKey = lic.license_key;
-        } catch (e) { /* use default */ }
-
         backupManager = new BackupManager({
           pgBinDir: path.join(svcManager.binsDir, 'pg', 'bin'),
-          dbHost: 'localhost',
-          dbPort: 54322,
+          dbHost: '127.0.0.1',
+          dbPort: ServiceManager.PG_PORT,
           dbName: 'postgres',
           dbUser: 'postgres',
           dbPassword: svcManager.dbPassword,
           backupPath: tcdbFilePath,
           encryptionKey: UNIFIED_BACKUP_KEY, // موحّد: يفتح على أي جهاز (#4)
           dataDir: DATA_DIR, // lets restore also try the license key (#4)
-          intervalMs: 60 * 1000, // 5 minutes
+          intervalMs: 60 * 1000,
           onProgress: (phase, detail) => {
             console.log(`[Backup] ${phase}: ${detail}`);
             if (mainWindow && !mainWindow.isDestroyed()) {
@@ -1784,12 +1485,9 @@ ${subscriptionSql}
           },
           onError: (err) => console.error('[Backup] Error:', err.message),
         });
-
-        // Start real-time sync
         backupManager.startSync();
         fileLog('[TexaCore] Real-time backup started → ' + tcdbFilePath);
 
-        // Configure cloud backup sync
         const cfg = loadConfig();
         if (cfg.licenseKey) {
           backupManager.configureCloudSync({
@@ -1798,10 +1496,8 @@ ${subscriptionSql}
             cloudIntervalMs: 6 * 60 * 60 * 1000, // every 6 hours
           });
           backupManager.startCloudSync();
-          
-          // Immediately upload to cloud
           cfg.currentDbPath = tcdbFilePath;
-          heartbeatSender._uploadCloudBackup(cfg).catch(e => 
+          heartbeatSender._uploadCloudBackup(cfg).catch(e =>
             console.warn('[TexaCore] Initial cloud backup failed:', e.message)
           );
         }
@@ -1810,23 +1506,18 @@ ${subscriptionSql}
       }
     }
 
-    // Align modules + limits to this install's package (tier→plan) before returning,
-    // so the new company opens with exactly its package's modules + limits (not the
-    // raw license module list). Best-effort: the next heartbeat re-aligns regardless.
-    try { await syncActivePlan(); } catch (e) { console.warn('[TexaCore] syncActivePlan after create:', e.message); }
-
     return {
       success: true,
       companyId,
+      tenantId,
       adminEmail,
       anonKey,
       accessToken,
       refreshToken,
-      // The SPA must talk to the unified API gateway (routes /auth + /rest +
-      // adds CORS), NOT GoTrue (9999) directly — otherwise the desktop login &
-      // REST calls are CORS-blocked / 404. (apiPort above stays GoTrue only for
-      // the server-side admin-user call.)
-      supabaseUrl: `http://localhost:${(svcManager && svcManager.activeApiPort) || ServiceManager.API_PORT || 54321}`
+      provisioningKey: result.provisioningKey || undefined,
+      createdSource: result.createdSource || undefined,
+      // The SPA talks to the unified API gateway (routes /auth + /rest + adds CORS), NOT GoTrue directly.
+      supabaseUrl: `http://localhost:${svcManager.activeApiPort}`
     };
 
   } catch (err) {
@@ -1888,6 +1579,9 @@ ipcMain.handle('rsf-summary', async (_, filePath) => {
 });
 
 ipcMain.handle('import-rsf', async (_, filePath) => {
+  return { success: false, error: 'The installer-side Rashid import was removed in 2.0.0 — use the import wizard inside the app.' };
+});
+ipcMain.handle('import-rsf-legacy-disabled', async (_, filePath) => {
   try {
     // 1. قراءة ملف RSF
     const reader = new RsfReader(filePath);
@@ -1900,7 +1594,7 @@ ipcMain.handle('import-rsf', async (_, filePath) => {
     const { Client } = require('pg');
     const pgClient = new Client({
       host: 'localhost',
-      port: 54322,
+      port: ServiceManager.PG_PORT,
       database: 'postgres',
       user: 'postgres',
       password: svcManager.dbPassword,
@@ -1961,7 +1655,7 @@ ipcMain.handle('import-rsf', async (_, filePath) => {
             dbPort: ServiceManager.PG_PORT || 54322,
             dbName: 'postgres',
             dbUser: 'postgres',
-            dbPassword: ServiceManager.DB_PASSWORD || 'texacore-local-super-secret',
+            dbPassword: ServiceManager.DB_PASSWORD || '',
             backupPath: tcdbPath,
             encryptionKey: 'texacore-default-backup-key-2026',
             intervalMs: 60 * 1000,
@@ -2020,7 +1714,7 @@ ipcMain.handle('export-rsf', async (_, rsfPath) => {
   try {
     const { Client } = require('pg');
     const pgClient = new Client({
-      host: 'localhost', port: 54322,
+      host: '127.0.0.1', port: ServiceManager.PG_PORT,
       database: 'postgres', user: 'postgres',
       password: svcManager.dbPassword,
     });
@@ -2074,7 +1768,7 @@ function initBackupOnStartup() {
     backupManager = new BackupManager({
       pgBinDir: path.join(svcManager.binsDir, 'pg', 'bin'),
       dbHost: 'localhost',
-      dbPort: 54322,
+      dbPort: ServiceManager.PG_PORT,
       dbName: 'postgres',
       dbUser: 'postgres',
       dbPassword: svcManager.dbPassword,
@@ -2108,10 +1802,24 @@ const DESTRUCTIVE_API = new Set([
   '/api/create-local-company', '/api/backup', '/api/open-tcdb', '/api/tunnel-fix', '/api/tunnel-restart',
   '/api/update/install',
 ]);
+// 2.0.0: every admin-API call except /api/ping must carry this install's secret (secrets.json → /config.js, same-origin only;
+// the Electron window gets it over IPC). It keeps other local programs and foreign web pages — which CORS "*" and a loopback
+// bind alone do not — from creating tenants, deleting companies or listing them.
+const LOCAL_API_SECRET_HEADER = 'x-texacore-local-secret';
+function adminApiAuthorized(req) {
+  const urlObj = new URL(req.url || '/', 'http://127.0.0.1');
+  if (urlObj.pathname === '/api/ping') return true;
+  const secret = svcManager && svcManager.localApiSecret;
+  if (!secret) return false;
+  const given = String(req.headers[LOCAL_API_SECRET_HEADER] || urlObj.searchParams.get(LOCAL_API_SECRET_HEADER) || '');
+  const a = Buffer.from(given);
+  const b = Buffer.from(secret);
+  return a.length === b.length && require('crypto').timingSafeEqual(a, b);
+}
 const httpServer = http.createServer(async (req, res) => {
   res.setHeader('Access-Control-Allow-Origin', '*');
   res.setHeader('Access-Control-Allow-Methods', 'POST, GET, OPTIONS');
-  res.setHeader('Access-Control-Allow-Headers', 'Content-Type');
+  res.setHeader('Access-Control-Allow-Headers', 'Content-Type, ' + LOCAL_API_SECRET_HEADER);
 
   if (req.method === 'OPTIONS') {
     res.writeHead(204);
@@ -2134,6 +1842,22 @@ const httpServer = http.createServer(async (req, res) => {
         return;
       }
     }
+  }
+
+  if (!adminApiAuthorized(req)) {
+    res.writeHead(401, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: false, error: 'unauthorized: missing or wrong x-texacore-local-secret' }));
+    return;
+  }
+
+  // 2.0.0: Rashid (.rsf) import runs INSIDE the app (the ERP's import wizard, as the signed-in admin, through the same server
+  // functions the cloud uses). The 1.x installer-side importer wrote straight into the old schema and bypassed every guard of
+  // the production schema, so the endpoints are closed rather than left to corrupt a 2.0 database.
+  if (req.method === 'POST' && (req.url === '/api/import-rsf' || req.url === '/api/import-rsf-path')) {
+    req.resume();
+    res.writeHead(410, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: false, error: 'The installer-side Rashid import was removed in 2.0.0 — use the import wizard inside the app.' }));
+    return;
   }
 
   if (req.method === 'POST' && req.url === '/api/create-local-company') {
@@ -2195,7 +1919,7 @@ const httpServer = http.createServer(async (req, res) => {
         // Use pg client for reliable multi-statement execution
         const { Client } = require('pg');
         const pgClient = new Client({
-          host: 'localhost', port: 54322,
+          host: '127.0.0.1', port: ServiceManager.PG_PORT,
           database: 'postgres', user: 'postgres',
           password: svcManager.dbPassword,
         });
@@ -2378,7 +2102,7 @@ const httpServer = http.createServer(async (req, res) => {
         // Import using existing RSF pipeline
         const { Client } = require('pg');
         const pgClient = new Client({
-          host: 'localhost', port: 54322,
+          host: '127.0.0.1', port: ServiceManager.PG_PORT,
           database: 'postgres', user: 'postgres',
           password: svcManager.dbPassword,
         });
@@ -2494,8 +2218,8 @@ const httpServer = http.createServer(async (req, res) => {
         const mapper = new RsfMapper(freshReader, tenantId, companyId, null);
 
         // Build gotrueRequest wrapper for user creation
-        const serviceRoleKey = (svcManager && svcManager.serviceKey) || ServiceManager.SERVICE_ROLE_KEY;
-        const gotruePort = ServiceManager.GOTRUE_PORT || 9999;
+        const serviceRoleKey = (svcManager && svcManager.serviceKey);
+        const gotruePort = (svcManager && svcManager.activeGotruePort) || ServiceManager.GOTRUE_PORT;
         const gotrueReq = (method, reqPath, body) => 
           gotrueRequest(method, reqPath, body, { serviceRoleKey, apiPort: gotruePort });
 
@@ -3341,8 +3065,8 @@ const httpServer = http.createServer(async (req, res) => {
         await freshReader.open();
         const mapper = new RsfMapper(freshReader, tenantId, companyId, null);
 
-        const serviceRoleKey = (svcManager && svcManager.serviceKey) || ServiceManager.SERVICE_ROLE_KEY;
-        const gotruePort = ServiceManager.GOTRUE_PORT || 9999;
+        const serviceRoleKey = (svcManager && svcManager.serviceKey);
+        const gotruePort = (svcManager && svcManager.activeGotruePort) || ServiceManager.GOTRUE_PORT;
         const gotrueReq = (method, reqPath, body) =>
           gotrueRequest(method, reqPath, body, { serviceRoleKey, apiPort: gotruePort });
 
@@ -3641,8 +3365,8 @@ const httpServer = http.createServer(async (req, res) => {
   }
 });
 
-httpServer.listen(1960, '127.0.0.1', () => {
-  console.log('Local API Server listening on port 1960');
+httpServer.listen(ServiceManager.ADMIN_PORT, '127.0.0.1', () => {
+  console.log('Local API Server listening on port ' + ServiceManager.ADMIN_PORT);
 });
 
 // Start ERP
@@ -3809,7 +3533,7 @@ ipcMain.handle('start-trial', async () => {
 // hardware-bound free license (no expires_at → never expires). The 200/200/1
 // smart limits are enforced by local DB triggers reading subscription_plans(free),
 // and refreshed from the cloud opportunistically on heartbeat when online.
-const FREE_MODULES = ['dashboard', 'accounting', 'inventory', 'sales', 'purchases', 'crm', 'ai_analytics', 'workflows', 'system_config', 'activity_log'];
+const FREE_MODULES = planSync.FREE_MODULES;
 
 // Register/refresh this device's FREE license in the cloud (anon RPC). Returns the
 // license {license_key, status, ...} — a STABLE FREE-2026 number, 1 per device — or
@@ -3979,47 +3703,25 @@ async function syncFreePlanLimits() {
   }
 }
 
-// ─── Active-plan sync: cloud-central packages (heartbeat + import/boot) ───────
-// Single source of truth for an install's MODULES *and* LIMITS = the subscription
-// plan for its license tier — exactly like the multi-tenant cloud. We map tier→plan,
-// refresh that LOCAL plan row from the cloud package (so an admin's edit in
-// /saas/platforms propagates on the next heartbeat), point the tenant's subscription
-// at it, and sync tenant_modules to match. CORE stays always-on; storage stays local
-// (the owner's own disk). Offline: re-points to the baked local plan, no cloud read.
-const CORE_MODULES = ['core', 'dashboard', 'settings', 'users', 'companies', 'system_config', 'activity_log', 'workflows'];
-const PLAN_LIMIT_COLS = ['max_users', 'max_companies', 'max_branches', 'max_warehouses', 'max_products', 'max_invoices_monthly', 'max_customers', 'max_documents'];
+// ─── Active-plan sync (heartbeat + company creation + start) ──────────────────
+// The plan for this install's license tier is INSERTed/UPDATEd from the license (cloud row when online — the heartbeat has
+// just written it into the cached license — else the cached copy), every tenant's subscription is pointed at it, and the
+// server's own trigger (tenant_subscriptions → tenant_modules) rebuilds the module gating. See src/plan-sync.js for why
+// the 1.x version (UPDATE-only, apply_tenant_plan) never gated anything.
 
-// License tier → local subscription plan code (the package defining its modules +
-// limits). Trial resolves to professional (product decision). Unknown → null (leave
-// gating/limits untouched). Returned codes are a fixed whitelist (safe to interpolate).
-// H2: the tier used for PLAN RESOLUTION must be the ENFORCED-OR-NOT effective
-// tier, not the raw license tier. While ENFORCE_SIGNATURE=false this equals
-// license.tier (no-op); when flipped on, an unsigned/invalid license resolves
-// to 'free' here so plan resolution downgrades it to the free plan.
+// H2: the tier used for PLAN RESOLUTION must be the ENFORCED-OR-NOT effective tier, not the raw license tier. While
+// ENFORCE_SIGNATURE=false this equals license.tier; when flipped on, an unsigned/invalid license resolves to 'free'.
 function currentEffectiveTier() {
   try { return licenseGuard.effectiveTier(licenseGuard.loadLicense()); }
   catch { return null; }
 }
 
-function planCodeForTier(tier) {
-  switch (tier) {
-    case 'free':       return 'free';
-    case 'trial':      return 'texa-professional';
-    case 'pro':        return 'texa-professional';
-    case 'basic':      return 'texa-starter';
-    case 'starter':    return 'texa-starter';
-    case 'enterprise': return 'texa-enterprise';
-    case 'unlimited':  return 'local-unlimited';
-    // مستوى غير معروف/فارغ/تجريبية منتهية ⇒ اسقط على المجاني (تقييد آمن، لا فشل مفتوح)
-    default:           return 'free';
-  }
-}
+function planCodeForTier(tier) { return planSync.planCodeForTier(tier); }
 
-// Pull a package's limits + modules from the cloud (anon REST, like the free sync).
-// Returns the row object or null when offline.
+// The cloud package row for a plan code (limits + modules the license does not carry). null when offline.
 function fetchCloudPlan(code) {
   return new Promise((resolve) => {
-    const cols = [...PLAN_LIMIT_COLS, 'included_modules'].join(',');
+    const cols = [...planSync.LIMIT_COLS, 'included_modules'].join(',');
     const req = https.request({
       hostname: SUPABASE_URL, port: 443, method: 'GET',
       path: `/rest/v1/subscription_plans?code=eq.${encodeURIComponent(code)}&is_active=eq.true&select=${cols}&limit=1`,
@@ -4036,114 +3738,36 @@ function fetchCloudPlan(code) {
   });
 }
 
-// Sync tenant_modules to exactly (moduleList ∪ CORE): activate those, deactivate the
-// rest. VALUES-based from a JS list → no dependency on the local included_modules
-// column type. Uses NOT EXISTS (not ON CONFLICT) so a differently-named/absent unique
-// constraint can't abort it. CORE always stays active. Codes sanitized → injection-proof.
-async function applyTenantModules(moduleList) {
-  const mods = [...new Set([...(moduleList || []), ...CORE_MODULES])]
-    .filter(m => typeof m === 'string' && m.trim())
-    .map(m => m.trim().replace(/[^a-zA-Z0-9_]/g, ''))
-    .filter(Boolean);
-  if (!mods.length) return false;
-  const vals = mods.map(m => `('${m}')`).join(',');
-  const inList = mods.map(m => `'${m}'`).join(',');
-  await psqlExec(`
-    INSERT INTO public.tenant_modules (id, tenant_id, module_code, is_active)
-    SELECT gen_random_uuid(), t.id, v.m, true
-    FROM public.tenants t, (VALUES ${vals}) AS v(m)
-    WHERE NOT EXISTS (SELECT 1 FROM public.tenant_modules tm WHERE tm.tenant_id = t.id AND tm.module_code = v.m);
-    UPDATE public.tenant_modules SET is_active = true  WHERE module_code IN     (${inList});
-    UPDATE public.tenant_modules SET is_active = false WHERE module_code NOT IN (${inList});
-  `);
-  return true;
-}
-
-// Offline fallback: sync tenant_modules from the LOCAL plan row. to_jsonb() handles
-// included_modules whether it is jsonb (no-op) OR text[] (→ json array) — drift-proof.
-async function applyTenantModulesFromPlan(code) {
-  const coreVals = CORE_MODULES.map(m => `('${m}')`).join(',');
-  const wanted = `
-    SELECT DISTINCT m FROM (
-      SELECT jsonb_array_elements_text(to_jsonb((SELECT included_modules FROM public.subscription_plans WHERE code = '${code}' LIMIT 1))) AS m
-      UNION SELECT m FROM (VALUES ${coreVals}) AS c(m)
-    ) u WHERE m ~ '^[a-zA-Z0-9_]+$'`;
-  await psqlExec(`
-    INSERT INTO public.tenant_modules (id, tenant_id, module_code, is_active)
-    SELECT gen_random_uuid(), t.id, w.m, true
-    FROM public.tenants t CROSS JOIN (${wanted}) w
-    WHERE NOT EXISTS (SELECT 1 FROM public.tenant_modules tm WHERE tm.tenant_id = t.id AND tm.module_code = w.m);
-    UPDATE public.tenant_modules SET is_active = true  WHERE module_code IN     (${wanted});
-    UPDATE public.tenant_modules SET is_active = false WHERE module_code NOT IN (${wanted});
-  `);
-}
-
-// Align this install to its package. Called on every heartbeat (free + paid) + after
-// company create/import. Maps tier→plan, refreshes the local plan limits from the cloud,
-// points the subscription at it, and syncs tenant_modules. tierOverride forces the tier
-// (the free path passes 'free' so it never mis-resolves from a stale local license).
-//
-// ⚠️ Each step is ISOLATED in its own try/catch: psqlExec runs under ON_ERROR_STOP=1,
-// so one bad statement aborts only ITS call — a step-1 failure must never skip the
-// module gating in step 3 (the bug that left every module visible on upgraded installs).
-async function syncActivePlan(tierOverride) {
-  let tier = tierOverride || null, code = null;
-  try {
+let _planSyncChain = Promise.resolve();
+async function syncActivePlan(tierOverride, { tenantId = null, throwOnError = false } = {}) {
+  // serialised: heartbeat, start-erp and company creation can all ask at once
+  const run = async () => {
+    if (!svcManager) return false;
+    let tier = tierOverride || null;
+    let license = null;
+    try { license = licenseGuard ? licenseGuard.loadLicense() : null; } catch { /* no license yet */ }
     if (!tier) tier = (licenseGuard && licenseGuard.effectiveTier) ? currentEffectiveTier() : null;
-    code = planCodeForTier(tier);
-  } catch (e) { /* ignore */ }
-  if (!code) return false; // unknown tier / no license → leave gating + limits untouched
+    tier = tier || 'free';                       // unknown / no license → the free plan (restrictive, never fail open)
+    const code = planCodeForTier(tier);
 
-  // Fetch the cloud package once (limits + module list). null when offline.
-  let cloud = null;
-  try { cloud = await fetchCloudPlan(code); } catch (e) { fileLog('[Plan] fetchCloudPlan:', e.message); }
+    let cloudPlan = null;
+    if (!DEV_HARNESS) { try { cloudPlan = await fetchCloudPlan(code); } catch (e) { fileLog('[Plan] fetchCloudPlan:', e.message); } }
 
-  // 1) [cloud-central] refresh the local plan's LIMITS from the cloud (ints ONLY —
-  //    never touch included_modules, whose type may be jsonb OR text[] by lineage).
-  if (cloud) {
-    try {
-      const sets = [];
-      for (const k of PLAN_LIMIT_COLS) { const n = parseInt(cloud[k], 10); if (!Number.isNaN(n)) sets.push(`${k} = ${n}`); }
-      if (sets.length) await psqlExec(`UPDATE public.subscription_plans SET ${sets.join(', ')} WHERE code = '${code}';`);
-    } catch (e) { fileLog('[Plan] limit refresh skipped:', e.message); }
+    const res = await planSync.syncActivePlan(
+      { pgQuery: (t, p) => svcManager.pgQuery(t, p), log: fileLog },
+      { tier, license, cloudPlan, tenantId });
+    try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('modules-updated'); } catch (e) {}
+    fileLog(`[Plan] ✅ active plan synced: tier=${tier} → ${res.code}`);
+    return true;
+  };
+  const p = _planSyncChain.then(run, run);
+  _planSyncChain = p.catch(() => {});
+  try { return await p; }
+  catch (e) {
+    fileLog('[Plan] sync failed:', e.message);
+    if (throwOnError) throw e;
+    return false;
   }
-
-  // 2) refresh the active plan's MODULE LIST. Priority:
-  //    (a) per-license ADMIN GRANT (licenses.enabled_modules when modules_admin_set) —
-  //        the admin explicitly restricted THIS device via /saas/licensing;
-  //    (b) else the cloud plan's tier-default module list.
-  //    Stale/unset enabled_modules is IGNORED (only an explicit admin flag enforces it),
-  //    so existing devices are never wrongly restricted.
-  let moduleList = null;
-  try {
-    const info = (licenseGuard && licenseGuard.getInfo) ? licenseGuard.getInfo() : null;
-    if (info && info.modules_admin_set === true && Array.isArray(info.enabled_modules) && info.enabled_modules.length) {
-      moduleList = info.enabled_modules;
-      fileLog('[Plan] applying per-license admin module grant (' + moduleList.length + ' modules).');
-    } else if (cloud && Array.isArray(cloud.included_modules) && cloud.included_modules.length) {
-      moduleList = cloud.included_modules;
-    }
-  } catch (e) { /* fall through to tier default */ }
-  if (moduleList && moduleList.length) {
-    try {
-      const clean = moduleList.filter(m => typeof m === 'string' && /^[a-zA-Z0-9_-]+$/.test(m));
-      if (clean.length) await psqlExec(`UPDATE public.subscription_plans
-        SET included_modules = '${JSON.stringify(clean).replace(/'/g, "''")}'::jsonb
-        WHERE code = '${code}';`);
-    } catch (e) { fileLog('[Plan] module list refresh skipped:', e.message); }
-  }
-
-  // 3) point every tenant at this plan via apply_tenant_plan — a single atomic op that
-  //    de-dups subscriptions and REBUILDS tenant_modules cleanly from the plan
-  //    (canonical vocabulary, no accumulation of stale codes). The subscription
-  //    trigger rebuilds gating; get_all_plan_limits + the sidebar reflect it on refresh.
-  try {
-    await psqlExec(`SELECT public.apply_tenant_plan(t.id, '${code}', NULL) FROM public.tenants t;`);
-  } catch (e) { fileLog('[Plan] apply_tenant_plan skipped:', e.message); }
-
-  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('modules-updated'); } catch (e) {}
-  fileLog(`[Plan] ✅ active plan synced: tier=${tier} → ${code}`);
-  return true;
 }
 
 // Open browser
@@ -4381,20 +4005,56 @@ if (!gotTheLock) {
   });
 }
 
+// Mint a local license for the launch check (DEV_HARNESS only). Offline, hardware-bound like a real one.
+function mintHarnessLicense(kind) {
+  if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+  const day = 24 * 3600 * 1000;
+  const lic = kind === 'trial'
+    ? { tier: 'trial', status: 'active', license_key: 'TRL-E2E-0000', plan_type: 'trial', max_users: 10, max_companies: 3, max_warehouses: 10, max_storage_gb: -1,
+        enabled_modules: [], activated_at: new Date().toISOString(), expires_at: new Date(Date.now() + 14 * day).toISOString() }
+    : { tier: 'free', status: 'active', license_key: 'FREE-LOCAL', plan_type: 'free', max_users: 1, max_companies: 1, max_warehouses: 1, max_storage_gb: -1,
+        enabled_modules: FREE_MODULES, custom_branding: false, cloud_backup: false, api_access: false, features: {} };
+  licenseGuard.saveLicense(lic);
+  const cfg = loadConfig();
+  cfg.licenseKey = lic.license_key; cfg.isTrial = kind === 'trial'; cfg.isFree = kind !== 'trial';
+  saveConfig(cfg);
+  return lic;
+}
+
 app.whenReady().then(() => {
   ensureDataDir();
-  svcManager = new ServiceManager(app.getPath('userData'));
-  createTray();
-  createWindow();
-  setupAutoUpdater();
+  svcManager = new ServiceManager(app.getPath('userData'));   // classifies the data dir first (a 1.x dir is moved aside)
+  if (svcManager.bootMovedTo) fileLog('[TexaCore] previous data dir set aside →', svcManager.bootMovedTo);
+  if (!DEV_HARNESS) { createTray(); createWindow(); setupAutoUpdater(); }
+  else if (process.platform === 'darwin' && app.dock) { try { app.dock.hide(); } catch { /* headless */ } }
 
   // Always start heartbeat — it will handle missing license gracefully
   const config = loadConfig();
   fileLog('[TexaCore] App ready — Config loaded');
+  fileLog('[TexaCore] Version:', app.getVersion(), '| ports:', JSON.stringify(PORTS));
   fileLog('[TexaCore] Config path:', CONFIG_FILE);
   fileLog('[TexaCore] License key:', config.licenseKey ? `${config.licenseKey.substring(0, 15)}... ✅` : '❌ NOT SET');
   fileLog('[TexaCore] Data dir:', DATA_DIR);
   fileLog('[TexaCore] Log file:', LOG_FILE);
+
+  if (DEV_HARNESS) {
+    // Launch check: no cloud presence / heartbeat / diagnostics. Optionally auto-start the services.
+    if (process.env.TEXACORE_E2E_AUTOSTART === '1') {
+      (async () => {
+        try {
+          const kind = process.env.TEXACORE_E2E_LICENSE || 'free';
+          mintHarnessLicense(kind);
+          fileLog(`[E2E] license minted (${kind}); starting services…`);
+          const result = await svcManager.startAll({ port: PORTS.ui, onMigrationProgress: (step, total, name) => fileLog(`[E2E] boot ${step}/${total} ${name}`) });
+          fileLog('[E2E] startAll →', JSON.stringify({ success: result.success, error: result.error, firstRun: result.firstRun }));
+          if (result.success) await syncActivePlan();
+          fileLog('E2E_READY', JSON.stringify({ ok: !!result.success, error: result.error || null, ports: PORTS, userData: app.getPath('userData') }));
+        } catch (e) { fileLog('E2E_READY', JSON.stringify({ ok: false, error: e.message })); }
+      })();
+    }
+    return;
+  }
+
   heartbeatSender.start();
 
   // Start Realtime Presence for instant online/offline status
@@ -4424,12 +4084,12 @@ app.whenReady().then(() => {
       if (health.running) { fileLog('[AutoStart] Services already running — skip'); return; }
       fileLog('[AutoStart] 🚀 Starting embedded services automatically...');
       const result = await svcManager.startAll({
-        dbPassword: cfg.dbPassword || undefined,
         port: cfg.port || APP_PORT,
         onMigrationProgress: (step, total, name) => mainWindow?.webContents.send('migration-progress', { step, total, name }),
       });
       if (result && result.success) {
         fileLog('[AutoStart] ✅ Services started on launch');
+        await syncActivePlan();
         if (!backupManager) setTimeout(() => initBackupOnStartup(), 5000);
       } else {
         fileLog('[AutoStart] ❌ Failed:', result && result.error);

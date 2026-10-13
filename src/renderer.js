@@ -603,7 +603,7 @@ async function setEmployeeLink(subdomain) {
   if (!subdomain) { empBox.style.display = 'none'; return; }
   let code = '';
   try {
-    const r = await fetch('http://127.0.0.1:1960/api/companies');
+    const r = await fetch('http://127.0.0.1:1960/api/companies', { headers: { 'x-texacore-local-secret': (window.texacore && window.texacore.getLocalApiSecret && window.texacore.getLocalApiSecret()) || '' } });
     if (r.ok) {
       const j = await r.json();
       const companies = j.companies || [];
