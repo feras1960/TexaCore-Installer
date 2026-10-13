@@ -42,6 +42,20 @@ const SOURCES = {
   'reference_data.sql': { src: 'supabase/baseline/reference_data.sql', required: false },
 };
 
+/**
+ * Sanity checks of the extracted baseline text. The extract once emitted a bare `null;` where pg_get_triggerdef() returned NULL (a trigger vanished while the
+ * extract ran, 2026-10-13 12:29Z cut: two statements) — a database built from it is two triggers short and fails install verification. Returns problems[].
+ */
+function baselineProblems(text) {
+  const problems = [];
+  // TOP-LEVEL statements only: a plpgsql body legitimately contains `null;`
+  const { statementsWithEndLines, stripLeading } = require('./lib/sql-split');
+  const nulls = statementsWithEndLines(text).filter((st) => /^null\s*;\s*$/i.test(stripLeading(st.text).trim())).map((st) => st.endLine);
+  if (nulls.length) problems.push(`${nulls.length} top-level statement(s) that are just "null;" (line ${nulls.slice(0, 5).join(', ')}) — an object whose definition came back NULL`);
+  if (!/CREATE TABLE public\./.test(text)) problems.push('no CREATE TABLE public. at all');
+  return problems;
+}
+
 function sha256(buf) { return crypto.createHash('sha256').update(buf).digest('hex'); }
 
 /** The ERP's stub file without the statements that belong to the auth schema (GoTrue creates and owns that one). */
@@ -118,6 +132,10 @@ function main() {
       continue;
     }
     const raw = fs.readFileSync(srcPath);
+    if (name === 'production_baseline.sql') {
+      const bad = baselineProblems(raw.toString('utf8'));
+      if (bad.length) { console.error(`${srcPath} is DEFECTIVE — refusing to pin it:\n  - ${bad.join('\n  - ')}\n(the schema extract must be re-run; a baseline with holes builds a database that fails its own verification)`); process.exit(1); }
+    }
     const out = spec.derive ? Buffer.from(spec.derive(raw.toString('utf8')), 'utf8') : raw;
     fs.writeFileSync(path.join(OUT, name), out);
     files[name] = {
@@ -163,5 +181,5 @@ function main() {
   console.log(`baseline matches the pin (cut ${pin.cutTimestamp})`);
 }
 
-module.exports = { verifyDir, sha256, deriveStorageStubs, PIN_FILE };
+module.exports = { verifyDir, sha256, deriveStorageStubs, baselineProblems, PIN_FILE };
 if (require.main === module) main();

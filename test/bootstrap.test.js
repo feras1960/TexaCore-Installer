@@ -285,3 +285,14 @@ test('role passwords: postgres is set unconditionally, the two service roles onl
   const roles = bs.rolesSql({ authenticatorPassword: 'AUTHN', authAdminPassword: 'AUTHA' });
   assert.match(roles, /ALTER ROLE authenticator PASSWORD 'AUTHN'/); assert.match(roles, /ALTER ROLE supabase_auth_admin PASSWORD 'AUTHA'/);
 });
+
+test('a baseline with a bare "null;" statement (an object whose definition came back NULL) is refused', () => {
+  const { baselineProblems } = require('../scripts/sync-baseline');
+  assert.deepEqual(baselineProblems('CREATE TABLE public.t (id int);\nCREATE TRIGGER x BEFORE INSERT ON public.t FOR EACH ROW EXECUTE FUNCTION f();\n'), []);
+  const bad = baselineProblems('CREATE TABLE public.t (id int);\nnull;\nCREATE TRIGGER y ...;\n  NULL ;\n');
+  assert.equal(bad.length, 1); assert.match(bad[0], /2 top-level statement\(s\) that are just "null;" \(line 2, 4\)/);
+  // a plpgsql body may contain `null;` lines
+  assert.deepEqual(baselineProblems('CREATE TABLE public.t (id int);\nCREATE FUNCTION f() RETURNS void AS $f$\nBEGIN\n  null;\nEND;\n$f$ LANGUAGE plpgsql;\n'), []);
+  // a statement that merely CONTAINS null is fine
+  assert.deepEqual(baselineProblems('CREATE TABLE public.t (a int DEFAULT null);\nSELECT null;\n'), []);
+});

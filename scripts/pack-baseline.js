@@ -47,6 +47,8 @@ function main() {
   const problems = bootstrap.verifyBaselineFiles(BASELINE);
   if (problems.length) { console.error(`pack-baseline: the plain baseline does not match its pin — ${problems.join('; ')}\n  run: node scripts/sync-baseline.js --erp <ERP checkout>`); process.exit(1); }
   const pin = bootstrap.loadPin(BASELINE);
+  const defects = require('./sync-baseline').baselineProblems(fs.readFileSync(path.join(BASELINE, 'production_baseline.sql'), 'utf8'));
+  if (defects.length) { console.error(`pack-baseline: the baseline is defective — ${defects.join('; ')}`); process.exit(1); }
   const entries = [];
   for (const name of ['production_baseline.sql', 'production_baseline.inventory.json', 'storage_stubs.sql', 'reference_data.sql']) {
     const f = path.join(BASELINE, name);
