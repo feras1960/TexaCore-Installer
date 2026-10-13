@@ -51,6 +51,8 @@ function main() {
   // 2. copy
   fs.rmSync(OUT, { recursive: true, force: true });
   fs.cpSync(dist, OUT, { recursive: true });
+  // files that exist for the CLOUD deployment (Cloudflare Pages routing) or are developer test pages: not shipped in an installer
+  for (const f of ['_headers', '_redirects', 'agent_test.html']) fs.rmSync(path.join(OUT, f), { force: true });
   console.log(`  frontend: ${dist} → ${path.relative(ROOT, OUT)}`);
 
   // 3. fonts
