@@ -1422,6 +1422,13 @@ async function handleCreateLocalCompany(companyData) {
       return { success: false, error: 'الخدمات غير شغّالة. يرجى تشغيل النظام أولاً.' };
     }
 
+    // The backup file name is chosen by the caller: a plain "<name>" (we append .tcdb), never a path. (storagePath is the folder the
+    // user picked for their backups and may be anywhere — it is the file name inside it that must not escape it.)
+    if (companyData && companyData.dbFileName != null && companyData.dbFileName !== ''
+        && !netGuard.safeUploadName(String(companyData.dbFileName) + '.tcdb', { ext: '.tcdb' })) {
+      return { success: false, code: 'INVALID_FILE_NAME', error: 'Invalid backup file name' };
+    }
+
     // ── 1. Create tenant, owner, company (server functions, as the admin) ──
     const result = await provisioning.createLocalCompany(provisioningDeps(), companyData);
     if (!result.success) {

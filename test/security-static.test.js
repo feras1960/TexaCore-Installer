@@ -95,3 +95,10 @@ test('restore-tcdb: the multipart file name is validated and the bytes checked B
   assert.match(block, /renameSync\(tmpPath, tcdbPath\)/);
   assert.doesNotMatch(block, /writeFileSync\(tcdbPath/, 'never writes straight to the caller-named path');
 });
+
+test('create-local-company refuses a dbFileName that is not a plain name before provisioning anything', () => {
+  const main = lineCode(all.find((x) => x.f === 'main.js').text);
+  const iGuard = main.indexOf("code: 'INVALID_FILE_NAME'");
+  const iCreate = main.indexOf('provisioning.createLocalCompany(provisioningDeps(), companyData)');
+  assert.ok(iGuard > 0 && iCreate > 0 && iGuard < iCreate);
+});

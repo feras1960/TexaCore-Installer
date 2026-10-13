@@ -485,7 +485,15 @@ async function main() {
       // an oversize / wrong-method / secret-less call is also refused
       const noSecret = await request('POST', `${UI}/api/restore-tcdb`, { headers: { 'Content-Type': 'multipart/form-data; boundary=x' }, body: '--x--' });
       if (noSecret.status !== 401) throw new Error(`restore-tcdb without the secret → ${noSecret.status}`);
-      return `${attempts.length} hostile uploads → 400 each; nothing written anywhere (checked ${wouldBe.length} escape targets + the restore folder); without the secret → 401`;
+      // the other caller-chosen file name: create-local-company's dbFileName must be a plain name (refused before any tenant/user is created)
+      const before = (await pg('SELECT (SELECT count(*) FROM public.tenants)::int t, (SELECT count(*) FROM auth.users)::int u')).rows[0];
+      for (const bad of [`../../${tag}-db`, `..\\..\\${tag}-db`, `/tmp/${tag}-db`, `a/b-${tag}`]) {
+        const r = await request('POST', `${UI}/api/create-local-company`, { headers: H, body: body({ adminEmail: `traversal-${crypto.randomBytes(3).toString('hex')}@e2e.test`, dbFileName: bad }) });
+        if (!(r.json && r.json.success === false && r.json.code === 'INVALID_FILE_NAME')) throw new Error(`create-local-company with dbFileName ${JSON.stringify(bad)} → ${r.status} ${r.text.slice(0, 160)}`);
+      }
+      const after = (await pg('SELECT (SELECT count(*) FROM public.tenants)::int t, (SELECT count(*) FROM auth.users)::int u')).rows[0];
+      if (JSON.stringify(before) !== JSON.stringify(after)) throw new Error(`a refused company creation left rows behind: ${JSON.stringify(before)} → ${JSON.stringify(after)}`);
+      return `${attempts.length} hostile uploads → 400 each; nothing written anywhere (checked ${wouldBe.length} escape targets + the restore folder); without the secret → 401; 4 hostile dbFileName values refused before any write`;
     });
 
     // ── 5. the web UI ──
