@@ -1,0 +1,21 @@
+TexaCore ERP — End-User Licence Agreement
+
+By installing or using TexaCore ERP you agree to these terms. If you do not agree, do not install or use the software.
+
+1. Licence. TexaCore grants you a non-exclusive, non-transferable licence to install and use TexaCore ERP on the computers covered by your licence key (or by the free plan), for your own business.
+
+2. Restrictions. You may not decompile, disassemble or reverse engineer the software or any part of it, extract its code, database structure or logic, or copy, modify, redistribute or use it to build a competing product, except to the extent expressly permitted by applicable law. You may not remove or alter proprietary notices, or circumvent the licence, plan limits or security features of the software.
+
+3. Ownership. The software, its database design, documentation and trademarks remain the property of TexaCore and its licensors. This agreement transfers no ownership rights to you. Your own business data remains yours.
+
+4. Your data and optional services. Your data is stored on your computer. Services that use the internet (licence activation and checks, plan updates, cloud access, cloud backup, software updates) operate only as described in the program and, where optional, only when you turn them on.
+
+5. Plans and updates. The modules and limits available to you depend on your licence and plan, which TexaCore may update; the software may download such updates when it is online.
+
+6. No warranty. The software is provided "as is", without warranty of any kind, to the extent permitted by law.
+
+7. Limitation of liability. To the extent permitted by law, TexaCore is not liable for indirect or consequential loss, loss of profits or loss of data. Keep regular backups.
+
+8. Termination. This licence ends automatically if you breach these terms. On termination you must stop using the software and delete your copies.
+
+TexaCore — info@texacore.com

@@ -55,6 +55,10 @@ function checkPg(platform, problems) {
   }
 }
 
+function checkEula(problems) {
+  try { require('./make-eula').build(); } catch (e) { problems.push(`EULA: ${e.message}`); }
+}
+
 function checkNoSecrets(problems) {
   for (const f of ['.env', '.env.local', '.env.selfhosted', '.env.production']) {
     if (fs.existsSync(path.join(ROOT, f))) problems.push(`${f} exists in the installer folder — remove it (it would be packaged by "src/**" rules in some setups)`);
@@ -67,6 +71,7 @@ function run(platforms) {
   checkFrontend(problems);
   for (const p of platforms) checkPg(p, problems);
   checkNoSecrets(problems);
+  checkEula(problems);
   return problems;
 }
 

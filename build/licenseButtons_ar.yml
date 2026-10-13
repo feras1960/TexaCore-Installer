@@ -1,0 +1,7 @@
+# Labels of the dmg's licence screen in Arabic (dmg-license has no built-in Arabic labels)
+lang: ar
+agree: أوافق
+disagree: لا أوافق
+print: طباعة
+save: حفظ
+description: "إذا وافقت على شروط اتفاقية الترخيص فانقر على أوافق لتثبيت البرنامج، وإلا فانقر على لا أوافق."
