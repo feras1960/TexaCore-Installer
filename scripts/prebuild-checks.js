@@ -8,7 +8,7 @@
 //   node scripts/prebuild-checks.js [--platform mac|win|all]    (REQUIRE_LOCAL_FONTS=1 is implied)
 //
 // Checks: baseline files vs BASELINE_PIN.json · the web bundle exists, carries package.json's version and local fonts ·
-// the bundled PostgreSQL is 17.x for each target platform · no secret-looking env file is about to be packaged.
+// the bundled PostgreSQL is 17.x for each target platform · the pinned cloudflared (mac) is present, signed and runs · no secret-looking env file is about to be packaged.
 // ════════════════════════════════════════════════════════════════
 const fs = require('fs');
 const path = require('path');
@@ -43,6 +43,10 @@ function checkPg(platform, problems) {
     if (!fs.existsSync(bin)) { problems.push('mac: bin/macos-arm64/pg is missing — run scripts/prepare-pg-mac.sh'); return; }
     const r = spawnSync(bin, ['--version'], { encoding: 'utf8' });
     if (!/PostgreSQL\) 17\./.test(r.stdout || '')) problems.push(`mac: bundled PostgreSQL is "${(r.stdout || r.stderr || '').trim()}", expected 17.x`);
+    // the Cloud Access connector (2.0.0 shipped without it): the pinned, Cloudflare-signed binary must be in the repo and must run
+    const { verifyCloudflaredFile } = require('./prepare-cloudflared-mac');
+    const cfPin = require('./lib/cloudflared-pin');
+    for (const p of verifyCloudflaredFile(cfPin.mac.repoPath)) problems.push(`mac: bin/macos-arm64/cloudflared/cloudflared — ${p} — run: node scripts/prepare-cloudflared-mac.js <the official ${cfPin.version} darwin-arm64 binary>`);
   } else {
     const marker = path.join(ROOT, 'bin', 'windows-x64', 'pg', 'PG_BUNDLE_VERSION');
     if (!fs.existsSync(marker)) { problems.push('win: bin/windows-x64/pg has no PG_BUNDLE_VERSION — run scripts/prepare-pg-win.js with the EDB 17.6 zip'); return; }

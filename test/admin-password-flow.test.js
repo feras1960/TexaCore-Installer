@@ -39,10 +39,23 @@ test('syncAdminPassword: custom hash wins; else the license key; with neither th
   await f.sm.syncAdminPassword();
   assert.deepEqual(f.queries[0].params, ['$2a$06$custom']);
 
-  f = fake({ licenseKey: 'FREE-LOCAL' });
+  // a PAID / TRIAL key is secret to the install: it is the default
+  f = fake({ licenseKey: 'TRL-2026-CGWGJ-W2FSX' });
   await f.sm.syncAdminPassword();
   assert.match(f.queries[0].text, /extensions\.crypt\(\$1, extensions\.gen_salt\('bf'\)\)/);
-  assert.deepEqual(f.queries[0].params, ['FREE-LOCAL']);
+  assert.deepEqual(f.queries[0].params, ['TRL-2026-CGWGJ-W2FSX']);
+
+  // a FREE key is NOT a secret ("FREE-LOCAL" is a literal in the source; FREE-2026-NNNNN are short numbers shown in the launcher): no default → locked
+  for (const free of ['FREE-LOCAL', 'FREE-2026-12345', 'free-2026-00001']) {
+    f = fake({ licenseKey: free });
+    await f.sm.syncAdminPassword();
+    assert.match(f.queries[0].text, /VALUES \(1, NULL, now\(\)\)/, free);
+    assert.ok(!f.queries.some((q) => (q.params || []).includes(free)), free);
+  }
+  // …unless the manager set a password of their own
+  f = fake({ licenseKey: 'FREE-LOCAL', adminPasswordHash: '$2a$06$custom' });
+  await f.sm.syncAdminPassword();
+  assert.deepEqual(f.queries[0].params, ['$2a$06$custom']);
 
   f = fake({});
   await f.sm.syncAdminPassword();

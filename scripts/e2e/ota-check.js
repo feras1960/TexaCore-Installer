@@ -4,7 +4,7 @@
 // ota-check — the automatic update, end to end, on REAL packaged apps in the lab (isolated userData, ports 47391+, nothing from the real GitHub release).
 //
 //   node scripts/e2e/ota-check.js --workdir <empty dir> --old180 "<1.8.0 .app>" --rel <dir with the NEW release: latest-mac.yml + zip + dmg> \
-//        [--client200 "<2.0.0 .app, to test 2.0.0 → 2.0.1-test>"] [--erp <ERP checkout: Playwright + ERP page>] [--hops a,tamper,b]
+//        [--client200 "<2.0.0 .app, to test 2.0.0 → 2.0.1-test>"] [--next-rel <dir>: hop b against the REAL next release instead of 2.0.1-test] [--erp <ERP checkout: Playwright + ERP page>] [--hops a,tamper,b]
 //
 // How the real updater is exercised without touching the product's feed:
 //   * the updater code under test is UNMODIFIED (the packaged mac-updater.js is byte-identical to the released one — checked). A packaged Electron app ignores NODE_OPTIONS=--require,
@@ -31,6 +31,7 @@ const REL = path.resolve(arg('rel', ''));
 const CLIENT200 = arg('client200', '') ? path.resolve(arg('client200')) : '';
 const ERP = arg('erp', '');
 const HOPS = arg('hops', 'a,tamper,b').split(',');
+const NEXT_REL = arg('next-rel', '') ? path.resolve(arg('next-rel')) : '';   // hop b against the real next release (a dir with latest-mac.yml + zip + dmg)
 if (!arg('workdir') || !arg('old180') || !arg('rel')) { console.error('--workdir, --old180 and --rel are required'); process.exit(2); }
 const MOCK_PORT = 47398; const CDP_PORT = 47397;
 const HOME = os.homedir();
@@ -323,12 +324,13 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
     if (HOPS.includes('b')) {
       if (!CLIENT200) throw new Error('--client200 is required for hop b');
       const dir = path.join(WORK, 'hop-b'); fs.mkdirSync(dir, { recursive: true });
-      const next = makeNextRelease(CLIENT200, path.join(dir, 'release-201'), '2.0.1-test');
+      const next = NEXT_REL ? NEXT_REL : makeNextRelease(CLIENT200, path.join(dir, 'release-201'), '2.0.1-test');   // --next-rel: the REAL next release (dist/) instead of a re-versioned copy
       const nextMeta = parseYml(path.join(next, 'latest-mac.yml'));
+      const NV = nextMeta.version;                                   // 2.0.1-test, or the real version when --next-rel is given
       const appPath = path.join(dir, 'TexaCore ERP.app'); const userData = path.join(dir, 'userdata');
       ditto(CLIENT200, appPath); wrapClient(appPath);
       const rel = releaseFiles(next);
-      mock = createMockGithub({ port: MOCK_PORT, releases: { 'v2.0.1-test': { files: rel.files } }, latest: 'v2.0.1-test' });
+      mock = createMockGithub({ port: MOCK_PORT, releases: { [`v${NV}`]: { files: rel.files } }, latest: `v${NV}` });
       await mock.listen();
       const shotDir = shots;
       const env = { TEXACORE_HEADLESS: '1', TEXACORE_PORT_BASE: '47391', TEXACORE_USER_DATA: userData, TEXACORE_STUB_TUNNEL: '1', TEXACORE_STUB_MDM: '1', TEXACORE_E2E_AUTOSTART: '1', TEXACORE_E2E_LICENSE: 'free',
@@ -336,7 +338,7 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
       app = launch(appPath, { userData, tag: 'b-client', env });
       let secrets = null; const dataDir = path.join(userData, 'texacore-data');
       const H = () => ({ 'x-texacore-local-secret': secrets.localApiSecret });
-      await R.check('B1 DETECTION + DOWNLOAD: 2.0.0 (unmodified, real feed URLs) finds 2.0.1-test, downloads it, verifies sha512, stages it', async () => {
+      await R.check(`B1 DETECTION + DOWNLOAD: 2.0.0 (unmodified, real feed URLs) finds ${NV}, downloads it, verifies sha512, stages it`, async () => {
         await until(() => /E2E_READY/.test(fs.readFileSync(path.join(WORK, 'app-b-client.log'), 'utf8')), 240000, '2.0.0 to be ready', 1000);
         secrets = JSON.parse(fs.readFileSync(path.join(dataDir, 'secrets.json'), 'utf8'));
         await until(() => /staged v/.test(logOf(userData)), 240000, 'the update to be staged', 1000);
@@ -345,15 +347,15 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
         const chain = mockRows(mock).slice(0, 3);
         if (!/^302 github\.com\/feras1960\/TexaCore-Installer\/releases\/latest\/download\/latest-mac\.yml/.test(chain[0] || '')) throw new Error(`feed request: ${chain[0]}`);
         const blocked = fs.existsSync(path.join(WORK, 'net-b-client.jsonl')) ? fs.readFileSync(path.join(WORK, 'net-b-client.jsonl'), 'utf8').split('\n').filter((l) => /BLOCKED/.test(l)).length : 0;
-        return `feed ${chain[0]}; update available v2.0.1-test; sha512 verified; staged; ${blocked} non-mock outbound attempt(s) were refused by the harness (nothing reached the internet)`;
+        return `feed ${chain[0]}; update available v${NV}; sha512 verified; staged; ${blocked} non-mock outbound attempt(s) were refused by the harness (nothing reached the internet)`;
       });
-      await R.check('B2 THE PROMPT in the installer window: «Update v2.0.1-test is ready — installs on restart» + «Restart now»', async () => {
+      await R.check(`B2 THE PROMPT in the installer window: «Update v${NV} is ready — installs on restart» + «Restart now»`, async () => {
         const u = await request('GET', `http://127.0.0.1:${PORTS.admin}/api/ui-update?shot=b-2.0.0-update-ready.png`, { headers: H() });
         if (!u.json || !u.json.ok) throw new Error(`ui-update ${u.text.slice(0, 200)}`);
         const w = u.json.widget;
-        if (!w.shown || !w.restartVisible || !w.text.includes('2.0.1-test')) throw new Error(`widget ${JSON.stringify(w)}`);
+        if (!w.shown || !w.restartVisible || !w.text.includes(NV)) throw new Error(`widget ${JSON.stringify(w)}`);
         const st = await request('GET', `http://127.0.0.1:${PORTS.admin}/api/update/status`, { headers: H() });
-        if (st.json.state !== 'ready' || st.json.version !== '2.0.1-test') throw new Error(`status ${st.text}`);
+        if (st.json.state !== 'ready' || st.json.version !== NV) throw new Error(`status ${st.text}`);
         // the same banner in Arabic (RTL) and English (LTR) — through the real renderer's language switch (a screenshot of the window each)
         const banners = {};
         for (const lang of ['ar', 'en']) {
@@ -363,14 +365,14 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
                 dir: document.documentElement.dir, ready: w.classList.contains('ready'), shown: getComputedStyle(w).display !== 'none' }; })()` } });
           if (!e.json || !e.json.ok) throw new Error(`ui-eval ${e.text.slice(0, 200)}`);
           const b = e.json.result;
-          if (!b.shown || !b.ready || !b.text.includes('2.0.1-test') || !b.restart) throw new Error(`banner (${lang}) ${JSON.stringify(b)}`);
+          if (!b.shown || !b.ready || !b.text.includes(NV) || !b.restart) throw new Error(`banner (${lang}) ${JSON.stringify(b)}`);
           banners[lang] = b;
         }
         evidence.banners = banners;
         return `"${w.text}" [${w.restartText}] [${w.laterText}] (lang ${w.lang}); AR (${banners.ar.dir}): "${banners.ar.text}" [${banners.ar.restart}]; EN (${banners.en.dir}): "${banners.en.text}" [${banners.en.restart}]; screenshots shots/b-update-banner-{ar,en}.png; GET /api/update/status → ${st.text}`;
       });
       if (ERP) {
-        await R.check('B3 THE PROMPT in the ERP page (what a subscriber sees in the browser): the header pill «Update v2.0.1-test ready» + «Restart to install» (two-click confirm)', async () => {
+        await R.check(`B3 THE PROMPT in the ERP page (what a subscriber sees in the browser): the header pill «Update v${NV} ready» + «Restart to install» (two-click confirm)`, async () => {
           const cc = await request('POST', `http://127.0.0.1:${PORTS.admin}/api/create-local-company`, { headers: H(), body: { companyName: 'OTA Co', adminEmail: 'owner@ota.test', adminPassword: 'OtaPass#2026', localCurrency: 'UAH', mainCurrency: 'USD', country: 'UA', storagePath: path.join(dir, 'tcdb'), dbFileName: 'ota' } });
           if (!cc.json || !cc.json.success) throw new Error(`company: ${cc.text.slice(0, 160)}`);
           const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
@@ -386,7 +388,7 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
             const container = pill.locator('xpath=..');
             const text = (await container.innerText()).replace(/\s+/g, ' ').trim();
             await page.screenshot({ path: path.join(shots, 'b-erp-page-update-pill.png') });
-            if (!/2\.0\.1-test/.test(text) && !/2\.0\.1-test/.test(await container.innerHTML())) throw new Error(`pill text "${text}"`);
+            if (!text.includes(NV) && !(await container.innerHTML()).includes(NV)) throw new Error(`pill text "${text}"`);
             await pill.click(); const armed = (await pill.innerText()).trim();           // 1st click arms (the button turns into «Confirm restart?»)
             await pill.click();                                                          // 2nd click POSTs /api/update/install
             evidence.erpPill = { text, afterFirstClick: armed };
@@ -396,13 +398,13 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
       } else {
         await R.check('B3 THE PROMPT in the ERP page', async () => { throw new Error('skipped: --erp (Playwright) not given'); });
       }
-      await R.check('B4 RESTART TO INSTALL: the app quits, the detached script swaps the bundle (ad-hoc signed, no quarantine) — 2.0.0 becomes 2.0.1-test', async () => {
+      await R.check('B4 RESTART TO INSTALL: the app quits, the detached script swaps the bundle (ad-hoc signed, no quarantine) — 2.0.0 becomes the next version', async () => {
         if (!ERP) { const c = await request('POST', `http://127.0.0.1:${PORTS.admin}/api/update/install`, { headers: H() }); if (!c.json || !c.json.success) throw new Error(`install request ${c.text}`); }
         const ex = await Promise.race([app.exited, sleep(90000).then(() => null)]);
         if (!ex) throw new Error('the app did not quit');
         const il = path.join(userData, 'logs', 'mac-update-install.log');
         await until(() => fs.existsSync(il) && /staging cleaned — done/.test(fs.readFileSync(il, 'utf8')), 120000, 'the installer script', 1000);
-        if (plistVersion(appPath) !== '2.0.1-test' || pkgVersion(appPath) !== '2.0.1-test') throw new Error(`bundle is ${plistVersion(appPath)} / ${pkgVersion(appPath)}`);
+        if (plistVersion(appPath) !== NV || pkgVersion(appPath) !== NV) throw new Error(`bundle is ${plistVersion(appPath)} / ${pkgVersion(appPath)}`);
         const cs = spawnSync('/usr/bin/codesign', ['--verify', '--deep', '--strict', appPath], { encoding: 'utf8' });
         if (cs.status !== 0) throw new Error(`codesign: ${cs.stderr.slice(0, 160)}`);
         if (/com\.apple\.quarantine/.test(spawnSync('/usr/bin/xattr', ['-r', appPath], { encoding: 'utf8' }).stdout)) throw new Error('quarantine set');
@@ -417,7 +419,7 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
         const sec2 = JSON.parse(fs.readFileSync(path.join(dataDir, 'secrets.json'), 'utf8'));
         if (sec2.jwtSecret !== secrets.jwtSecret || sec2.dbPassword !== secrets.dbPassword) throw new Error('secrets changed across the update');
         const v = await request('GET', `http://127.0.0.1:${PORTS.admin}/api/ui-smoke`, { headers: { 'x-texacore-local-secret': sec2.localApiSecret } });
-        if (!v.json || v.json.version !== '2.0.1-test') throw new Error(`running version ${v.json && v.json.version}`);
+        if (!v.json || v.json.version !== NV) throw new Error(`running version ${v.json && v.json.version}`);
         const comp = await request('GET', `http://127.0.0.1:${PORTS.admin}/api/companies`, { headers: { 'x-texacore-local-secret': sec2.localApiSecret } });
         if (!comp.json || !comp.json.companies || !comp.json.companies.some((c) => c.name === 'OTA Co')) throw new Error(`companies ${comp.text.slice(0, 120)}`);
         const aside = fs.readdirSync(userData).filter((n) => /v18-backup|interrupted/.test(n) || /v18-backup|interrupted/.test(n));

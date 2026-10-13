@@ -146,7 +146,6 @@ test-*.js
 verify_*.js
 debug-*.js
 *.rsf
-!Sample.rsf
 
 # ═══ Migrations (synced from main repo) ═══
 migrations/
@@ -171,3 +170,12 @@ baseline/*
 # Encrypted baseline container + its per-build key module (scripts/pack-baseline.js) — never committed
 /build/baseline-pack/
 /src/baseline-key.generated.js
+
+# ═══ Third-party sample data, company files and legacy local secrets — never in this PUBLIC repo (untracked in 2.0.1; the git history still holds the old copies) ═══
+# Sample.rsf is the Rashid program's own sample company; checks that need an .rsf read it from OUTSIDE the repo (see docs/RELEASE_2.0.md)
+Sample.rsf
+*.rsf
+*.tcdb
+.tmp-rsf/
+data/backups/
+.DS_Store

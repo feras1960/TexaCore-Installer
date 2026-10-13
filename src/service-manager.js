@@ -14,9 +14,10 @@ const { getOrCreateSecrets } = require('./secrets');
 const { getVendorAccount } = require('./vendor-support');
 const { PORTS, harnessAllowed } = require('./ports');
 const bootstrap = require('./bootstrap');
-const { validateAdminPassword } = require('./admin-password');
+const { validateAdminPassword, adminPasswordProblem, defaultAdminPasswordFor } = require('./admin-password');
 const netGuard = require('./net-guard');
 const { openBaselineStore } = require('./baseline-store');
+const { TunnelMonitor, redact } = require('./tunnel-monitor');
 
 // ─── Ports (defaults — TEXACORE_PORT_BASE moves the whole block; see ports.js) ───
 const PG_PORT = PORTS.pg;
@@ -26,6 +27,17 @@ const DEFAULT_API_PORT = PORTS.api; // Unified API port (replaces Kong)
 const ADMIN_PORT = PORTS.admin;     // the installer's local admin API (main.js)
 
 // 2.0.0: there are NO fixed JWT secret / anon / service keys any more — every install generates its own (secrets.js).
+
+/**
+ * The web bundle's service worker with `/config.js` removed from its precache manifest (workbox: `{url:"config.js",revision:"…"}`). Exported for the tests.
+ * A worker whose manifest does not list a file deletes that file's stale precache entry when it activates.
+ */
+function stripConfigFromServiceWorker(text) {
+  const entry = '\\{\\s*url\\s*:\\s*["\']config\\.js["\']\\s*,\\s*revision\\s*:\\s*(?:"[^"]*"|\'[^\']*\'|null)\\s*\\}';
+  return String(text)
+    .replace(new RegExp(`,\\s*${entry}(?=\\s*\\])`, 'g'), '')      // the last entry: take the comma before it
+    .replace(new RegExp(`${entry}\\s*,?`, 'g'), '');                  // any other position: take the comma after it
+}
 
 class ServiceManager {
   constructor(appDataDir) {
@@ -47,6 +59,9 @@ class ServiceManager {
 
     this.processes = {};
     this.status = 'stopped'; // stopped | starting | running | error
+    this.tunnel = new TunnelMonitor();   // the honest state of the Cloudflare connector (tunnel-monitor.js)
+    this.logger = null;                  // main.js passes its file logger (heartbeat.log) so tunnel events are diagnosable from the log the owner sends
+    this.hardwareIdProvider = null;      // main.js passes licenseGuard.getHardwareId (register-subdomain compares it with the licence's bound hardware)
 
     // 2.0.0: classify the data dir BEFORE anything reads it. A pre-2.0 (PostgreSQL 15/16) data dir is moved aside whole —
     // never reused, never deleted; an interrupted first run's half-built cluster is moved aside too (see bootstrap.js).
@@ -108,6 +123,32 @@ class ServiceManager {
 
   // ─── Status Check ────────────────────────────────────────────
   isRunning() { return this.status === 'running'; }
+
+  /** Where tunnel events go besides the console: the app log file (set by main.js). Never throws. */
+  setLogger(fn) { this.logger = typeof fn === 'function' ? fn : null; }
+  setHardwareIdProvider(fn) { this.hardwareIdProvider = typeof fn === 'function' ? fn : null; }
+  _tlog(...args) {
+    console.log(...args);
+    if (this.logger) { try { this.logger(...args); } catch { /* logging must never break the tunnel */ } }
+  }
+
+  /** Log a line at most once per `windowMs` per distinct `key` (a reason that keeps repeating must not flood the app log). */
+  _logOnce(key, line, windowMs = 10 * 60 * 1000) {
+    const now = Date.now();
+    if (!this._onceLog) this._onceLog = new Map();
+    const last = this._onceLog.get(key);
+    if (last && now - last < windowMs) return;
+    if (this._onceLog.size > 100) this._onceLog.clear();
+    this._onceLog.set(key, now);
+    this._tlog(line);
+  }
+
+  /** What the launcher shows for the connection: off / starting / connected / error + a reason code (tunnel-monitor.js). */
+  getTunnelStatus() {
+    const cfg = this._readConfig();
+    const snap = this.tunnel.snapshot();
+    return { enabled: !!cfg.enableCloud, subdomain: cfg.subdomain || null, ...snap };
+  }
 
   async getHealth() {
     const pg = !!this.processes.postgres;
@@ -1058,7 +1099,8 @@ class ServiceManager {
         const protocol = req.headers['x-forwarded-proto'] || (req.secure ? 'https' : 'http');
         // THIS machine, browsing by loopback name, with no proxy/CDN header (net-guard.js). Everything else — the public
         // tunnel, a PC on the LAN, a forged Host — is "remote": it gets the page's own /_supabase proxy and NO admin bits.
-        const isLocal = netGuard.isLocalRequest(req);
+        const verdict = netGuard.classifyRequest(req);
+        const isLocal = verdict.local;
 
         let supabaseUrl;
         if (isLocal) {
@@ -1092,6 +1134,13 @@ class ServiceManager {
   localApiBase: "",
   localApiSecret: "${this.localApiSecret}",`
           : '';
+        // WHY the admin bits were withheld, in the app log: one line per distinct reason, rate-limited (a page that keeps loading must not flood the log).
+        // Host, TCP peer, the NAMES of proxy-ish headers (never their values), Sec-Fetch-Site and whether an Origin was sent — nothing secret.
+        if (!(isLocal && sameOrigin)) {
+          const why = [...verdict.reasons, ...((isLocal && !sameOrigin) ? [`sec-fetch-site:${site || 'none'}${origin ? '+origin' : ''}`] : [])];
+          this._logOnce(`configjs:${why.join('|')}`, `[config.js] admin bits WITHHELD (${why.join(', ')}) — host=${String(host).slice(0, 60)} peer=${(req.socket && req.socket.remoteAddress) || '?'} `
+            + `proxyHeaders=[${netGuard.proxyHeaderNames(req.headers).join(',')}] sec-fetch-site=${site || '-'} origin=${origin ? 'yes' : 'no'}`);
+        }
 
         const configJs = `
 // Auto-generated by TexaCore Service Manager
@@ -1105,7 +1154,11 @@ window.__TEXACORE_CONFIG__ = {
 };
 `;
         res.type('application/javascript');
-        res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+        // The runtime config is per install / per request and must NEVER be served from a cache (browser, proxy, service worker). A stale copy
+        // without the admin secret made the Rashid wizard show developer text on a PC upgraded from 1.x.
+        res.set('Cache-Control', 'no-store, max-age=0');
+        res.set('Pragma', 'no-cache');
+        res.set('Expires', '0');
         res.send(configJs);
       });
 
@@ -1179,7 +1232,7 @@ window.__TEXACORE_CONFIG__ = {
             host: `127.0.0.1:${ADMIN_PORT}`,
             'x-texacore-fwd-host': String(req.headers.host || ''),
             'x-texacore-fwd-peer': String((req.socket && req.socket.remoteAddress) || ''),
-            'x-texacore-fwd-proxied': netGuard.hasProxyHeaders(req.headers) ? '1' : '0',
+            'x-texacore-fwd-proxied': netGuard.forwardedFromElsewhere(req.headers).forwarded ? '1' : '0',
           },
         };
 
@@ -1216,16 +1269,55 @@ window.__TEXACORE_CONFIG__ = {
       };
       app.use(NO_STORE);
 
-      // Serve static files
-      app.use(express.static(frontendPath));
-
-      // Handle SPA routing (fallback to index.html) — shell is never cached
-      app.use((req, res) => {
+      // The shell is served with a VERSIONED config script: <script src="/config.js?v=<app version>-<boot id>">. A request for that exact URL cannot be answered
+      // by a service-worker precache entry (the entry is for the bare path) nor by a browser / proxy cache entry of an earlier install, so a page opened by an
+      // OLD service worker still gets this boot's /config.js (with the admin secret) on its very first load. (The bundle's index.html carries the bare tag.)
+      const bootId = require('crypto').randomBytes(6).toString('hex');
+      let shellVersion = '';
+      try { shellVersion = require('electron').app.getVersion() || ''; } catch { /* dev */ }
+      this.configScriptQuery = `v=${shellVersion || '0'}-${bootId}`;
+      let _indexCache = { mtimeMs: 0, html: '' };
+      const indexHtml = () => {
+        const f = path.join(frontendPath, 'index.html');
+        const st = fs.statSync(f);
+        if (st.mtimeMs !== _indexCache.mtimeMs) {
+          const raw = fs.readFileSync(f, 'utf8');
+          _indexCache = { mtimeMs: st.mtimeMs, html: raw.replace(/(<script\b[^>]*\bsrc=["'])\/config\.js(?:\?[^"']*)?(["'])/i, `$1/config.js?${this.configScriptQuery}$2`) };
+        }
+        return _indexCache.html;
+      };
+      const sendShell = (req, res) => {
         res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
         res.set('Pragma', 'no-cache');
         res.set('Expires', '0');
-        res.sendFile(path.join(frontendPath, 'index.html'));
+        try { res.type('html').send(indexHtml()); } catch { res.sendFile(path.join(frontendPath, 'index.html')); }
+      };
+      app.get(['/', '/index.html'], sendShell);
+
+      // The service worker: the web bundle precaches /config.js (a revision that never changes, so the first copy it ever stored stays for good, across
+      // upgrades). Older bundles still do — so the worker is served WITHOUT that entry; its activation deletes the stale copy from the precache.
+      let _swCache = { mtimeMs: 0, text: '' };
+      app.get('/sw.js', (req, res, next) => {
+        try {
+          const f = path.join(frontendPath, 'sw.js');
+          const st = fs.statSync(f);
+          if (st.mtimeMs !== _swCache.mtimeMs) _swCache = { mtimeMs: st.mtimeMs, text: stripConfigFromServiceWorker(fs.readFileSync(f, 'utf8')) };
+          res.set('Cache-Control', 'no-cache, no-store, must-revalidate');
+          res.set('Pragma', 'no-cache'); res.set('Expires', '0');
+          res.type('application/javascript').send(_swCache.text);
+        } catch { next(); }
       });
+
+      // Serve static files (the hashed bundle assets never change under their name: immutable; everything else revalidates as before)
+      app.use(express.static(frontendPath, {
+        index: false,
+        setHeaders: (res, filePath) => {
+          if (/[\\/]assets[\\/]/.test(filePath)) res.set('Cache-Control', 'public, max-age=31536000, immutable');
+        },
+      }));
+
+      // Handle SPA routing (fallback to index.html) — shell is never cached
+      app.use(sendShell);
 
       this.frontendServer = app.listen(port, '0.0.0.0', () => {
         console.log(`[ServiceManager] Frontend server listening on port ${port}`);
@@ -1294,6 +1386,7 @@ window.__TEXACORE_CONFIG__ = {
     // Test/launch-check stub: never open a tunnel (and never call the cloud) from a harness run.
     if (process.env.TEXACORE_STUB_TUNNEL === '1' && harnessAllowed(require('electron').app.isPackaged)) {
       console.log('[ServiceManager] TEXACORE_STUB_TUNNEL=1 — cloudflared stubbed (launch check)');
+      this.tunnel.off('stub');
       return;
     }
 
@@ -1308,11 +1401,13 @@ window.__TEXACORE_CONFIG__ = {
 
     if (!config.enableCloud) {
       console.log('[ServiceManager] Cloud access not enabled — skipping cloudflared');
+      this.tunnel.off('disabled');
       return;
     }
 
     if (!config.subdomain) {
       console.log('[ServiceManager] No subdomain configured — skipping cloudflared');
+      this.tunnel.off('no_subdomain');
       return;
     }
 
@@ -1325,12 +1420,14 @@ window.__TEXACORE_CONFIG__ = {
     // created and may not have propagated to public DNS yet, but cloudflared
     // still connects to the edge via the token regardless.
     if (process.env.TEXACORE_CLOUDFLARED_BIN && harnessAllowed(require('electron').app.isPackaged)) skipVerify = true;   // release check: no lookups of the real domain
+    if (process.env.TEXACORE_TUNNEL_SKIP_DNS === '1' && harnessAllowed(require('electron').app.isPackaged)) skipVerify = true;   // release check with the REAL bundled binary
     if (!skipVerify) {
       try {
         await require('dns').promises.resolve4(`${config.subdomain}.texacore.ai`);
       } catch (dnsErr) {
         if (dnsErr && (dnsErr.code === 'ENOTFOUND' || dnsErr.code === 'ENODATA')) {
-          console.warn(`[ServiceManager] ⚠️ Subdomain "${config.subdomain}.texacore.ai" no longer resolves — it was deleted. Skipping tunnel; create a new subdomain from the app.`);
+          this._tlog(`[Tunnel] ⚠️ Subdomain "${config.subdomain}.texacore.ai" no longer resolves — it was deleted. Skipping tunnel; create a new subdomain from the app.`);
+          this.tunnel.off('subdomain_deleted');
           return;
         }
       }
@@ -1350,10 +1447,13 @@ window.__TEXACORE_CONFIG__ = {
     try {
       const https = require('https');
       const autoFixResult = await new Promise((resolve, reject) => {
+        // register-subdomain refuses a licence bound to hardware unless `machineId` IS that hardware id (not the hostname)
+        let hw = null; try { hw = this.hardwareIdProvider ? this.hardwareIdProvider() : null; } catch { /* fall back to the hostname */ }
         const postData = JSON.stringify({
           licenseKey: config.licenseKey || 'desktop-user',
           subdomain: config.subdomain,
-          machineId: require('os').hostname(),
+          machineId: hw || require('os').hostname(),
+          hostname: require('os').hostname(),
           companyName: 'TexaCore Desktop'
         });
         const url = new URL('https://wzkklenfsaepegymfxfz.supabase.co/functions/v1/register-subdomain');
@@ -1380,13 +1480,13 @@ window.__TEXACORE_CONFIG__ = {
       } else {
         console.error('[ServiceManager] ❌ Token refresh failed:', autoFixResult.error || 'Unknown error');
         // If we have an old token, try it anyway
-        if (!config.tunnelToken) return;
+        if (!config.tunnelToken) { this._tlog('[Tunnel] ❌ no tunnel token and the cloud did not issue one:', autoFixResult.error || 'unknown'); this.tunnel.fail('token_invalid', `no tunnel token; ${autoFixResult.error || 'the cloud did not issue one'}`); return; }
         console.log('[ServiceManager] Falling back to existing token...');
       }
     } catch (fixErr) {
       console.error('[ServiceManager] ❌ Token refresh network error:', fixErr.message);
       // If we have an old token, try it anyway
-      if (!config.tunnelToken) return;
+      if (!config.tunnelToken) { this._tlog('[Tunnel] ❌ no tunnel token and the cloud could not be reached:', fixErr.message); this.tunnel.fail('token_invalid', `no tunnel token; ${fixErr.message}`); return; }
       console.log('[ServiceManager] Falling back to existing token...');
     }
     } // end token re-register (skipped on fast reconnect)
@@ -1395,9 +1495,9 @@ window.__TEXACORE_CONFIG__ = {
     const isWin = process.platform === 'win32';
     const cfExe = isWin ? 'cloudflared.exe' : 'cloudflared';
     let cloudflaredBin = null;
-    
+
     const possiblePaths = [];
-    // 1. Bundled with app
+    // 1. Bundled with app (macOS: bin/macos-arm64/cloudflared/cloudflared since 2.0.1 — 2.0.0 shipped without it)
     possiblePaths.push(path.join(this.binsDir, 'cloudflared', cfExe));
     // 2. System paths
     if (isWin) {
@@ -1410,7 +1510,7 @@ window.__TEXACORE_CONFIG__ = {
       possiblePaths.push('/usr/local/bin/cloudflared');
       possiblePaths.push('/usr/bin/cloudflared');
     }
-    
+
     // (isolated release-check runs only: a stand-in executable, so the way the tunnel process is started can be inspected without a real tunnel)
     if (process.env.TEXACORE_CLOUDFLARED_BIN && harnessAllowed(require('electron').app.isPackaged) && fs.existsSync(process.env.TEXACORE_CLOUDFLARED_BIN)) {
       cloudflaredBin = process.env.TEXACORE_CLOUDFLARED_BIN;
@@ -1425,66 +1525,97 @@ window.__TEXACORE_CONFIG__ = {
         const findCmd = isWin ? 'where cloudflared' : 'which cloudflared';
         cloudflaredBin = execSync(findCmd, { timeout: 3000 }).toString().trim().split('\n')[0].trim();
         if (!fs.existsSync(cloudflaredBin)) cloudflaredBin = null;
-      } catch {
-        console.warn('[ServiceManager] cloudflared not found — cloud access unavailable');
-        return;
-      }
+      } catch { cloudflaredBin = null; }
+    }
+    if (!cloudflaredBin) {
+      this._tlog(`[Tunnel] ❌ cloudflared not found — cloud access is unavailable. Looked in: ${possiblePaths.join(', ')} and on PATH`);
+      this.tunnel.fail('binary_missing', `looked in ${possiblePaths[0]} and the usual system paths`);
+      return;
     }
 
-    console.log(`[ServiceManager] Starting Cloudflare Tunnel (${config.subdomain}.texacore.ai)...`);
-    console.log(`[ServiceManager] cloudflared binary: ${cloudflaredBin}`);
+    // The binary must actually RUN here (wrong architecture, a blocked / damaged file, a missing execute bit): ask it for its version first.
+    let cfVersion = null;
+    try {
+      const out = require('child_process').execFileSync(cloudflaredBin, ['--version'], { timeout: 10000, encoding: 'utf8', stdio: ['ignore', 'pipe', 'pipe'] });
+      cfVersion = (/version\s+(\S+)/i.exec(out) || [])[1] || String(out).trim().slice(0, 40);
+    } catch (e) {
+      this._tlog(`[Tunnel] ❌ cloudflared cannot run (${cloudflaredBin}): ${redact(e.message).split('\n')[0]}`);
+      this.tunnel.fail('binary_unrunnable', `${cloudflaredBin}: ${e.message}`);
+      return;
+    }
+
+    this._tlog(`[Tunnel] starting Cloudflare tunnel for ${config.subdomain}.texacore.ai — cloudflared ${cfVersion} (${cloudflaredBin})`);
     const logFile = path.join(this.logDir, 'cloudflared.log');
 
-    const frontendPort = (this.frontendServer && this.frontendServer.address()) 
-      ? this.frontendServer.address().port 
+    const frontendPort = (this.frontendServer && this.frontendServer.address())
+      ? this.frontendServer.address().port
       : 8080;
     console.log(`[ServiceManager] Tunnel will route to localhost:${frontendPort}`);
+
+    this.tunnel.setSecrets([config.tunnelToken]);
+    let attempts = 0;                       // consecutive failed runs → growing delay before the next try
+    let connectedAt = 0;
 
     const startTunnelProcess = () => {
       // The tunnel token is a credential: it goes to cloudflared through its environment (TUNNEL_TOKEN), NOT as `--token <value>` — a command line is
       // visible to every process on the machine (ps), the environment of a process is not.
-      const proc = spawn(cloudflaredBin, ['tunnel', '--no-autoupdate', 'run'], {
-        stdio: ['ignore', 'pipe', 'pipe'],
-        env: { ...process.env, TUNNEL_TOKEN: config.tunnelToken },
-      });
+      let proc;
+      try {
+        proc = spawn(cloudflaredBin, ['tunnel', '--no-autoupdate', 'run'], {
+          stdio: ['ignore', 'pipe', 'pipe'],
+          env: { ...process.env, TUNNEL_TOKEN: config.tunnelToken },
+        });
+      } catch (e) {
+        this._tlog(`[Tunnel] ❌ could not start cloudflared: ${redact(e.message, [config.tunnelToken])}`);
+        this.tunnel.fail('spawn_failed', e.message);
+        return;
+      }
+      this.tunnel.begin({ binary: cloudflaredBin, version: cfVersion, pid: proc.pid });
+      this._tlog(`[Tunnel] cloudflared started (pid ${proc.pid}, attempt ${attempts + 1})`);
+      let shown = 0;
 
-      const logStream = fs.createWriteStream(logFile, { flags: 'a' });
-      proc.stdout.on('data', (data) => {
-        const line = data.toString().trim();
-        logStream.write(line + '\n');
-        if (line.includes('ERR') || line.includes('error') || line.includes('failed')) {
-          console.error(`[cloudflared] ${line}`);
-        } else if (line.includes('Registered') || line.includes('connected') || line.includes('serving')) {
-          console.log(`[cloudflared] ✅ ${line}`);
+      const logStream = fs.createWriteStream(logFile, { flags: 'a', mode: 0o600 });
+      const onData = (tag) => (data) => {
+        for (const raw of data.toString().split('\n')) {
+          const line = this.tunnel.feed(raw);               // redacted
+          if (!line) continue;
+          logStream.write(`${tag}${line}\n`);
+          // what is worth keeping in the app log: the first lines of every run, every error / warning, and every (un)registration
+          if (shown < 12 || /\b(ERR|WRN|FTL)\b|Registered tunnel connection|Unregistered tunnel connection|not valid/.test(line)) {
+            if (shown < 40) this._tlog(`[cloudflared] ${line.slice(0, 300)}`);
+            shown++;
+          }
         }
-      });
-      proc.stderr.on('data', (data) => {
-        const line = data.toString().trim();
-        logStream.write(`[stderr] ${line}\n`);
-        if (line.includes('ERR') || line.includes('error') || line.includes('failed')) {
-          console.error(`[cloudflared] ${line}`);
-        } else if (line.includes('Registered') || line.includes('connected') || line.includes('Connection')) {
-          console.log(`[cloudflared] ✅ ${line}`);
-        } else {
-          console.log(`[cloudflared] ${line}`);
-        }
-      });
+        if (this.tunnel.state === 'connected' && !connectedAt) connectedAt = Date.now();
+      };
+      proc.stdout.on('data', onData(''));
+      proc.stderr.on('data', onData('[stderr] '));
 
-      proc.on('error', err => {
-        console.error('[ServiceManager] cloudflared spawn error:', err.message);
+      proc.on('error', (err) => {
+        this._tlog('[Tunnel] ❌ cloudflared spawn error:', redact(err.message, [config.tunnelToken]));
         this.processes.cloudflared = null;
+        this.tunnel.fail('spawn_failed', err.message);
       });
       proc.on('exit', (code, signal) => {
-        console.log(`[ServiceManager] cloudflared exited — code: ${code}, signal: ${signal}`);
+        const snap = this.tunnel.snapshot();
         this.processes.cloudflared = null;
-        
-        if (code !== 0 && code !== null && signal !== 'SIGTERM' && signal !== 'SIGKILL') {
-          console.log('[ServiceManager] cloudflared crashed — restarting in 5s...');
+        const wasStopped = proc.texaStopRequested === true || signal === 'SIGTERM' || signal === 'SIGKILL';   // cloudflared traps SIGTERM and exits 0 — the flag says WE asked
+        this.tunnel.exited({ code, signal, expected: wasStopped });
+        const after = this.tunnel.snapshot();
+        this._tlog(`[Tunnel] cloudflared exited — code ${code}, signal ${signal}; state ${after.state}${after.reason ? ' (' + after.reason + ')' : ''}${after.detail ? ' — ' + after.detail : ''}`);
+        try { logStream.end(); } catch { /* ignore */ }
+        if (wasStopped) return;
+        // a token cloudflared itself calls invalid will never work: no restart loop, the user must re-register the subdomain
+        if (after.reason === 'token_invalid') return;
+        if (code !== null && code !== 0 && this.status === 'running') {
+          if (connectedAt && Date.now() - connectedAt > 60000) attempts = 0;   // it had been up for a while: start the backoff over
+          connectedAt = 0;
+          attempts++;
+          const delay = Math.min(5000 * 2 ** (attempts - 1), 5 * 60 * 1000);
+          this._tlog(`[Tunnel] restarting in ${Math.round(delay / 1000)}s (attempt ${attempts + 1})`);
           setTimeout(() => {
-            if (!this.processes.cloudflared && this.status === 'running') {
-              startTunnelProcess();
-            }
-          }, 5000);
+            if (!this.processes.cloudflared && this.status === 'running' && this._cloudWanted()) startTunnelProcess();
+          }, delay);
         }
       });
 
@@ -1492,7 +1623,12 @@ window.__TEXACORE_CONFIG__ = {
     };
 
     startTunnelProcess();
-    console.log(`[ServiceManager] Cloudflare Tunnel started — https://${config.subdomain}.texacore.ai`);
+  }
+
+  /** Is cloud access still switched on (the user may have turned it off while a restart was pending)? */
+  _cloudWanted() {
+    const cfg = this._readConfig();
+    return !!(cfg.enableCloud && cfg.subdomain);
   }
 
   // ─── Stop Cloudflare Tunnel (disable cloud access now) ───────
@@ -1501,8 +1637,10 @@ window.__TEXACORE_CONFIG__ = {
   // stays down.
   stopCloudflared() {
     const proc = this.processes.cloudflared;
-    if (!proc) return false;
+    if (!proc) { this.tunnel.off('stopped'); return false; }
     this.processes.cloudflared = null;
+    this.tunnel.off('stopped');
+    proc.texaStopRequested = true;
     try { proc.kill('SIGTERM'); } catch { /* ignore */ }
     setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } }, 2000);
     console.log('[ServiceManager] ☁︎✖ Cloudflare tunnel stopped — cloud access disabled');
@@ -1602,6 +1740,7 @@ window.__TEXACORE_CONFIG__ = {
   _killProcess(name) {
     const proc = this.processes[name];
     if (proc) {
+      proc.texaStopRequested = true;       // an exit we asked for (the tunnel monitor must not call it an error)
       try {
         proc.kill('SIGTERM');
         setTimeout(() => { try { proc.kill('SIGKILL'); } catch {} }, 3000);
@@ -1695,8 +1834,9 @@ window.__TEXACORE_CONFIG__ = {
   // hash in both config (source of truth, survives restore) and the DB. No old
   // password required — physical control of the installer is the authority.
   async setAdminPassword(plain) {
-    const bad = validateAdminPassword(plain, { licenseKey: this._readConfig().licenseKey });
-    if (bad) throw new Error(bad);
+    const licenseKey = this._readConfig().licenseKey;
+    const bad = validateAdminPassword(plain, { licenseKey });
+    if (bad) { const e = new Error(bad); e.code = adminPasswordProblem(plain, { licenseKey }); throw e; }
     return this._withPgClient(async (client) => {
       const r = await client.query(`SELECT extensions.crypt($1, extensions.gen_salt('bf')) AS h`, [String(plain)]);
       const hash = r.rows[0].h;
@@ -1714,9 +1854,9 @@ window.__TEXACORE_CONFIG__ = {
     });
   }
 
-  // Push the current admin password into the DB. Custom hash from config if set, otherwise default = the license key
-  // (unique per install, the manager has it). With NEITHER there is no password at all and the portal stays locked —
-  // the old "admin" fallback is gone. The table and verify_admin_password() come from src/bootstrap/local_extras.sql.
+  // Push the current admin password into the DB. Custom hash from config if set, otherwise default = the license key — but only a PAID / TRIAL key,
+  // which is unique and secret to this install (a FREE key is not: see admin-password.js). With NEITHER there is no password at all and the portal stays
+  // locked — the old "admin" fallback is gone. The table and verify_admin_password() come from src/bootstrap/local_extras.sql.
   // Runs on startup + after every restore.
   async syncAdminPassword() {
     const cfg = this._readConfig();
@@ -1729,12 +1869,12 @@ window.__TEXACORE_CONFIG__ = {
              ON CONFLICT (id) DO UPDATE SET password_hash = EXCLUDED.password_hash, updated_at = now()`,
             [cfg.adminPasswordHash]
           );
-        } else if (cfg.licenseKey) {
+        } else if (defaultAdminPasswordFor(cfg.licenseKey)) {
           await client.query(
             `INSERT INTO public.platform_admin(id, password_hash, updated_at)
              VALUES (1, extensions.crypt($1, extensions.gen_salt('bf')), now())
              ON CONFLICT (id) DO UPDATE SET password_hash = extensions.crypt($1, extensions.gen_salt('bf')), updated_at = now()`,
-            [String(cfg.licenseKey)]
+            [defaultAdminPasswordFor(cfg.licenseKey)]
           );
         } else {
           await client.query(
@@ -1744,7 +1884,7 @@ window.__TEXACORE_CONFIG__ = {
         }
         try { await client.query(`NOTIFY pgrst, 'reload schema'`); } catch { /* ignore */ }
       });
-      console.log(`[ServiceManager] 🔐 Admin portal password synced (${cfg.adminPasswordHash ? 'custom' : cfg.licenseKey ? 'default = license key' : 'none — portal locked'}).`);
+      console.log(`[ServiceManager] 🔐 Admin portal password synced (${cfg.adminPasswordHash ? 'custom' : defaultAdminPasswordFor(cfg.licenseKey) ? 'default = license key' : 'none — portal locked until the manager sets a password'}).`);
     } catch (e) {
       console.warn('[ServiceManager] syncAdminPassword failed (non-fatal):', e.message);
     }
@@ -1776,6 +1916,7 @@ window.__TEXACORE_CONFIG__ = {
 }
 
 // Export constants for use in main.js (ports only — 2.0.0 has no fixed keys or secrets to export)
+ServiceManager.stripConfigFromServiceWorker = stripConfigFromServiceWorker;
 ServiceManager.PG_PORT = PG_PORT;
 ServiceManager.POSTGREST_PORT = DEFAULT_POSTGREST_PORT;
 ServiceManager.GOTRUE_PORT = DEFAULT_GOTRUE_PORT;

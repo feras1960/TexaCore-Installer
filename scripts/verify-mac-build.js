@@ -12,6 +12,8 @@
 //   M3  Info.plist: version == package.json, arm64 Mach-O executable, bundle id
 //   M4  the dmg is mounted read-only: the same app is inside, its signature verifies, an /Applications link is present; the executable is
 //       byte-identical to the one in the zip
+//   M6  the Cloud Access connector (cloudflared) is in the zip's app AND in the dmg's: the pinned file (sha256), still carrying Cloudflare's Developer ID signature, and it RUNS (`--version` = the pinned release).
+//       2.0.0 shipped without it: the public link answered Cloudflare error 1033 and the launcher still said «connected»
 //   M5  the app code inside the zip is byte-identical to the repo's src/ after obfuscation is accounted for (file list equals; no source maps,
 //       no plaintext SQL baseline) — via the same gate afterPack uses (verifyPacked)
 // ════════════════════════════════════════════════════════════════
@@ -98,6 +100,8 @@ const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8'
       catch (e) { throw new Error(`INVALID SIGNATURE in the dmg: ${String(e.stderr || e.message).trim().split('\n').slice(0, 3).join(' | ')}`); }
       const exe = path.join('Contents', 'MacOS', 'TexaCore ERP');
       if (sha(path.join(dapp, exe)) !== sha(path.join(zapp, exe))) throw new Error('the executable in the dmg differs from the one in the zip');
+      const cfRel = path.join('Contents', 'Resources', 'bin', 'cloudflared', 'cloudflared');
+      if (!fs.existsSync(path.join(dapp, cfRel)) || sha(path.join(dapp, cfRel)) !== sha(path.join(zapp, cfRel))) throw new Error('cloudflared is missing from the dmg or differs from the zip\'s');
       return 'dmg app signature valid; executable identical to the zip\'s';
     });
 
@@ -106,6 +110,16 @@ const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8'
       const problems = verifyPacked({ resourcesDir, appCodeDir: path.join(resourcesDir, 'app'), repoRoot: ROOT, platform: 'darwin', scanRoot: zapp, expectObfuscated: true });
       if (problems.length) throw new Error(problems.join('; '));
       return 'verifyPacked: clean';
+    });
+
+    await R.check('M6. cloudflared is in the packaged app: the pinned file, Cloudflare\'s Developer ID signature intact, and it RUNS from there', async () => {
+      const { verifyCloudflaredFile } = require('./prepare-cloudflared-mac');
+      const pinMod = require('./lib/cloudflared-pin');
+      const cf = path.join(zapp, 'Contents', 'Resources', 'bin', 'cloudflared', 'cloudflared');
+      const bad = verifyCloudflaredFile(cf);
+      if (bad.length) throw new Error(bad.join('; '));
+      const v = run(cf, ['--version']).trim();
+      return `${v}; sha256 ${pinMod.mac.sha256.slice(0, 16)}… = the pin; signed by ${pinMod.mac.authority}`;
     });
   } finally {
     cleanup();

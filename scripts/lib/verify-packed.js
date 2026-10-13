@@ -27,9 +27,10 @@ const sha256File = (f) => crypto.createHash('sha256').update(fs.readFileSync(f))
  * @param {'darwin'|'win32'} o.platform
  * @param {boolean} [o.expectObfuscated] the main-process code in the package must be obfuscated and come from exactly the repo's sources
  * @param {string} [o.scanRoot]    the whole packaged app (default: resourcesDir) — scanned for plaintext database DDL
+ * @param {{sha256:string, bytes:number}} [o.cloudflaredPin] the pinned macOS cloudflared (override for tests)
  * @returns {string[]} problems (empty = OK)
  */
-function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform, scanRoot, expectObfuscated = false }) {
+function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform, scanRoot, expectObfuscated = false, cloudflaredPin = require('./cloudflared-pin').mac }) {
   const problems = [];
   const exe = (n) => (platform === 'win32' ? `${n}.exe` : n);
 
@@ -123,6 +124,20 @@ function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform, scanRoot, 
     if (!fs.existsSync(path.join(bin, rel))) problems.push(`bin/${rel} is missing`);
   }
   if (!fs.existsSync(path.join(bin, 'pg', 'share')) && !fs.existsSync(path.join(bin, 'pg', 'share', 'postgresql'))) problems.push('bin/pg/share is missing');
+
+  // ── the Cloud Access connector: 2.0.0 (mac) shipped without cloudflared, so the public link answered Cloudflare error 1033. Windows has bin/cloudflared/cloudflared.exe
+  //    in the repo; the mac one is pinned (scripts/lib/cloudflared-pin.js). A mac package without exactly that file, or with it not executable, is refused. ──
+  if (platform === 'darwin') {
+    const cf = path.join(bin, 'cloudflared', 'cloudflared');
+    if (!fs.existsSync(cf)) problems.push('bin/cloudflared/cloudflared is missing — Cloud Access would be dead (Cloudflare error 1033); run scripts/prepare-cloudflared-mac.js');
+    else {
+      const st = fs.statSync(cf);
+      if (st.size !== cloudflaredPin.bytes || sha256File(cf) !== cloudflaredPin.sha256) problems.push('the packaged bin/cloudflared/cloudflared is not the pinned build (scripts/lib/cloudflared-pin.js)');
+      if ((st.mode & 0o111) === 0) problems.push('the packaged bin/cloudflared/cloudflared is not executable');
+    }
+  } else if (!fs.existsSync(path.join(bin, 'cloudflared', 'cloudflared.exe'))) {
+    problems.push('bin/cloudflared/cloudflared.exe is missing — Cloud Access would be dead');
+  }
 
   // ── nothing from 1.x that would replay old migrations ──
   const mig = path.join(resourcesDir, 'migrations', 'migrations.json');

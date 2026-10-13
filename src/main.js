@@ -652,12 +652,7 @@ class HeartbeatSender {
       try {
         // ⚠️ LIMIT 1 يجب أن يختار «باقة واحدة» لا «عنصراً واحداً» — الصيغة القديمة
         // وضعته بعد jsonb_array_elements_text فقصّت الموديولات لعنصر واحد.
-        const out = await psqlExec(
-          PSQL_PREFIX +
-          "SELECT COALESCE((SELECT jsonb_agg(DISTINCT m ORDER BY m) FROM jsonb_array_elements_text(sp.included_modules) m), '[]'::jsonb) " +
-          "FROM public.tenant_subscriptions ts JOIN public.subscription_plans sp ON sp.id=ts.plan_id " +
-          "WHERE ts.status IN ('active','trial','grace') ORDER BY ts.updated_at DESC NULLS LAST LIMIT 1;"
-        );
+        const out = await psqlExec(PSQL_PREFIX + require('./heartbeat-queries').ACTIVE_MODULES_SQL);
         // خذ أول سطر يبدأ بـ[ (مصفوفة JSON) — مناعة ضد أسطر الصدى
         const line = String(out || '').split('\n').map(s => s.trim())
           .find(s => s.startsWith('['));
@@ -1215,6 +1210,7 @@ ipcMain.handle('get-state', async () => {
     port: config.port || APP_PORT,
     localIp: getLocalIpAddress(),
     osLocale: app.getLocale(),
+    tunnel: svcManager ? svcManager.getTunnelStatus() : null,   // the real connector state (never inferred from "services running")
   };
 });
 
@@ -1277,7 +1273,9 @@ ipcMain.handle('register-subdomain', async (_, subdomain) => {
     const result = await httpPost(`${LICENSING_URL}/register-subdomain`, {
       licenseKey,
       subdomain,
-      machineId: require('os').hostname(),
+      // register-subdomain refuses a licence bound to hardware unless machineId IS that hardware id (the hostname never matches)
+      machineId: (() => { try { if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR); return licenseGuard.getHardwareId(); } catch { return require('os').hostname(); } })(),
+      hostname: require('os').hostname(),
       companyName: 'TexaCore Local Setup' // Optional, could read from config if saved earlier
     });
 
@@ -1824,9 +1822,10 @@ function adminRequestIsLocal(req) {
   const fwdPeer = req.headers['x-texacore-fwd-peer'];
   const fwdProxied = req.headers['x-texacore-fwd-proxied'];
   if (fwdHost === undefined && fwdPeer === undefined && fwdProxied === undefined) {
-    return netGuard.isLoopbackHost(req.headers.host) && !netGuard.hasProxyHeaders(req.headers);
+    return netGuard.isLoopbackHost(req.headers.host) && !netGuard.forwardedFromElsewhere(req.headers).forwarded;
   }
-  return netGuard.isLoopbackHost(fwdHost) && netGuard.isLoopbackAddress(fwdPeer) && fwdProxied === '0';
+  // (the UI server computed "forwarded from elsewhere" with the same rule; its client may be this machine's own LAN address, not only loopback)
+  return netGuard.isLoopbackHost(fwdHost) && netGuard.isThisMachineAddress(fwdPeer) && fwdProxied === '0';
 }
 // ─── Open a .tcdb: restore it into the running database and keep syncing back to the SAME file ───────────────
 // Shared by the file-dialog route (GET /api/open-tcdb) and the launcher's upgrade notice («فتح» beside a company file named in the old config).
@@ -2372,8 +2371,7 @@ const httpServer = http.createServer(async (req, res) => {
       if (svcManager) {
         // Kill existing
         if (svcManager.processes.cloudflared) {
-          svcManager.processes.cloudflared.kill('SIGTERM');
-          svcManager.processes.cloudflared = null;
+          svcManager.stopCloudflared();
           await new Promise(r => setTimeout(r, 1000));
         }
         // Restart — reuse the existing token (same tunnel id) for a fast,
@@ -2381,10 +2379,10 @@ const httpServer = http.createServer(async (req, res) => {
         await svcManager.startCloudflared({ skipReregister: true });
 
         await new Promise(r => setTimeout(r, 2000)); // Wait for it to connect
-        const isRunning = svcManager.processes.cloudflared && !svcManager.processes.cloudflared.killed;
+        const tunnel = svcManager.getTunnelStatus();   // the real state: «running» used to mean only "a process object exists"
         
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, running: !!isRunning }));
+        res.end(JSON.stringify({ success: true, running: tunnel.state === 'connected' || tunnel.state === 'starting', connected: tunnel.state === 'connected', tunnel }));
       } else {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: 'Service manager not initialized' }));
@@ -2413,7 +2411,8 @@ const httpServer = http.createServer(async (req, res) => {
       const result = await httpPost(`${LICENSING_URL}/register-subdomain`, {
         licenseKey: config.licenseKey || 'desktop-user',
         subdomain,
-        machineId: require('os').hostname(),
+        machineId: (() => { try { if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR); return licenseGuard.getHardwareId(); } catch { return require('os').hostname(); } })(),
+        hostname: require('os').hostname(),
         companyName: 'TexaCore Desktop'
       });
       
@@ -2427,8 +2426,7 @@ const httpServer = http.createServer(async (req, res) => {
         // Kill existing and restart
         if (svcManager) {
           if (svcManager.processes.cloudflared) {
-            svcManager.processes.cloudflared.kill('SIGTERM');
-            svcManager.processes.cloudflared = null;
+            svcManager.stopCloudflared();
             await new Promise(r => setTimeout(r, 1000));
           }
           // We just fetched + saved a fresh token above — reuse it (don't
@@ -2436,14 +2434,16 @@ const httpServer = http.createServer(async (req, res) => {
           await svcManager.startCloudflared({ skipReregister: true });
           await new Promise(r => setTimeout(r, 3000));
           
-          const isRunning = svcManager.processes.cloudflared && !svcManager.processes.cloudflared.killed;
+          const tunnel = svcManager.getTunnelStatus();
           
           res.writeHead(200, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ 
             success: true, 
             subdomain,
             url: `https://${subdomain}.texacore.ai`,
-            tunnelRunning: !!isRunning,
+            tunnelRunning: tunnel.state === 'connected' || tunnel.state === 'starting',
+            tunnelConnected: tunnel.state === 'connected',
+            tunnel,
             tokenLength: result.tunnel_token.length
           }));
         } else {
@@ -2812,7 +2812,7 @@ ipcMain.handle('set-cloud-access', async (_, enabled) => {
       }
     }
     fileLog(`[TexaCore] Cloud access ${enabled ? 'ENABLED' : 'DISABLED'} by user`);
-    return { success: true, enabled: !!enabled };
+    return { success: true, enabled: !!enabled, tunnel: svcManager ? svcManager.getTunnelStatus() : null };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -2828,7 +2828,7 @@ ipcMain.handle('set-admin-password', async (_, newPassword) => {
     fileLog('[TexaCore] Admin portal password changed by user');
     return { success: true };
   } catch (err) {
-    return { success: false, error: err.message };
+    return { success: false, error: err.message, code: err.code || null, minLength: require('./admin-password').MIN_LENGTH };
   }
 });
 
@@ -2836,7 +2836,9 @@ ipcMain.handle('set-admin-password', async (_, newPassword) => {
 ipcMain.handle('get-admin-password-status', async () => {
   try {
     const cfg = loadConfig();
-    return { success: true, customized: !!cfg.adminPasswordHash };
+    const ap = require('./admin-password');
+    // the window words its text from these (the policy has ONE source: admin-password.js)
+    return { success: true, customized: !!cfg.adminPasswordHash, hasDefault: !!ap.defaultAdminPasswordFor(cfg.licenseKey), minLength: ap.MIN_LENGTH };
   } catch (err) {
     return { success: false, error: err.message };
   }
@@ -3365,6 +3367,8 @@ app.whenReady().then(() => {
   } catch (e) { fileLog('[TexaCore] secrets vault not initialised:', e.message); }
   try {
     svcManager = new ServiceManager(app.getPath('userData'));   // classifies the data dir first (a 1.x dir is moved aside)
+    svcManager.setLogger(fileLog);                                // tunnel events (start / exit code / last lines, redacted) go to heartbeat.log too
+    svcManager.setHardwareIdProvider(() => { if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR); return licenseGuard.getHardwareId(); });
   } catch (e) {
     if (e && e.code === 'SECRETS_UNAVAILABLE') {
       fileLog('[TexaCore] ❌', e.message);
@@ -3480,10 +3484,13 @@ app.whenReady().then(() => {
         });
         req.on('error', e => reject(e));
         req.on('timeout', () => { req.destroy(); reject(new Error('Timeout')); });
-        req.write(JSON.stringify({ license_key: config.licenseKey || 'TEST', hardware_id: 'DIAG_TEST' }));
+        // A reachability probe ONLY. It must carry NO real licence key: license-heartbeat BINDS an unbound licence to whatever hardware_id it receives
+        // (UPDATE licensing.licenses SET hardware_id = p_hardware_id), so the old probe (the real key + 'DIAG_TEST', 2 s after launch, before the real
+        // first heartbeat at 5 s) could bind a licence to a dummy device and make the real machine fail with HARDWARE_MISMATCH. NOT_FOUND is the expected answer.
+        req.write(JSON.stringify({ license_key: 'DIAG-PROBE-NOT-A-LICENSE', hardware_id: 'DIAG-PROBE' }));
         req.end();
       });
-      fileLog('[Diag] ✅ Supabase reachable! Status:', testResult.status, 'Body:', testResult.body);
+      fileLog('[Diag] ✅ Supabase reachable (probe without a licence key; a 4xx answer is expected). Status:', testResult.status);
     } catch (err) {
       fileLog('[Diag] ❌ Cannot reach Supabase:', err.message);
     }

@@ -263,17 +263,34 @@ function updateStatusCards(state) {
     }
   }
 
-  // Tunnel
-  const tunnelStatusEl = document.getElementById('tunnel-status');
-  if (tunnelStatusEl) {
-    if (state.containerRunning) {
-      tunnelStatusEl.textContent = t('cloud.connected');
-      tunnelStatusEl.style.color = 'var(--accent)';
-    } else {
-      tunnelStatusEl.textContent = t('cloud.disconnected');
-      tunnelStatusEl.style.color = 'var(--danger)';
-    }
+  renderTunnelStatus(state);
+}
+
+// The connection status comes from the REAL connector state (main → ServiceManager.getTunnelStatus → tunnel-monitor.js): «connected» only when
+// cloudflared is running AND has logged a registered tunnel connection. 2.0.0 showed «connected» whenever the services ran, even with no cloudflared at all.
+function renderTunnelStatus(state) {
+  const el = document.getElementById('tunnel-status');
+  const det = document.getElementById('tunnel-detail');
+  if (!el) return;
+  const tn = state && state.tunnel;
+  let text; let color; let detail = '';
+  if (!state || !state.containerRunning || !tn || !tn.enabled) {
+    text = t('cloud.disconnected'); color = 'var(--danger)';
+  } else if (tn.state === 'connected') {
+    text = t('cloud.connected'); color = 'var(--accent)';
+  } else if (tn.state === 'starting') {
+    text = t('cloud.connecting'); color = 'var(--warning)';
+  } else if (tn.state === 'error') {
+    text = '❌ ' + (t('cloud.err.' + tn.reason) !== 'cloud.err.' + tn.reason ? t('cloud.err.' + tn.reason) : t('cloud.disconnected')); color = 'var(--danger)';
+    detail = tn.detail || '';
+  } else if (tn.reason === 'subdomain_deleted') {
+    text = t('cloud.off.subdomain_deleted'); color = 'var(--danger)';
+  } else {
+    text = t('cloud.disconnected'); color = 'var(--danger)';
   }
+  el.textContent = text; el.style.color = color;
+  el.dataset.tunnelState = tn ? `${tn.state}${tn.reason ? ':' + tn.reason : ''}` : 'none';
+  if (det) { det.textContent = detail; det.style.display = detail ? 'block' : 'none'; }
 }
 
 // ─── Update Control Panel ────────────────────────────────────
@@ -798,10 +815,9 @@ async function toggleCloudView() {
       await window.texacore.setCloudAccess(isChecked);
       if (currentState && currentState.config) currentState.config.enableCloud = isChecked;
     }
-    if (statusEl) {
-      if (isChecked) { statusEl.textContent = t('cloud.connectedMaybe'); statusEl.style.color = 'var(--accent)'; }
-      else { statusEl.textContent = t('cloud.disconnectedFull'); statusEl.style.color = 'var(--danger)'; }
-    }
+    // never assume «connected»: ask for the real state now and again while it settles (the periodic poll continues afterwards)
+    await refreshStatus();
+    for (const ms of [1500, 4000, 9000]) setTimeout(() => { refreshStatus(); }, ms);
   } catch (e) {
     console.error('[Cloud] setCloudAccess failed:', e);
     if (statusEl) { statusEl.textContent = t('cloud.toggleFailed'); statusEl.style.color = 'var(--danger)'; }
@@ -814,8 +830,9 @@ async function saveAdminPassword() {
   const statusEl = document.getElementById('admin-password-status');
   const btn = document.getElementById('btn-save-admin-password');
   const val = (input?.value || '').trim();
-  if (val.length < 4) {
-    if (statusEl) { statusEl.textContent = t('admin.tooShort'); statusEl.style.color = 'var(--danger)'; }
+  const n = adminMinLength;
+  if (val.length < n) {
+    if (statusEl) { statusEl.textContent = t('admin.tooShort').replace('{n}', n); statusEl.style.color = 'var(--danger)'; }
     return;
   }
   try {
@@ -832,7 +849,9 @@ async function saveAdminPassword() {
         if (chevron) chevron.textContent = t('admin.toggleChange');
       }, 1600);
     } else {
-      if (statusEl) { statusEl.textContent = '⚠️ ' + ((res && res.error) || t('admin.saveFailed')); statusEl.style.color = 'var(--danger)'; }
+      const key = res && res.code ? 'admin.err.' + res.code : null;
+      const msg = key && t(key) !== key ? t(key).replace('{n}', (res && res.minLength) || adminMinLength) : ((res && res.error) || t('admin.saveFailed'));
+      if (statusEl) { statusEl.textContent = '⚠️ ' + msg; statusEl.style.color = 'var(--danger)'; }
     }
   } catch (e) {
     if (statusEl) { statusEl.textContent = '⚠️ ' + e.message; statusEl.style.color = 'var(--danger)'; }
@@ -842,16 +861,29 @@ async function saveAdminPassword() {
 }
 
 // Reflect whether a custom admin password is set (vs the license-key default).
+// The password policy has ONE source (src/admin-password.js, enforced by ServiceManager.setAdminPassword); the window only words it.
+let adminMinLength = 8;
+let adminStatus = null;
+function applyAdminPolicyTexts() {
+  const input = document.getElementById('input-admin-password');
+  if (input) input.placeholder = t('admin.placeholder').replace('{n}', adminMinLength);
+  const statusEl = document.getElementById('admin-password-status');
+  if (statusEl && adminStatus && adminStatus.success) {
+    const key = adminStatus.customized ? 'admin.statusCustom' : (adminStatus.hasDefault ? 'admin.statusDefault' : 'admin.statusNone');
+    statusEl.textContent = t(key).replace('{n}', adminMinLength);
+    statusEl.style.color = 'var(--text-muted)';
+  }
+}
+document.addEventListener('i18n-applied', applyAdminPolicyTexts);
 async function refreshAdminPasswordStatus() {
   const statusEl = document.getElementById('admin-password-status');
   if (!statusEl || !window.texacore?.getAdminPasswordStatus) return;
   try {
     const s = await window.texacore.getAdminPasswordStatus();
     if (s && s.success) {
-      statusEl.textContent = s.customized
-        ? t('admin.statusCustom')
-        : t('admin.statusDefault');
-      statusEl.style.color = 'var(--text-muted)';
+      adminStatus = s;
+      if (Number.isInteger(s.minLength) && s.minLength > 0) adminMinLength = s.minLength;
+      applyAdminPolicyTexts();
     }
   } catch { /* ignore */ }
 }

@@ -212,8 +212,9 @@ async function main() {
       if (cross.text.includes(secrets.localApiSecret)) throw new Error('cross-site page received the admin secret');
       if (tunnel.text.includes(secrets.localApiSecret)) throw new Error('tunnel request received the admin secret');
       for (const t of [same.text, cross.text, tunnel.text]) if (t.includes(secrets.serviceKey) || t.includes(secrets.jwtSecret) || t.includes(secrets.dbPassword)) throw new Error('config.js leaks a server secret');
-      if (!/appVersion: "2\.0\.0"/.test(same.text)) throw new Error('appVersion in config.js is not 2.0.0');
-      return 'ok; appVersion 2.0.0';
+      const WANT = require('../../package.json').version;
+      if (!same.text.includes(`appVersion: "${WANT}"`)) throw new Error(`appVersion in config.js is not ${WANT}`);
+      return `ok; appVersion ${WANT}`;
     });
 
     // ── 3. owner provisioning ──
@@ -232,7 +233,7 @@ async function main() {
       const r = await request('GET', `${ADMIN}/api/ui-smoke`, { headers: H });
       if (r.status !== 200 || !r.json || !r.json.ok) throw new Error(`ui-smoke → ${r.status} ${r.text.slice(0, 300)}`);
       const u = r.json;
-      if (u.version !== '2.0.0') throw new Error(`window reports version ${u.version}`);
+      if (u.version !== require('../../package.json').version) throw new Error(`window reports version ${u.version}`);
       if (!(u.bridgeKeys >= 20)) throw new Error(`preload bridge exposes only ${u.bridgeKeys} functions`);
       if (!u.state.ok || !u.state.hasConfig) throw new Error(`get-state over IPC: ${JSON.stringify(u.state)}`);
       if (u.secretLength < 32) throw new Error('the window did not receive the admin secret over IPC');
@@ -307,6 +308,23 @@ async function main() {
       }
       if (r.code !== 'free' || r.status !== 'active') throw new Error(`free → ${r.code}/${r.status}`);
       return `${r.code} ${r.status}, ${r.mods} modules`;
+    });
+
+    await R.check('3.8 heartbeat: the active-modules query runs on the baseline schema (included_modules is text[]) and returns the plan\'s modules — the 2.0.0 text fails with 42883', async () => {
+      const { ACTIVE_MODULES_SQL } = require('../../src/heartbeat-queries');
+      const rows = (await pg(ACTIVE_MODULES_SQL)).rows;
+      if (!rows.length) throw new Error('no active subscription row');
+      const got = rows[0][Object.keys(rows[0])[0]];
+      if (!Array.isArray(got)) throw new Error(`not a JSON array: ${JSON.stringify(got)}`);
+      const want = (await pg(`SELECT COALESCE(array_agg(DISTINCT m ORDER BY m), '{}') AS mods FROM tenant_subscriptions ts JOIN subscription_plans sp ON sp.id=ts.plan_id, unnest(sp.included_modules) m
+                               WHERE ts.status IN ('active','trial','grace') AND ts.updated_at = (SELECT max(updated_at) FROM tenant_subscriptions WHERE status IN ('active','trial','grace'))`)).rows[0].mods;
+      if (JSON.stringify(got) !== JSON.stringify(want)) throw new Error(`reported ${JSON.stringify(got)} but the plan holds ${JSON.stringify(want)}`);
+      if (!got.length) throw new Error('the plan reports no modules at all');
+      let old = 'ran';
+      try { await pg(`SELECT jsonb_agg(DISTINCT m) FROM public.tenant_subscriptions ts JOIN public.subscription_plans sp ON sp.id=ts.plan_id, jsonb_array_elements_text(sp.included_modules) m LIMIT 1`); }
+      catch (e) { old = e.code; }
+      if (old !== '42883') throw new Error(`the pre-2.0.1 text was expected to fail with 42883 on this schema, got: ${old}`);
+      return `${got.length} modules reported (${got.slice(0, 5).join(', ')}…) = the plan's included_modules; the old text fails with 42883 (function jsonb_array_elements_text(text[]) does not exist)`;
     });
 
     // ── 4. security ──
@@ -405,16 +423,24 @@ async function main() {
       if (stillB !== 'Other Co') throw new Error(`B's company name is now ${stillB}`);
       return `${checked} tenant-scoped tables read as A: 0 rows of tenant B; cross-tenant UPDATE/INSERT refused`;
     });
-    await R.check('4.5 admin-portal gate: default = license key, "admin" refused, 5 wrong tries lock it', async () => {
+    await R.check('4.5 admin-portal gate: a FREE key is no default (locked), a paid/trial key is; "admin" refused; 5 wrong tries lock it', async () => {
       const verify = async (p) => (await request('POST', `${API}/rest/v1/rpc/verify_admin_password`, { headers: anon, body: { p_input: p } })).json;
       const key = JSON.parse(fs.readFileSync(path.join(dataDir, 'config.json'), 'utf8')).licenseKey;
+      const free = /^FREE/i.test(key);
       if (await verify('admin') !== false) throw new Error('"admin" accepted');
-      if (await verify(key) !== true) throw new Error('default (license key) not accepted');
+      let pw = key;
+      if (free) {
+        // a FREE key is not a secret ("FREE-LOCAL" is in the source; FREE-2026-NNNNN are short numbers shown in the launcher): there is NO default password, the portal is locked
+        if (await verify(key) !== false) throw new Error('a FREE licence key opens the admin portal');
+        pw = 'Correct#Horse9';
+        await pg(`UPDATE platform_admin SET password_hash = extensions.crypt($1, extensions.gen_salt('bf')), failed_attempts = 0, locked_until = NULL`, [pw]);   // what ServiceManager.setAdminPassword stores
+        if (await verify(pw) !== true) throw new Error('a password the manager set is not accepted');
+      } else if (await verify(key) !== true) throw new Error('default (paid/trial license key) not accepted');
       for (let i = 0; i < 5; i++) await verify('wrong-' + i);
-      if (await verify(key) !== false) throw new Error('not locked after 5 failures');
+      if (await verify(pw) !== false) throw new Error('not locked after 5 failures');
       await pg('UPDATE platform_admin SET failed_attempts=0, locked_until=NULL');
-      if (await verify(key) !== true) throw new Error('did not recover after unlock');
-      return `key ${key}`;
+      if (await verify(pw) !== true) throw new Error('did not recover after unlock');
+      return free ? `free key ${key}: no default (locked); a manager-set password works; lock after 5 failures` : `key ${key} is the default; lock after 5 failures`;
     });
     await R.check('4.6 over the tunnel (a *.texacore.ai Host) the admin API is default-deny', async () => {
       const t = { Host: 'demo.texacore.ai', ...H };
@@ -645,10 +671,11 @@ async function main() {
     });
 
     // ── 5. the web UI ──
-    await R.check('5.1 the web bundle is served: version 2.0.0, every asset 200 with a script/style type, local fonts, no Google Fonts', async () => {
+    await R.check('5.1 the web bundle is served: the installer\'s version, every asset 200 with a script/style type, local fonts, no Google Fonts', async () => {
       const idx = await request('GET', `${UI}/`);
       if (idx.status !== 200) throw new Error(`/ → ${idx.status}`);
-      if (!/name="texacore-app-version" content="2\.0\.0"/.test(idx.text)) throw new Error('index.html lacks the 2.0.0 stamp');
+      const WANT = require('../../package.json').version;
+      if (!new RegExp(`name="texacore-app-version" content="${WANT.replace(/\./g, '\\.')}"`).test(idx.text)) throw new Error(`index.html lacks the ${WANT} stamp`);
       if (/fonts\.(googleapis|gstatic)\.com/.test(idx.text)) throw new Error('index.html loads Google Fonts');
       const refs = [...idx.text.matchAll(/(?:src|href)="(\/[^"]+\.(?:js|css|woff2))"/g)].map((m) => m[1]);
       let n = 0;

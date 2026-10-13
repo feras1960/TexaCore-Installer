@@ -44,10 +44,15 @@ function fixture(platform = 'darwin') {
     fs.mkdirSync(path.dirname(p), { recursive: true });
     fs.writeFileSync(p, 'x');
   }
+  // the Cloud Access connector (mac: pinned file, executable; win: cloudflared.exe)
+  const cfBytes = Buffer.from('cloudflared-stand-in');
+  const cfPath = path.join(res, 'bin', 'cloudflared', platform === 'win32' ? 'cloudflared.exe' : 'cloudflared');
+  fs.mkdirSync(path.dirname(cfPath), { recursive: true });
+  fs.writeFileSync(cfPath, cfBytes); fs.chmodSync(cfPath, 0o755);
   fs.mkdirSync(path.join(res, 'bin', 'pg', 'share'), { recursive: true });
   // PostgreSQL's own scripts legitimately contain DDL — bin/pg is not scanned
   fs.writeFileSync(path.join(res, 'bin', 'pg', 'share', 'information_schema.sql'), 'CREATE FUNCTION public.f() ...');
-  return { repo, res, key, blob, args: { resourcesDir: res, appCodeDir: app, repoRoot: repo, platform } };
+  return { repo, res, key, blob, cfPath, args: { resourcesDir: res, appCodeDir: app, repoRoot: repo, platform, cloudflaredPin: { sha256: sha(cfBytes), bytes: cfBytes.length } } };
 }
 
 test('a complete packaged tree passes', () => {
@@ -127,4 +132,19 @@ test('FAILS when a 1.x migrations manifest rides along', () => {
   fs.mkdirSync(path.join(f.res, 'migrations'));
   fs.writeFileSync(path.join(f.res, 'migrations', 'migrations.json'), '{"migrations":[]}');
   assert.match(verifyPacked(f.args).join(), /1\.x migrations/);
+});
+
+test('FAILS when the macOS package has no cloudflared (2.0.0: Cloud Access dead, Cloudflare error 1033), another build of it, or a non-executable one; Windows needs cloudflared.exe', () => {
+  let f = fixture();
+  fs.rmSync(f.cfPath);
+  assert.match(verifyPacked(f.args).join(), /bin\/cloudflared\/cloudflared is missing/);
+  f = fixture();
+  fs.writeFileSync(f.cfPath, 'some other binary');
+  assert.match(verifyPacked(f.args).join(), /not the pinned build/);
+  f = fixture();
+  fs.chmodSync(f.cfPath, 0o644);
+  assert.match(verifyPacked(f.args).join(), /not executable/);
+  f = fixture('win32');
+  fs.rmSync(f.cfPath);
+  assert.match(verifyPacked(f.args).join(), /cloudflared\.exe is missing/);
 });

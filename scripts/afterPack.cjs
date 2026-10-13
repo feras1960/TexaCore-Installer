@@ -123,5 +123,16 @@ exports.default = async function afterPack(context) {
       }
     }
     console.log('  • afterPack: ad-hoc signature valid ✅');
+
+    // The Cloud Access connector must be IN the signed app, be the pinned file, and RUN from there (2.0.0 shipped without it: Cloudflare error 1033).
+    // Signing must not have altered it (it keeps Cloudflare's own Developer ID signature; Resources/bin files are sealed, not re-signed).
+    {
+      const pinMod = require('./lib/cloudflared-pin');
+      const { verifyCloudflaredFile } = require('./prepare-cloudflared-mac');
+      const packagedCf = path.join(appPath, 'Contents', 'Resources', 'bin', 'cloudflared', 'cloudflared');
+      const bad = verifyCloudflaredFile(packagedCf);
+      if (bad.length) throw new Error(`afterPack: the packaged cloudflared is not usable — ${bad.join('; ')}`);
+      console.log(`  • afterPack: packaged cloudflared ${pinMod.version} verified (pinned sha256, Cloudflare Developer ID signature intact, runs) ✅`);
+    }
   }
 };

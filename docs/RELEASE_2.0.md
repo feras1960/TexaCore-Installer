@@ -52,6 +52,16 @@ How the 1.x file was produced (lab only, never the product tree): a worktree of 
 (3 installer-only `20260713L/M/N_local_*` files do not exist anywhere readable, so 299 of 333 migrations applied); every hard-coded service port in that copy moved into the 47391–47399 block — **including the literal `54322` in `main.js`, `migration-runner.js` and `backup-manager.js`, which
 would otherwise have talked to an installed app's database** — and the run was wrapped in `sandbox-exec` denying outbound 80/443/8080/8443 and the installed app's ports. Then: create a company through the admin API, add rows with SQL, `POST /api/backup`.
 
+### 2.0.1 field fixes — what to know
+- **Cloud Access on macOS** needs the pinned cloudflared: `node scripts/prepare-cloudflared-mac.js <official 2026.10.0 darwin-arm64 binary>` (checks sha256, size, Cloudflare's Developer ID signature, that it runs) → `bin/macos-arm64/cloudflared/cloudflared` (committed; Apache-2.0).
+  `prebuild-checks`, the afterPack gate and `verify-mac-build` M6 refuse a mac build without it. `scripts/e2e/tunnel-check.js` runs the REAL binary with fake tokens (malformed, well-formed-but-refused, not runnable).
+- **The launcher's connection status** is `ServiceManager.getTunnelStatus()` (src/tunnel-monitor.js): connected only after cloudflared logged a registered connection.
+- **`/config.js` and the service worker.** The ERP's service worker precaches `/config.js` with a constant revision → the first copy it ever saw stays for good. The installer serves a versioned shell (`/config.js?v=<version>-<boot id>`),
+  `sw.js` without the config.js entry, `/config.js` with `no-store, max-age=0`. `scripts/e2e/rsf-wizard-ui-check.js` reproduces the stale-precache profile and drives the Rashid wizard in a real Chrome.
+  The request that makes a page "local" is decided in src/net-guard.js (`classifyRequest`): loopback Host + a peer that is this machine (loopback in any spelling, or one of its own addresses) + not forwarded from elsewhere
+  (Cloudflare headers, or a forwarding header naming a foreign / unreadable address, or a foreign X-Forwarded-Host). A raw TCP forwarder (ssh -R, ngrok tcp) that adds no header at all cannot be told from a local program — as before.
+- **Third-party files are not in the repo**: `Sample.rsf`, `*.tcdb`, `.tmp-rsf/`, `data/backups/` are ignored (and untracked in 2.0.1; the git history still holds the old copies). A check that needs a Rashid file reads it from OUTSIDE the repo (`--rsf <path>`).
+
 ## Re-cutting the baseline (the only thing that changes)
 
 1. ERP: `scripts/schema/build-baseline.sh` (see `supabase/baseline/BASELINE.md`), copy the stub file as it says, commit.

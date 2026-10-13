@@ -11,6 +11,9 @@
 //       replaced by a recorder, so the owner's real clipboard is never touched) and the button says so
 //   U3  the stop button only ASKS, inside the window (no native dialog): nothing stops until «yes»; Cancel and Esc withdraw the question
 //   U4  «yes» stops the services
+//   U7  the connection status is HONEST: «connected» only for a connector that registered; starting / off / each error reason (binary missing, token invalid / refused …) is worded as such, in ar and en
+//   U8  the admin-portal password UI states the REAL policy (8+ characters, from the main process): placeholder and messages say 8, 7 characters are refused in the window, «admin» and licence-key-like values
+//       are refused with their own message, a good password is accepted and the SERVER then verifies it (a free licence has no default password)
 //   U5  the one-time upgrade notice (the run starts over a 1.x data folder): shown with the old folder and the old company file, in Arabic RTL and English LTR; «فتح المجلد» asks the OS to open exactly that folder;
 //       the «فتح» button beside a 1.x company file is refused with the translated message; «إغلاق» dismisses it for good (still gone after a reload and after the files are re-read)
 //
@@ -159,7 +162,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
           files: [...document.querySelectorAll('#upgrade-file-list .upgrade-file-name')].map((e) => e.textContent), buttons: [...document.querySelectorAll('#upgrade-notice button')].map((e) => e.textContent.trim()) })`);
         if (!w.shown || !w.folder || w.files.length !== 1) throw new Error(`notice: ${JSON.stringify(w)}`);
         if (!/texacore-data\.v18-backup-/.test(w.folder)) throw new Error(`folder shown: ${w.folder}`);
-        if (!w.a.includes('v2.0.0') ) throw new Error(`first line lacks the version: ${w.a}`);
+        if (!w.a.includes('v' + require('../../package.json').version)) throw new Error(`first line lacks the version: ${w.a}`);
         await ev({ shot: `ui-${lang}-upgrade-notice.png`, wait: 300 });
         // the folder button — recorded, not opened, in an isolated run
         await js(`document.getElementById('upgrade-open-folder').click()`); await sleep(800);
@@ -172,6 +175,69 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         if (!/err/.test(st.cls) || !st.text) throw new Error(`file button result: ${JSON.stringify(st)}`);
         evidence[`notice_${lang}`] = { ...w, status: st };
         return `${w.dir}: "${w.a}" + ${w.folder.slice(-44)} ; "${w.b.slice(0, 60)}…" ; file «${w.files[0]}» ; folder button → the OS was asked for that folder ; file button → "${st.text.slice(0, 110)}"`;
+      });
+
+      await R.check(`U7 [${lang}] the connection status is honest: connected / starting / off / each error reason is worded as such — «connected» only for a connector that registered`, async () => {
+        await js(`window.refreshStatus = async () => {}; window.scrollTo(0, 0)`);          // stop the poll overwriting the states shown here
+        await js(`updateUI(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: true, subdomain: 'acme-demo', port: 80 }), localIp: '192.168.1.20' }))`);
+        await sleep(300);
+        const cases = [
+          ['connected', { enabled: true, state: 'connected', reason: null, detail: '' }, /🟢/, 'connected'],
+          ['starting', { enabled: true, state: 'starting', reason: null, detail: '' }, /⏳/, 'starting'],
+          ['off', { enabled: true, state: 'off', reason: 'stopped', detail: '' }, /🔴/, 'off:stopped'],
+          ['error-binary-missing', { enabled: true, state: 'error', reason: 'binary_missing', detail: 'looked in /Applications/TexaCore ERP.app/Contents/Resources/bin/cloudflared/cloudflared' }, /❌/, 'error:binary_missing'],
+          ['error-token-invalid', { enabled: true, state: 'error', reason: 'token_invalid', detail: 'Provided Tunnel token is not valid.' }, /❌/, 'error:token_invalid'],
+          ['error-token-rejected', { enabled: true, state: 'error', reason: 'token_rejected', detail: 'ERR Register tunnel error from server side error="Failed to get tunnel"' }, /❌/, 'error:token_rejected'],
+          ['error-exited', { enabled: true, state: 'error', reason: 'exited', detail: 'exit code 1' }, /❌/, 'error:exited'],
+        ];
+        const seen = [];
+        for (const [name, tn, mark, dataState] of cases) {
+          await js(`renderTunnelStatus({ containerRunning: true, tunnel: ${JSON.stringify(tn)} })`);
+          const w = await js(`({ text: document.getElementById('tunnel-status').textContent, state: document.getElementById('tunnel-status').dataset.tunnelState, color: document.getElementById('tunnel-status').style.color,
+            detail: document.getElementById('tunnel-detail').textContent, detailShown: getComputedStyle(document.getElementById('tunnel-detail')).display !== 'none' })`);
+          if (w.state !== dataState) throw new Error(`${name}: state ${w.state}`);
+          if (!mark.test(w.text)) throw new Error(`${name}: text "${w.text}"`);
+          if (name !== 'connected' && /🟢/.test(w.text)) throw new Error(`${name}: shows the connected mark`);
+          if (name.startsWith('error') && (!w.detailShown || !w.detail)) throw new Error(`${name}: no detail line`);
+          if (/^(error-binary-missing|error-token-rejected|connected)$/.test(name)) { await js(`document.getElementById('tunnel-status').scrollIntoView({ block: 'center' })`); await ev({ shot: `ui-${lang}-tunnel-${name}.png`, wait: 100 }); }
+          seen.push(`${name}: "${w.text}"`);
+        }
+        // services stopped, or cloud access off: never «connected»
+        await js(`renderTunnelStatus({ containerRunning: false, tunnel: { enabled: true, state: 'connected' } })`);
+        const stopped = await js(`document.getElementById('tunnel-status').textContent`);
+        if (/🟢/.test(stopped)) throw new Error(`services stopped but the window says "${stopped}"`);
+        await js(`delete window.refreshStatus`);
+        await js(`updateUI(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: false }) }))`);   // leave the switch as it was
+        return seen.join(' | ');
+      });
+
+      await R.check(`U8 [${lang}] the admin-portal password UI states the real policy (8+), refuses 7 characters / «admin» / a licence-key shape, and a good password is accepted and verified by the server`, async () => {
+        await js(`window.scrollTo(0, 0); document.getElementById('admin-password-panel').style.display = 'none'; toggleAdminPasswordPanel()`); await sleep(1200);
+        const open = await js(`({ ph: document.getElementById('input-admin-password').placeholder, status: document.getElementById('admin-password-status').textContent, desc: document.querySelector('[data-i18n="admin.desc"]').textContent })`);
+        if (!/8/.test(open.ph) || /(^|[^0-9])4([^0-9]|$)/.test(open.ph + open.status + open.desc)) throw new Error(`policy text: ${JSON.stringify(open)}`);
+        if (lang === 'ar' && !/8/.test(open.status)) throw new Error(`status text lacks the minimum: ${open.status}`);   // (the second language runs after a password was set: «custom password is set» has no number)
+        await js(`document.getElementById('admin-password-panel').scrollIntoView({ block: 'center' })`);
+        const attempt = async (value) => {
+          await js(`document.getElementById('input-admin-password').value = ${JSON.stringify(value)}; saveAdminPassword()`); await sleep(1200);
+          return js(`({ text: document.getElementById('admin-password-status').textContent, color: document.getElementById('admin-password-status').style.color })`);
+        };
+        const short = await attempt('1234567');
+        if (!/8/.test(short.text) || /✅/.test(short.text)) throw new Error(`7 characters: "${short.text}"`);
+        await ev({ shot: `ui-${lang}-admin-password-too-short.png`, wait: 100 });
+        const adminPw = await attempt('admin');
+        if (/✅/.test(adminPw.text)) throw new Error(`"admin" accepted: ${adminPw.text}`);
+        const keyLike = await attempt('FREE-2026-12345');
+        if (/✅/.test(keyLike.text)) throw new Error(`a licence-key shape accepted: ${keyLike.text}`);
+        if (!/⚠️/.test(keyLike.text)) throw new Error(`the server's refusal is not shown: "${keyLike.text}"`);
+        await ev({ shot: `ui-${lang}-admin-password-key-like.png`, wait: 100 });
+        const good = lang === 'ar' ? 'Correct#Horse9' : 'Another#Pass77';
+        const ok = await attempt(good);
+        if (!/✅/.test(ok.text)) throw new Error(`a good password was not accepted: "${ok.text}"`);
+        await ev({ shot: `ui-${lang}-admin-password-saved.png`, wait: 100 });
+        const verify = async (p) => (await request('POST', `http://127.0.0.1:${PORTS.api}/rest/v1/rpc/verify_admin_password`, { headers: { apikey: secrets.anonKey, Authorization: `Bearer ${secrets.anonKey}` }, body: { p_input: p } })).json;
+        if (await verify(good) !== true) throw new Error('the server does not accept the password the window reported as saved');
+        if (await verify('1234567') !== false || await verify('FREE-LOCAL') !== false) throw new Error('the server accepts a refused value');
+        return `placeholder "${open.ph}"; status "${open.status}"; 7 chars → "${short.text}"; "admin" → "${adminPw.text}"; key shape → "${keyLike.text}"; good → "${ok.text}" and the server verifies it (a free licence has no default)`;
       });
     }
 
