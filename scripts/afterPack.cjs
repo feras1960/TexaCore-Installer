@@ -94,12 +94,33 @@ exports.default = async function afterPack(context) {
     console.log(`  • afterPack: ad-hoc signing ${appPath}`);
     // macOS tags files it sees arriving with com.apple.provenance; codesign refuses a bundle with such "detritus" (xattr) — strip first
     try { execFileSync('/usr/bin/xattr', ['-cr', appPath], { stdio: 'ignore' }); } catch { /* nothing to strip */ }
+    const sign = (bundle) => {
+      execFileSync('codesign', ['--force', '--deep', '--sign', '-', bundle], { stdio: 'inherit' });
+      execFileSync('codesign', ['--verify', '--deep', '--strict', bundle], { stdio: 'inherit' });
+    };
     // A build whose signature is not valid must NOT be produced: on Apple Silicon the app would not open at all ("is damaged").
     try {
-      execFileSync('codesign', ['--force', '--deep', '--sign', '-', appPath], { stdio: 'inherit' });
-      execFileSync('codesign', ['--verify', '--deep', '--strict', appPath], { stdio: 'inherit' });
-    } catch (e) {
-      throw new Error(`afterPack: ad-hoc signing failed — refusing to produce an app with an invalid signature: ${e.message}`);
+      sign(appPath);
+    } catch (first) {
+      // A project folder that lives in an iCloud-synced location (Desktop / Documents) gets com.apple.FinderInfo + com.apple.fileprovider.fpfs#P
+      // re-attached to its directories by the file-provider daemon, which xattr cannot keep off: codesign then refuses ("detritus not allowed").
+      // Sign a clean copy in the system temp folder instead, check it there, and put it back without extended attributes.
+      console.warn(`  • afterPack: signing in place failed (${first.message.split('\n')[0]}) — signing a clean copy in the temp folder instead`);
+      const os = require('os');
+      const stage = fs.mkdtempSync(path.join(os.tmpdir(), 'texacore-sign-'));
+      try {
+        const copy = path.join(stage, path.basename(appPath));
+        execFileSync('/usr/bin/ditto', ['--noextattr', '--norsrc', appPath, copy], { stdio: 'inherit' });
+        try { execFileSync('/usr/bin/xattr', ['-cr', copy], { stdio: 'ignore' }); } catch { /* nothing to strip */ }
+        sign(copy);
+        fs.rmSync(appPath, { recursive: true, force: true });
+        execFileSync('/usr/bin/ditto', ['--noextattr', '--norsrc', copy, appPath], { stdio: 'inherit' });
+        execFileSync('codesign', ['--verify', '--deep', '--strict', appPath], { stdio: 'inherit' });   // the bundle that ships must verify where it is
+      } catch (e) {
+        throw new Error(`afterPack: ad-hoc signing failed — refusing to produce an app with an invalid signature: ${e.message}`);
+      } finally {
+        fs.rmSync(stage, { recursive: true, force: true });
+      }
     }
     console.log('  • afterPack: ad-hoc signature valid ✅');
   }
