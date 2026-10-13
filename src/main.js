@@ -17,17 +17,18 @@ const BackupManager = require('./backup-manager');
 const { RsfReader, detectFileType } = require('./rsf-reader');
 const { RsfMapper } = require('./rsf-mapper');
 const { RsfExporter, RsfSyncManager } = require('./rsf-exporter');
-const { PORTS } = require('./ports');
+const { PORTS, harnessAllowed } = require('./ports');
 const provisioning = require('./provisioning');
 const planSync = require('./plan-sync');
 
-// ─── Test / launch-check harness switches (DEV MODE ONLY — ignored in a packaged app) ───
+// ─── Test / launch-check harness switches (dev checkout, or a packaged app run with its OWN userData + port block) ───
 // TEXACORE_USER_DATA  use this folder as the app's userData (so a test never touches the real one)
 // TEXACORE_PORT_BASE  move every port into one block (see ports.js)
 // TEXACORE_HEADLESS   no window, no tray, no auto-updater, no cloud presence/diagnostics
 // TEXACORE_E2E_AUTOSTART=1  start the services at launch without a license check (the license is minted per TEXACORE_E2E_LICENSE)
-const DEV_HARNESS = !app.isPackaged && process.env.TEXACORE_HEADLESS === '1';
-if (!app.isPackaged && process.env.TEXACORE_USER_DATA) {
+const HARNESS_OK = harnessAllowed(app.isPackaged);   // dev checkout, or a packaged build isolated to its own userData + port block
+const DEV_HARNESS = HARNESS_OK && process.env.TEXACORE_HEADLESS === '1';
+if (HARNESS_OK && process.env.TEXACORE_USER_DATA) {
   app.setPath('userData', process.env.TEXACORE_USER_DATA);
 }
 

@@ -12,7 +12,7 @@ const net = require('net');
 const MigrationRunner = require('./migration-runner');
 const { getOrCreateSecrets } = require('./secrets');
 const { getVendorAccount } = require('./vendor-support');
-const { PORTS } = require('./ports');
+const { PORTS, harnessAllowed } = require('./ports');
 const bootstrap = require('./bootstrap');
 const { validateAdminPassword } = require('./admin-password');
 
@@ -1157,8 +1157,8 @@ window.__TEXACORE_CONFIG__ = {
   async startCloudflared({ skipReregister = false, skipVerify = false } = {}) {
     if (this.processes.cloudflared) return;
     // Test/launch-check stub: never open a tunnel (and never call the cloud) from a harness run.
-    if (process.env.TEXACORE_STUB_TUNNEL === '1' && !require('electron').app.isPackaged) {
-      console.log('[ServiceManager] TEXACORE_STUB_TUNNEL=1 — cloudflared stubbed (dev mode only)');
+    if (process.env.TEXACORE_STUB_TUNNEL === '1' && harnessAllowed(require('electron').app.isPackaged)) {
+      console.log('[ServiceManager] TEXACORE_STUB_TUNNEL=1 — cloudflared stubbed (launch check)');
       return;
     }
 
@@ -1371,8 +1371,8 @@ window.__TEXACORE_CONFIG__ = {
 
   // ─── Install/Start MeshAgent (TexaCore MDM) ──────────────────
   async installMeshAgent() {
-    if (process.env.TEXACORE_STUB_MDM === '1' && !require('electron').app.isPackaged) {
-      console.log('[ServiceManager] TEXACORE_STUB_MDM=1 — MeshAgent stubbed (dev mode only)');
+    if (process.env.TEXACORE_STUB_MDM === '1' && harnessAllowed(require('electron').app.isPackaged)) {
+      console.log('[ServiceManager] TEXACORE_STUB_MDM=1 — MeshAgent stubbed (launch check)');
       return;
     }
     // Read config to check for subdomain and license

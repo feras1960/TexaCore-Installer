@@ -16,4 +16,13 @@ function resolvePorts(env = process.env) {
   return { custom: false, pg: 54322, postgrest: 3000, gotrue: 9999, api: 54321, ui: 80, admin: 1960 };
 }
 
-module.exports = { resolvePorts, PORTS: resolvePorts() };
+/**
+ * Is this process a launch-check run? The harness switches (TEXACORE_HEADLESS / _E2E_AUTOSTART / _STUB_TUNNEL / _STUB_MDM / _USER_DATA)
+ * are honoured in a dev checkout, and in a PACKAGED app only when the run is also isolated: its own userData folder AND its own
+ * port block (so the check can launch the real build without touching the installed app's data or ports).
+ */
+function harnessAllowed(isPackaged, env = process.env) {
+  return !isPackaged || (!!env.TEXACORE_USER_DATA && !!env.TEXACORE_PORT_BASE);
+}
+
+module.exports = { resolvePorts, harnessAllowed, PORTS: resolvePorts() };

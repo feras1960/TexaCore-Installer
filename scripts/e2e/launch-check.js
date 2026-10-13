@@ -3,9 +3,9 @@
 // ════════════════════════════════════════════════════════════════
 // launch-check — the REAL launch test of the installer (1.9.0 failed because the build was never launched).
 //
-//   node scripts/e2e/launch-check.js --workdir <empty dir> [--license free|trial] [--erp <ERP checkout>] [--rsf <file.rsf>] [--keep]
+//   node scripts/e2e/launch-check.js --workdir <empty dir> [--license free|trial] [--erp <ERP checkout>] [--rsf <file.rsf>] [--app <packaged .app>]
 //
-// Runs the real ServiceManager in Electron dev mode (headless; cloudflared + MeshAgent stubbed; ports 47391-47396 only; its own
+// Runs the real ServiceManager in Electron dev mode — or, with --app, the PACKAGED build (headless; cloudflared + MeshAgent stubbed; ports 47391-47396 only; its own
 // userData under --workdir — it never touches the real app's data), then walks the first-run path:
 //   1. first run → initdb → baseline → services up (+ proof the database equals the pinned baseline)
 //   2. admin created → company created (server functions as the admin) → the ERP page loads and the admin logs in
@@ -27,6 +27,7 @@ const LICENSE = arg('license', 'free');
 const ERP = arg('erp', process.env.TEXACORE_ERP_DIR || '');
 const RSF = arg('rsf', '');
 const KEEP = process.argv.includes('--keep');
+const APP = arg('app', '');   // path to a PACKAGED …/TexaCore ERP.app (the real build) instead of Electron dev mode on this checkout
 if (!arg('workdir')) { console.error('--workdir <dir> is required'); process.exit(2); }
 
 const UI = `http://127.0.0.1:${PORTS.ui}`;
@@ -48,7 +49,9 @@ async function main() {
   for (const p of Object.values(PORTS)) if (!(await portFree(p))) { console.error(`port ${p} is in use — stop whatever holds it first`); process.exit(2); }
 
   console.log(`launch-check: license=${LICENSE} workdir=${WORK}`);
-  const { child, ready } = startApp({ userData, license: LICENSE, logFile });
+  const appBinary = APP ? path.join(path.resolve(APP), 'Contents', 'MacOS', path.basename(path.resolve(APP), '.app')) : '';
+  if (APP && !fs.existsSync(appBinary)) { console.error(`no executable at ${appBinary}`); process.exit(2); }
+  const { child, ready } = startApp({ userData, license: LICENSE, logFile, appBinary });
   let secrets = null;
   try {
     await R.check('1.1 first run: initdb → baseline → services up', async () => {
@@ -94,6 +97,14 @@ async function main() {
       if (noRls.length) throw new Error(`anon can reach tables without RLS: ${noRls.join(', ')}`);
       return `${rls} RLS tables = inventory (+1 local gate); anon reaches no table without RLS`;
     });
+
+    if (ERP) {
+      await R.check('1.7 (informational) the baseline contains every RPC this ERP build calls', async () => {
+        const r = require('../check-rpc-coverage').coverage(ERP);
+        if (r.missing.length) { R.warnings.push(`${r.missing.length} RPCs called by the ERP are missing from the baseline (stale cut): ${r.missing.join(', ')}`); return `WARNING — ${r.missing.length} of ${r.called} missing: ${r.missing.slice(0, 8).join(', ')}…`; }
+        return `all ${r.called} present`;
+      });
+    }
 
     // ── 2. admin API + config.js ──
     await R.check('2.1 admin API: /api/ping open, everything else needs the install secret', async () => {
@@ -353,7 +364,8 @@ async function main() {
     await stopApp(child, userData);
   }
 
-  fs.writeFileSync(path.join(WORK, 'results.json'), JSON.stringify({ at: new Date().toISOString(), license: LICENSE, summary: R.summary(), rows: R.rows }, null, 2));
+  fs.writeFileSync(path.join(WORK, 'results.json'), JSON.stringify({ at: new Date().toISOString(), license: LICENSE, app: APP || 'electron dev mode', summary: R.summary(), warnings: R.warnings, rows: R.rows }, null, 2));
+  for (const w of R.warnings) console.log(`  WARN  ${w.slice(0, 300)}`);
   console.log(`\nlaunch-check (${LICENSE}): ${R.summary()}  →  ${path.join(WORK, 'results.json')}`);
   if (!KEEP) { /* the workdir is kept on purpose: it holds the evidence */ }
   process.exit(R.failed.length ? 1 : 0);

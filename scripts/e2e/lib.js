@@ -11,7 +11,7 @@ const PORT_BASE = 47391;
 const PORTS = { pg: PORT_BASE, postgrest: PORT_BASE + 1, gotrue: PORT_BASE + 2, api: PORT_BASE + 3, ui: PORT_BASE + 4, admin: PORT_BASE + 5 };
 
 class Results {
-  constructor() { this.rows = []; }
+  constructor() { this.rows = []; this.warnings = []; }
   async check(name, fn) {
     const t0 = Date.now();
     try {
@@ -62,11 +62,12 @@ function request(method, url, { headers = {}, body, timeout = 120000 } = {}) {
 }
 
 /** Start the installer headless in dev mode; resolves { child, ready } once E2E_READY is printed. */
-function startApp({ userData, license = 'free', logFile }) {
+function startApp({ userData, license = 'free', logFile, appBinary = '' }) {
   fs.mkdirSync(userData, { recursive: true });
   const out = fs.openSync(logFile, 'a');
-  const child = spawn(path.join(ROOT, 'node_modules', '.bin', 'electron'), ['.'], {
-    cwd: ROOT, stdio: ['ignore', out, out], detached: false,
+  // appBinary = the PACKAGED app's executable (…/TexaCore ERP.app/Contents/MacOS/TexaCore ERP); otherwise Electron dev mode on this checkout
+  const child = spawn(appBinary || path.join(ROOT, 'node_modules', '.bin', 'electron'), appBinary ? [] : ['.'], {
+    cwd: appBinary ? path.dirname(appBinary) : ROOT, stdio: ['ignore', out, out], detached: false,
     env: {
       ...process.env,
       TEXACORE_HEADLESS: '1', TEXACORE_PORT_BASE: String(PORT_BASE), TEXACORE_USER_DATA: userData,
