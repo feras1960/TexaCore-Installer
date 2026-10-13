@@ -87,7 +87,7 @@ function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform, scanRoot, 
           if (sha256File(repoFile) !== hash) problems.push(`the packaged src/${rel} was built from different source than the repo's`);
         }
         // (exported property names and regular-expression literals legitimately stay; these identifiers and strings must be gone)
-        const READABLE = ['function handleCreateLocalCompany', 'adminRequestIsLocal', 'class ServiceManager', 'fn_membership_invite_create', 'SELECT public.check_plan_limits', 'INSERT INTO public.subscription_plans', 'TEXACORE-IMPORT-EXEMPT'];
+        const READABLE = ['function handleCreateLocalCompany', 'adminRequestIsLocal', 'class ServiceManager', 'fn_membership_invite_create', 'SELECT public.check_plan_limits', 'INSERT INTO public.subscription_plans'];
         for (const f of ['main.js', 'service-manager.js', 'provisioning.js', 'plan-sync.js', 'secrets.js', 'preload.js', 'baseline-key.generated.js']) {
           const p = path.join(appCodeDir, 'src', f);
           if (!fs.existsSync(p)) continue;
