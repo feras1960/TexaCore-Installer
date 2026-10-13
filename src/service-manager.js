@@ -205,9 +205,11 @@ class ServiceManager {
         '-E', 'UTF8',
         '--locale-provider=icu',
         '--icu-locale=en-US',
-        // libc side of the locale (ctype for regex/upper on non-ICU paths). macOS knows en_US.UTF-8; on Windows the
-        // BCP-47 name is the one PostgreSQL accepts for a UTF8 database.
-        `--locale=${this.isWindows ? 'en-US' : 'en_US.UTF-8'}`,
+        // libc side of the locale. With the ICU provider the default collation, upper()/lower() and regex classes come from ICU;
+        // the libc locale only backs the odd libc call. macOS knows en_US.UTF-8 (= production's datcollate/datctype). On Windows
+        // there is no such libc name, and an invalid one would stop initdb — "C" is the one value that is always valid there.
+        // (Windows is untested: no PostgreSQL 17 Windows bundle was available when this was written.)
+        `--locale=${this.isWindows ? 'C' : 'en_US.UTF-8'}`,
         '--auth=trust',
       ], { env: this._pgEnv() });
 

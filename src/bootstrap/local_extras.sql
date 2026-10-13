@@ -59,3 +59,24 @@ $func$;
 
 REVOKE ALL ON FUNCTION public.verify_admin_password(text) FROM PUBLIC;
 GRANT EXECUTE ON FUNCTION public.verify_admin_password(text) TO anon, authenticated, service_role;
+
+-- ════════════════════════════════════════════════════════════════
+-- 2. net.http_post / http_get / http_delete — NO-OP stubs for pg_net.
+--    Production sends notifications (new-lead broadcasts, the NexaLive ops bot, …) with pg_net. A local install has no pg_net and
+--    nowhere to send them; without these, a trigger that calls net.http_post without its own exception handler (nexa_ops_bot_dispatch)
+--    would fail the INSERT that fired it. The stubs do nothing and return NULL. They live in schema `net`, outside the four app
+--    schemas the baseline verification counts, and no API role may call them.
+-- ════════════════════════════════════════════════════════════════
+CREATE SCHEMA IF NOT EXISTS net;
+REVOKE ALL ON SCHEMA net FROM PUBLIC;
+GRANT USAGE ON SCHEMA net TO postgres, service_role;
+
+CREATE OR REPLACE FUNCTION net.http_post(url text, body jsonb DEFAULT '{}'::jsonb, params jsonb DEFAULT '{}'::jsonb,
+                                         headers jsonb DEFAULT '{"Content-Type": "application/json"}'::jsonb, timeout_milliseconds integer DEFAULT 5000)
+RETURNS bigint LANGUAGE sql VOLATILE AS $$ SELECT NULL::bigint $$;
+CREATE OR REPLACE FUNCTION net.http_get(url text, params jsonb DEFAULT '{}'::jsonb, headers jsonb DEFAULT '{}'::jsonb, timeout_milliseconds integer DEFAULT 5000)
+RETURNS bigint LANGUAGE sql VOLATILE AS $$ SELECT NULL::bigint $$;
+CREATE OR REPLACE FUNCTION net.http_delete(url text, params jsonb DEFAULT '{}'::jsonb, headers jsonb DEFAULT '{}'::jsonb, timeout_milliseconds integer DEFAULT 5000)
+RETURNS bigint LANGUAGE sql VOLATILE AS $$ SELECT NULL::bigint $$;
+REVOKE ALL ON FUNCTION net.http_post(text, jsonb, jsonb, jsonb, integer), net.http_get(text, jsonb, jsonb, integer), net.http_delete(text, jsonb, jsonb, integer) FROM PUBLIC, anon, authenticated;
+GRANT EXECUTE ON FUNCTION net.http_post(text, jsonb, jsonb, jsonb, integer), net.http_get(text, jsonb, jsonb, integer), net.http_delete(text, jsonb, jsonb, integer) TO postgres, service_role;

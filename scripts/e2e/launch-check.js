@@ -85,9 +85,18 @@ async function main() {
       if (!c.ok) throw new Error(`missing ${c.missing.length} extra ${c.extra.length} differ ${c.mismatched.length}: ${[...c.missing, ...c.extra, ...c.mismatched].slice(0, 3).join(' | ')}`);
       return `${c.expected} functions compared`;
     });
-    await R.check('1.5 extensions usable as extensions.* (uuid-ossp, pgcrypto)', async () => {
+    await R.check('1.5 extensions usable as extensions.* (uuid-ossp, pgcrypto); the rest of the baseline\'s extension list accounted for', async () => {
       const r = (await pg(`SELECT extensions.uuid_generate_v4() IS NOT NULL u, length(extensions.gen_salt('bf'))>0 c, encode(extensions.digest('a','sha256'),'hex') h`)).rows[0];
       if (!r.u || !r.c || !r.h.startsWith('ca978112')) throw new Error('not usable');
+      const have = (await pg(`SELECT e.extname, n.nspname FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace ORDER BY 1`)).rows;
+      for (const need of ['uuid-ossp', 'pgcrypto']) if (!have.some((x) => x.extname === need && x.nspname === 'extensions')) throw new Error(`${need} is not in schema extensions`);
+      const wanted = ['pg_cron', 'pg_net', 'pg_stat_statements', 'pgcrypto', 'supabase_vault', 'uuid-ossp'];        // what the baseline asks for (CREATE EXTENSION)
+      const skipped = wanted.filter((w) => !have.some((x) => x.extname === w));
+      // pg_cron / pg_net / supabase_vault are Supabase-platform extensions: not in the PostgreSQL bundle, skipped by the baseline's guarded DO blocks
+      if (skipped.some((x) => !['pg_cron', 'pg_net', 'supabase_vault'].includes(x))) throw new Error(`unexpectedly missing: ${skipped.join(', ')}`);
+      const netStub = (await pg(`SELECT net.http_post('http://example.invalid') IS NULL AS ok`)).rows[0].ok;
+      if (!netStub) throw new Error('net.http_post stub missing');
+      return `installed: ${have.map((x) => x.extname).join(', ')}; platform-only, skipped: ${skipped.join(', ')} (net.http_* stubbed)`;
     });
     await R.check('1.6 production grants/RLS intact: no GRANT-to-anon added, no table lost RLS', async () => {
       const inv = JSON.parse(fs.readFileSync(path.join(ROOT, 'baseline', 'production_baseline.inventory.json'), 'utf8'));
@@ -314,6 +323,30 @@ async function main() {
       const local = await request('GET', `${UI}/api/companies`, { headers: H });
       if (local.status !== 200) throw new Error(`same call locally (through the UI proxy, with the secret) → ${local.status}`);
       return 'tunnel: 403/403/403, /api/ping 200; local with secret 200';
+    });
+
+    await R.check('4.7 GoTrue: signup is off, and neither the anon key nor a plain user can reach its admin API', async () => {
+      const signup = await request('POST', `${API}/auth/v1/signup`, { headers: anon, body: { email: 'stranger@evil.test', password: 'Passw0rd!stranger' } });
+      if (signup.status < 400) throw new Error(`signup accepted (${signup.status})`);
+      const exists = (await pg(`SELECT count(*)::int n FROM auth.users WHERE email='stranger@evil.test'`)).rows[0].n;
+      if (exists) throw new Error('signup created a user');
+      const asAnon = await request('GET', `${API}/auth/v1/admin/users`, { headers: anon });
+      const asUser = await request('GET', `${API}/auth/v1/admin/users`, { headers: { apikey: secrets.anonKey, Authorization: `Bearer ${A.accessToken}` } });
+      if (asAnon.status < 400 || asUser.status < 400) throw new Error(`admin users: anon ${asAnon.status}, user ${asUser.status}`);
+      return `signup ${signup.status}, admin/users anon ${asAnon.status} / user ${asUser.status}`;
+    });
+    await R.check('4.8 listeners: PostgreSQL, PostgREST, GoTrue and the admin API are bound to 127.0.0.1 only', async () => {
+      const out = require('child_process').execFileSync('lsof', ['-nP', '-iTCP', '-sTCP:LISTEN'], { encoding: 'utf8' });
+      const lines = out.split('\n');
+      const bad = []; const seen = [];
+      for (const [name, port] of [['postgres', PORTS.pg], ['postgrest', PORTS.postgrest], ['gotrue', PORTS.gotrue], ['admin API', PORTS.admin]]) {
+        const l = lines.filter((x) => new RegExp(`:${port} \\(LISTEN\\)`).test(x));
+        if (!l.length) { bad.push(`${name}:${port} not listening`); continue; }
+        for (const x of l) { if (!/(127\.0\.0\.1|\[::1\]|localhost):\d+ \(LISTEN\)/.test(x)) bad.push(`${name}:${port} → ${x.split(/\s+/).slice(-2, -1)[0]}`); }
+        seen.push(`${name}:${port}`);
+      }
+      if (bad.length) throw new Error(bad.join('; '));
+      return `loopback only: ${seen.join(', ')} (the web UI + API gateway are the two LAN-facing ports by design)`;
     });
 
     // ── 5. the web UI ──
