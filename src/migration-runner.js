@@ -34,8 +34,11 @@ class MigrationRunner {
         checksum      TEXT,
         execution_ms  INTEGER
       );
-      -- Allow service_role to read migration state
-      GRANT SELECT ON public._texacore_migrations TO anon, authenticated, service_role;
+      -- 2.0.0: the baseline's DEFAULT PRIVILEGES hand every new public table to anon/authenticated. This bookkeeping table must
+      -- be reachable by nobody over the API: revoke, and turn RLS on with no policy (deny by default).
+      ALTER TABLE public._texacore_migrations ENABLE ROW LEVEL SECURITY;
+      REVOKE ALL ON public._texacore_migrations FROM PUBLIC, anon, authenticated;
+      REVOKE ALL ON SEQUENCE public._texacore_migrations_id_seq FROM PUBLIC, anon, authenticated;
     `);
   }
 

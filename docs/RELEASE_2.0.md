@@ -42,9 +42,17 @@ packaged web bundle is not this version, if fonts/binaries/bootstrap SQL are mis
 node scripts/e2e/launch-check.js --workdir /tmp/lc --license free  --erp $ERP --rsf "<Rashid .rsf>"
 node scripts/e2e/launch-check.js --workdir /tmp/lc2 --license trial --erp $ERP
 ```
-Runs the real ServiceManager headless in Electron dev mode on ports 47391-47396 with its own userData (never the real app's), cloudflared/MeshAgent
-stubbed: first run → baseline → services; admin + company; browser login; anon refused; tenant isolation; admin-API secret; tunnel default-deny;
-plan sync; Rashid import. Exit 0 = all passed; evidence in `<workdir>/results.json`.
+Runs the real ServiceManager headless on ports 47391-47396 with its own userData (never the real app's), cloudflared/MeshAgent stubbed — in Electron
+dev mode, or with `--app "dist/mac-arm64/TexaCore ERP.app"` against the PACKAGED build (the harness switches are honoured in a packaged app only when
+`TEXACORE_USER_DATA` and `TEXACORE_PORT_BASE` are both set): first run → baseline → services; admin + company; browser login; anon refused; tenant
+isolation; admin-API secret; tunnel default-deny; GoTrue signup/admin; plan sync; Rashid import. Exit 0 = all passed; evidence in `<workdir>/results.json`.
+
+```bash
+node scripts/e2e/states-check.js    --workdir /tmp/st --app "dist/mac-arm64/TexaCore ERP.app"   # interrupted first run / 1.x data dir / restart
+node scripts/e2e/backup-roundtrip.js --workdir /tmp/lc --app "dist/mac-arm64/TexaCore ERP.app"  # .tcdb backup → restore on an existing launch-check install
+npm test                                                                                        # unit tests (60)
+node scripts/check-rpc-coverage.js --erp $ERP                                                   # does the baseline contain every RPC the ERP calls?
+```
 
 ## Publish
 

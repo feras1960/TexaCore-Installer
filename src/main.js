@@ -2224,6 +2224,7 @@ const httpServer = http.createServer(async (req, res) => {
         backupManager.startSync();
 
         let companyName = fileName.replace('.tcdb', '');
+        let restoreIntegrity = null;   // filled after the services restart (see below)
         // Query actual company info from restored DB
         let companyId = null;
         let tenantId = null;
@@ -2283,25 +2284,19 @@ const httpServer = http.createServer(async (req, res) => {
             await svcManager.startPostgREST();
             console.log('[OpenTCDB] ✅ PostgREST restarted');
 
-            // Disable RLS on restored tables
+            // 2.0.0: NOTHING here widens access any more. 1.x disabled RLS on every table and granted ALL to anon after a restore — the
+            // very hole 2.0 closes. A 2.0 backup carries production's grants and RLS flags (pg_dump keeps them); a pre-2.0 one does not,
+            // and is reported instead of being made "work" by opening the database to anonymous callers.
             try {
-              await svcManager.psqlExec(`
-                DO $$ DECLARE r RECORD; BEGIN
-                  FOR r IN SELECT tablename FROM pg_tables WHERE schemaname = 'public' LOOP
-                    EXECUTE 'ALTER TABLE public.' || quote_ident(r.tablename) || ' DISABLE ROW LEVEL SECURITY';
-                  END LOOP;
-                END $$;
-                GRANT USAGE ON SCHEMA public TO anon, authenticated, service_role;
-                GRANT ALL ON ALL TABLES IN SCHEMA public TO anon, authenticated, service_role;
-                GRANT ALL ON ALL SEQUENCES IN SCHEMA public TO anon, authenticated, service_role;
-                GRANT EXECUTE ON ALL FUNCTIONS IN SCHEMA public TO anon, authenticated, service_role;
-                NOTIFY pgrst, 'reload schema';
-              `);
-              console.log('[OpenTCDB] ✅ RLS disabled + grants applied');
-            } catch (rlsErr) {
-              console.warn('[OpenTCDB] RLS/grants warning:', rlsErr.message);
+              await svcManager.psqlExec(`NOTIFY pgrst, 'reload schema';`);
+              restoreIntegrity = await svcManager.verifyBaselineInstall();
+              if (!restoreIntegrity.ok) console.warn('[OpenTCDB] ⚠️ the restored database does not match the 2.0 baseline:', restoreIntegrity.problems.slice(0, 3).join(' | '));
+              else console.log('[OpenTCDB] ✅ restored database matches the 2.0 baseline');
+            } catch (integrityErr) {
+              restoreIntegrity = { ok: false, problems: [integrityErr.message] };
+              console.warn('[OpenTCDB] integrity check failed:', integrityErr.message);
             }
-            
+
             // Fix auth schema ownership for GoTrue
             // pg_restore sets owner to 'postgres', but GoTrue needs supabase_auth_admin
             try {
@@ -2359,6 +2354,7 @@ const httpServer = http.createServer(async (req, res) => {
           tenantId,
           users,
           tcdbPath: selectedPath,
+          integrity: restoreIntegrity ? { ok: restoreIntegrity.ok, problems: restoreIntegrity.problems.slice(0, 5) } : null,
           ...restoreResult 
         }));
       } else if (isRsf) {
@@ -2375,9 +2371,6 @@ const httpServer = http.createServer(async (req, res) => {
       res.end(JSON.stringify({ success: false, error: err.message }));
     }
 
-  // ─── POST /api/import-rsf-path ───────────────────────────────
-  // Import RSF by file path (from Electron native dialog)
-  // Uses EXACT same logic as /api/import-rsf (browser upload) — proven and tested
   } else if (req.method === 'POST' && req.url === '/api/restore-tcdb') {
     res.setHeader('Access-Control-Allow-Origin', '*');
     
