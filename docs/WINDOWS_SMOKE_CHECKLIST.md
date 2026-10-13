@@ -5,15 +5,26 @@ code paths). Nothing could be RUN. This list is the first run. ~30 minutes. Stop
 
 **Before you start**
 - Windows 10/11, 64-bit. Use a PC (or a fresh VM) that has never had TexaCore.
-- Unsigned installer: Windows SmartScreen says "Unknown publisher" → *More info* → *Run anyway*.
-- PostgreSQL needs the **Microsoft Visual C++ 2015-2022 x64 runtime** (VCRUNTIME140.dll). The installer installs it silently if it was bundled
-  (`build/vcredist/vc_redist.x64.exe`) and the PC lacks it. If this build was made without it, install it first (https://aka.ms/vs/17/release/vc_redist.x64.exe)
-  — a clean PC without it fails at step 3 with "VCRUNTIME140.dll was not found".
+- Unsigned installer: Windows SmartScreen says "Unknown publisher" -> *More info* -> *Run anyway*.
+- The installer shows the licence agreement (English, then Arabic): read it, accept, continue. Installation needs administrator rights (the installer is per-machine).
+- PostgreSQL needs the **Microsoft Visual C++ 2015-2022 x64 runtime** (VCRUNTIME140.dll). This build BUNDLES Microsoft's `vc_redist.x64.exe` (14.44.35211) and the installer runs it silently
+  (`/install /quiet /norestart`) when the PC lacks the runtime or has an older build. Test BOTH situations (steps 0a and 0b below) — the whole point of bundling it is the clean PC.
+
+**Step 0a - a CLEAN PC with no Visual C++ runtime** (a fresh Windows VM is ideal; check first: *Settings -> Apps* shows no "Microsoft Visual C++ 2015-2022 Redistributable (x64)", and
+`reg query "HKLM\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64"` says the key is not found)
+1. Run `TexaCore-ERP-Setup-2.0.0.exe`. During the install the progress text mentions "Installing the Microsoft Visual C++ runtime ..." (a short extra step; no windows pop up).
+2. When it finishes, *Settings -> Apps* now lists "Microsoft Visual C++ 2015-2022 Redistributable (x64) - 14.44.35211" (or newer), and the registry key above shows `Installed 0x1` and `Bld` >= 35211.
+3. A restart is NOT required. Continue with step 1 below: the first start (step 3) must reach "running" with no "VCRUNTIME140.dll was not found" and no database error.
+   *If step 1 shows a message box "The Microsoft Visual C++ runtime could not be installed (code ...)", write the code down and send the install log.*
+
+**Step 0b - a PC that already has the runtime** (any current Windows 10/11 that has run recent software; or after 0a)
+1. Run the installer again (or on another PC). The install log line reads "Microsoft Visual C++ runtime already installed (build ...) - skipped" and no second runtime is installed.
+2. On a PC with an OLDER runtime (build below 35211) the installer updates it silently: afterwards `Bld` is >= 35211. Existing programs keep working.
 
 **Steps** (tick each; note what you see when it does not match)
 1. Run `TexaCore-ERP-Setup-2.0.0.exe` (administrator prompt: yes). It installs without asking questions and starts TexaCore ERP.
 2. The app window opens and shows 2.0.0 (footer). Choose **Start Free** (no internet needed).
-3. Wait for the first start (1–3 minutes: database creation). The window must reach "running"; no error box. *This is the PostgreSQL + VC++ runtime test.*
+3. Wait for the first start (1-3 minutes: database creation). The window must reach "running"; no error box. *This is the PostgreSQL + VC++ runtime test.*
 4. Create a company (name, your e-mail, a password of 6+ characters, currency). It must succeed; the ERP page opens in the browser at `http://localhost`.
 5. Sign in on that page with the e-mail/password. The dashboard opens, fonts look right (Arabic, no boxes).
 6. Open the ERP's subscription/plan screen: plan = Free, with the control panel's limits (1 user, 1 company, 1 branch, 1 warehouse, 200 customers, 200 invoices/month).
@@ -30,6 +41,8 @@ code paths). Nothing could be RUN. This list is the first run. ~30 minutes. Stop
 
 **Where the logs are** (send this folder if anything fails): `%APPDATA%\TexaCore ERP\` → `logs\heartbeat.log` and `texacore-data\logs\`
 (`postgres.log`, `baseline-load.json`, `gotrue.log`, `postgrest.log`), plus `texacore-data\bootstrap.json`.
+
+**Where the install log is**: the installer's own detail text (click *Show details* on its progress page) lists the runtime step; send a screenshot of it if 0a/0b misbehave.
 
 **Known untested-on-Windows assumptions** (the first things to look at if step 3 fails): `initdb --locale=C --locale-provider=icu --icu-locale=en-US`;
 `pg_ctl start` (no unix socket on Windows); loopback-only `pg_hba.conf`; the ICU 67 that ships with the EDB build (production runs a newer ICU — irrelevant to a fresh local database).

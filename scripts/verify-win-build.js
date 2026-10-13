@@ -14,6 +14,7 @@
 //   W5  the pinned database baseline + the web bundle (2.0.0, local fonts) are in the installer, byte-for-byte what the pin says
 //   W6  PostgreSQL 17.6: postgres/initdb/pg_ctl/psql/pg_dump/pg_restore, ICU, the extensions the baseline needs, everything initdb reads,
 //       and the DLL CLOSURE — every DLL each executable imports is in the bundle or is a Windows system DLL (PE import tables parsed here)
+//   W9  the Visual C++ runtime is bundled (pinned Microsoft file) and the silent-install step is wired and version-aware
 //   W7  GoTrue, PostgREST, cloudflared are x64 PE files; GoTrue/PostgREST versions equal the macOS ones that were launch-tested
 // ════════════════════════════════════════════════════════════════
 const fs = require('fs');
@@ -248,6 +249,32 @@ const VC_RUNTIME = /^(vcruntime\d+(_\d+)?|msvcp\d+(_\d+)?|concrt\d+|vcomp\d+|vcc
       const text = out.status === 0 ? out.stdout : null;
       if (text !== null && (!text.includes(CLAUSE_EN) || !text.includes(CLAUSE_AR))) throw new Error('the RTF does not carry both clauses verbatim after parsing');
       return `oneClick=false, license=build/eula.rtf${text !== null ? ' (parsed: both clauses verbatim)' : ' (clauses checked in the generator tests; textutil not available)'}; the licence text is compiled INTO the installer by makensis (the build log shows "oneClick=false")`;
+    });
+
+    await R.check('W9 the Visual C++ 2015-2022 x64 runtime is bundled (pinned, Microsoft-signed) and the silent install is wired: /install /quiet /norestart, skipped when already installed', async () => {
+      const { PINNED, verifyRedist } = require('./prepare-vcredist');
+      const f = path.join(res, 'vcredist', 'vc_redist.x64.exe');
+      if (!fs.existsSync(f)) throw new Error('resources/vcredist/vc_redist.x64.exe is not in the installer (node scripts/prepare-vcredist.js <file>, then rebuild)');
+      const bad = verifyRedist(fs.readFileSync(f));
+      if (bad.length) throw new Error(`the bundled file is not the pinned Microsoft redistributable: ${bad.join('; ')}`);
+      // the wiring — the source the installer was compiled from (electron-builder includes build/installer.nsh via nsis.include; the compile succeeded)
+      if (pkg.build.nsis.include !== 'build/installer.nsh') throw new Error('nsis.include does not point at build/installer.nsh');
+      const nsh = read(path.join(ROOT, 'build', 'installer.nsh')).replace(/^\s*;.*$/gm, '');
+      const need = [
+        [/!macro customInstall/, 'customInstall macro'],
+        [/SetRegView 64/, '64-bit registry view'],
+        [/HKLM "SOFTWARE\\Microsoft\\VisualStudio\\14\.0\\VC\\Runtimes\\x64" "Installed"/, 'reads the Installed value'],
+        [/HKLM "SOFTWARE\\Microsoft\\VisualStudio\\14\.0\\VC\\Runtimes\\x64" "Bld"/, 'reads the Bld value'],
+        [/\$0 != 1\s*\n\s*\$\{OrIf\} \$2 < \$\{VCREDIST_BLD\}/, 'runs only when missing or older than the bundled build'],
+        [/ExecWait '"\$INSTDIR\\resources\\vcredist\\vc_redist\.x64\.exe" \/install \/quiet \/norestart' \$1/, 'silent install command line'],
+        [/\$1 != 3010[\s\S]*\$1 != 1638/, 'exit codes 3010/1638 accepted'],
+        [/\$\{Else\}\s*\n\s*DetailPrint "Microsoft Visual C\+\+ runtime already installed[^"]*skipped"/, 'skipped when already installed'],
+      ];
+      const missing = need.filter(([re]) => !re.test(nsh)).map(([, w]) => w);
+      if (missing.length) throw new Error(`installer.nsh lacks: ${missing.join('; ')}`);
+      const ver = read(path.join(ROOT, 'build', 'vcredist', 'vcredist-version.nsh'));
+      if (!new RegExp(`!define VCREDIST_BLD ${PINNED.version.split('.')[2]}\\b`).test(ver)) throw new Error('vcredist-version.nsh does not carry the pinned build number');
+      return `bundled resources/vcredist/vc_redist.x64.exe = the pinned file (${PINNED.bytes} bytes, sha256 ${PINNED.sha256.slice(0, 16)}…, Microsoft Authenticode block, v${PINNED.version}); installer.nsh: reads HKLM ...\\VC\\Runtimes\\x64 Installed+Bld, runs "/install /quiet /norestart" only when missing or build < ${PINNED.version.split('.')[2]}, accepts exit codes 0/3010/1638, otherwise prints "already installed ... skipped"`;
     });
 
   } catch (e) {

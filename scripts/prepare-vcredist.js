@@ -1,16 +1,66 @@
 #!/usr/bin/env node
 'use strict';
-// prepare-vcredist — put Microsoft's vc_redist.x64.exe into build/vcredist so the Windows installer carries it
-// (build/installer.nsh runs it silently when the PC lacks the Visual C++ 2015-2022 x64 runtime that PostgreSQL needs).
-//   node scripts/prepare-vcredist.js <vc_redist.x64.exe>      source: https://aka.ms/vs/17/release/vc_redist.x64.exe  (~18-25 MB)
+// prepare-vcredist — put Microsoft's vc_redist.x64.exe into build/vcredist so the Windows installer carries it. PostgreSQL's Windows build (EnterpriseDB)
+// imports VCRUNTIME140.dll / MSVCP140.dll; a clean PC does not have them. build/installer.nsh runs the redistributable silently
+// (/install /quiet /norestart) when the PC lacks the Visual C++ 2015-2022 x64 runtime, or has an OLDER one than the file bundled here.
+//
+//   node scripts/prepare-vcredist.js <vc_redist.x64.exe>      source: https://aka.ms/vs/17/release/vc_redist.x64.exe
+//
+// The file is pinned (sha256 + size): a different file is refused. It must also be a 64-bit Windows executable that carries an Authenticode signature block by
+// Microsoft Corporation (the signature itself cannot be validated on a Mac; the pinned hash is what Microsoft's own download URL embeds).
+// Writes build/vcredist/vc_redist.x64.exe and build/vcredist/vcredist-version.nsh (!define VCREDIST_BLD <build number of the bundled runtime>).
+// Neither is committed (.gitignore).
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
-const src = process.argv[2];
-if (!src || !fs.existsSync(src)) { console.error('usage: node scripts/prepare-vcredist.js <vc_redist.x64.exe>'); process.exit(2); }
-const buf = fs.readFileSync(src);
-if (buf.readUInt16LE(0) !== 0x5a4d || buf.length < 5e6 || buf.length > 6e7) { console.error('this does not look like vc_redist.x64.exe (a Windows executable of 5-60 MB)'); process.exit(2); }
-if (!buf.toString('latin1').includes('Microsoft Corporation')) { console.error('no "Microsoft Corporation" in the file — refusing'); process.exit(2); }
-const dest = path.join(__dirname, '..', 'build', 'vcredist', 'vc_redist.x64.exe');
-fs.copyFileSync(src, dest);
-console.log(`  OK: ${path.relative(path.join(__dirname, '..'), dest)} (${buf.length} bytes, sha256 ${crypto.createHash('sha256').update(buf).digest('hex')})`);
+
+const PINNED = { file: 'vc_redist.x64.exe', bytes: 25635768, sha256: 'cc0ff0eb1dc3f5188ae6300faef32bf5beeba4bdd6e8e445a9184072096b713b', version: '14.44.35211.0' };
+const DEST_DIR = path.join(__dirname, '..', 'build', 'vcredist');
+
+/** PE facts without a Windows toolchain: machine, whether an Authenticode block exists, and the fixed file version. */
+function peFacts(buf) {
+  if (buf.readUInt16LE(0) !== 0x5a4d) throw new Error('not a PE file');
+  const pe = buf.readUInt32LE(0x3c);
+  if (buf.toString('latin1', pe, pe + 4) !== 'PE\0\0') throw new Error('no PE signature');
+  const opt = pe + 24;
+  const magic = buf.readUInt16LE(opt);
+  const dd = opt + (magic === 0x20b ? 112 : 96);
+  const secOff = buf.readUInt32LE(dd + 4 * 8);       // data directory 4 = certificate table (a FILE offset)
+  const secSize = buf.readUInt32LE(dd + 4 * 8 + 4);
+  let version = '';
+  const i = buf.indexOf(Buffer.from([0xbd, 0x04, 0xef, 0xfe]));
+  if (i > 0) { const ms = buf.readUInt32LE(i + 8); const ls = buf.readUInt32LE(i + 12); version = `${ms >>> 16}.${ms & 0xffff}.${ls >>> 16}.${ls & 0xffff}`; }
+  return { machine: buf.readUInt16LE(pe + 4), signedBlockBytes: secOff && secSize ? secSize : 0, signedBlockText: secOff && secSize ? buf.subarray(secOff, secOff + secSize).toString('latin1') : '', version };
+}
+
+function verifyRedist(buf) {
+  const problems = [];
+  if (buf.length !== PINNED.bytes) problems.push(`size ${buf.length}, pinned ${PINNED.bytes}`);
+  const sha = crypto.createHash('sha256').update(buf).digest('hex');
+  if (sha !== PINNED.sha256) problems.push(`sha256 ${sha}, pinned ${PINNED.sha256}`);
+  try {
+    const f = peFacts(buf);
+    if (f.machine !== 0x8664 && f.machine !== 0x14c) problems.push(`machine 0x${f.machine.toString(16)}`);
+    if (!f.signedBlockBytes) problems.push('no Authenticode signature block');
+    else if (!/Microsoft/.test(f.signedBlockText)) problems.push('the signature block does not name Microsoft');
+    if (f.version !== PINNED.version) problems.push(`file version ${f.version}, pinned ${PINNED.version}`);
+  } catch (e) { problems.push(e.message); }
+  return problems;
+}
+
+function main() {
+  const src = process.argv[2];
+  if (!src || !fs.existsSync(src)) { console.error('usage: node scripts/prepare-vcredist.js <vc_redist.x64.exe>'); process.exit(2); }
+  const buf = fs.readFileSync(src);
+  const problems = verifyRedist(buf);
+  if (problems.length) { console.error(`prepare-vcredist: ${path.basename(src)} is not the pinned Microsoft redistributable — ${problems.join('; ')}`); process.exit(2); }
+  const bld = Number(PINNED.version.split('.')[2]);
+  fs.mkdirSync(DEST_DIR, { recursive: true });
+  fs.writeFileSync(path.join(DEST_DIR, PINNED.file), buf);
+  fs.writeFileSync(path.join(DEST_DIR, 'vcredist-version.nsh'),
+    `; generated by scripts/prepare-vcredist.js — the build number of the bundled Visual C++ runtime (${PINNED.version})\n!define VCREDIST_BLD ${bld}\n`);
+  console.log(`  OK: build/vcredist/${PINNED.file} (${buf.length} bytes, sha256 ${PINNED.sha256}, Microsoft-signed, version ${PINNED.version}); installer.nsh installs it when the PC has no runtime or build < ${bld}`);
+}
+
+module.exports = { PINNED, peFacts, verifyRedist };
+if (require.main === module) main();

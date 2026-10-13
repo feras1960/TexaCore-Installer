@@ -166,6 +166,7 @@ baseline/*
 
 # Windows build: Microsoft Visual C++ redistributable (never committed; see build/vcredist/README.txt)
 /build/vcredist/*.exe
+/build/vcredist/*.nsh
 
 # Encrypted baseline container + its per-build key module (scripts/pack-baseline.js) — never committed
 /build/baseline-pack/
