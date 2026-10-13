@@ -25,10 +25,11 @@ const sha256File = (f) => crypto.createHash('sha256').update(fs.readFileSync(f))
  * @param {string} o.appCodeDir    where src/ landed (<resourcesDir>/app with asar:false)
  * @param {string} o.repoRoot      the installer repo (to compare the pin and read package.json)
  * @param {'darwin'|'win32'} o.platform
+ * @param {boolean} [o.expectObfuscated] the main-process code in the package must be obfuscated and come from exactly the repo's sources
  * @param {string} [o.scanRoot]    the whole packaged app (default: resourcesDir) — scanned for plaintext database DDL
  * @returns {string[]} problems (empty = OK)
  */
-function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform, scanRoot }) {
+function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform, scanRoot, expectObfuscated = false }) {
   const problems = [];
   const exe = (n) => (platform === 'win32' ? `${n}.exe` : n);
 
@@ -70,6 +71,34 @@ function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform, scanRoot }
   if (fs.existsSync(bootDir) && fs.readdirSync(bootDir).some((f) => f.endsWith('.sql'))) problems.push('plain SQL files are in the app code (src/bootstrap/*.sql) — they belong in the encrypted container');
   if (fs.existsSync(bdir) && fs.readdirSync(bdir).some((f) => /\.(sql|json)$/.test(f) && !['BASELINE_PIN.json', 'PACKED.json'].includes(f))) problems.push('plain baseline files are in the package (baseline/)');
   problems.push(...scanForPlaintextSql(scanRoot || resourcesDir, resourcesDir));
+
+  // ── the main-process code is hardened, and made from exactly these sources ──
+  if (expectObfuscated) {
+    const mf = path.join(appCodeDir, 'src-manifest.json');
+    if (!fs.existsSync(mf)) problems.push('src-manifest.json is missing — the packaged code was not obfuscated');
+    else {
+      let man = null;
+      try { man = JSON.parse(fs.readFileSync(mf, 'utf8')); } catch (e) { problems.push(`src-manifest.json unreadable: ${e.message}`); }
+      if (man) {
+        if (man.obfuscated !== true) problems.push('src-manifest.json says the code is not obfuscated');
+        for (const [rel, hash] of Object.entries(man.files || {})) {
+          const repoFile = path.join(repoRoot, 'src', rel);
+          if (!fs.existsSync(repoFile)) { problems.push(`manifest lists src/${rel} which is not in the repo`); continue; }
+          if (sha256File(repoFile) !== hash) problems.push(`the packaged src/${rel} was built from different source than the repo's`);
+        }
+        // (exported property names and regular-expression literals legitimately stay; these identifiers and strings must be gone)
+        const READABLE = ['function handleCreateLocalCompany', 'adminRequestIsLocal', 'class ServiceManager', 'fn_membership_invite_create', 'SELECT public.check_plan_limits', 'INSERT INTO public.subscription_plans', 'TEXACORE-IMPORT-EXEMPT'];
+        for (const f of ['main.js', 'service-manager.js', 'provisioning.js', 'plan-sync.js', 'secrets.js', 'function-patches.js', 'preload.js', 'baseline-key.generated.js']) {
+          const p = path.join(appCodeDir, 'src', f);
+          if (!fs.existsSync(p)) continue;
+          const t = fs.readFileSync(p, 'utf8');
+          const leak = READABLE.find((x) => t.includes(x));
+          if (leak) problems.push(`src/${f} is still readable ("${leak}")`);
+          if (t.split('\n').length > 60 && /^\s{2,}\S/m.test(t)) problems.push(`src/${f} still looks like formatted source`);
+        }
+      }
+    }
+  }
 
   // ── web bundle ──
   const fe = path.join(resourcesDir, 'frontend');

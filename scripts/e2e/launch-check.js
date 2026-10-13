@@ -66,7 +66,7 @@ async function main() {
   console.log(`launch-check: license=${LICENSE} workdir=${WORK}`);
   const appBinary = APP ? path.join(path.resolve(APP), 'Contents', 'MacOS', path.basename(path.resolve(APP), '.app')) : '';
   if (APP && !fs.existsSync(appBinary)) { console.error(`no executable at ${appBinary}`); process.exit(2); }
-  const { child, ready } = startApp({ userData, license: LICENSE, logFile, appBinary });
+  const { child, ready } = startApp({ userData, license: LICENSE, logFile, appBinary, extraEnv: { TEXACORE_UI_SMOKE: '1' } });
   let secrets = null;
   try {
     await R.check('1.1 first run: initdb → baseline → services up', async () => {
@@ -169,6 +169,20 @@ async function main() {
       A = r.json;
       if (!A.companyId || !A.accessToken || !A.refreshToken) throw new Error('response lacks companyId / session');
       return `company ${A.companyId.slice(0, 8)}…`;
+    });
+    await R.check('3.1b the installer window works in THIS build (preload bridge, IPC handlers, renderer, i18n) against the live services', async () => {
+      const r = await request('GET', `${ADMIN}/api/ui-smoke`, { headers: H });
+      if (r.status !== 200 || !r.json || !r.json.ok) throw new Error(`ui-smoke → ${r.status} ${r.text.slice(0, 300)}`);
+      const u = r.json;
+      if (u.version !== '2.0.0') throw new Error(`window reports version ${u.version}`);
+      if (!(u.bridgeKeys >= 20)) throw new Error(`preload bridge exposes only ${u.bridgeKeys} functions`);
+      if (!u.state.ok || !u.state.hasConfig) throw new Error(`get-state over IPC: ${JSON.stringify(u.state)}`);
+      if (u.secretLength < 32) throw new Error('the window did not receive the admin secret over IPC');
+      if (!u.companies.success || u.companies.n < 1) throw new Error(`list-local-companies over IPC: ${JSON.stringify(u.companies)}`);
+      const e = u.employeesBox;
+      if (e.display !== 'block' || !/^http:\/\/.+\/login\?c=[0-9a-f]{8}$/.test(e.link) || e.companies < 1 || e.roles < 1) throw new Error(`employees box not drawn from live data: ${JSON.stringify(e)}`);
+      if (!u.i18n || u.i18n.length < 2) throw new Error('i18n not applied');
+      return `window v${u.version}: ${u.bridgeKeys} bridge functions, state/secret/companies over IPC, employees box drawn (${e.link}; ${e.companies} company, ${e.roles} roles), i18n applied`;
     });
     await R.check('3.2 tenants.owner_email + user_profiles.is_tenant_admin set; base currency from the user\'s choice (UAH, not SAR)', async () => {
       const r = (await pg(`SELECT t.owner_email, up.is_tenant_admin, up.role, c.default_currency, cas.base_currency, cas.supported_currencies::text sc

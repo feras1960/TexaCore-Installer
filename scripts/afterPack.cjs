@@ -9,8 +9,24 @@ const path = require('path');
 exports.default = async function afterPack(context) {
   const srcModules = path.join(__dirname, '..', 'node_modules');
 
+  // ── 2.0.0 hardening: the main-process / preload / service code in the package is obfuscated BEFORE the gate (so the gate checks what ships)
+  // and before signing. The sources in git stay readable. TEXACORE_NO_OBFUSCATE=1 is for debugging a build only. ──
+  {
+    const isMac = context.electronPlatformName === 'darwin';
+    const appName = context.packager.appInfo.productFilename + '.app';
+    const resourcesDir = isMac
+      ? path.join(context.appOutDir, appName, 'Contents', 'Resources')
+      : path.join(context.appOutDir, 'resources');
+    if (process.env.TEXACORE_NO_OBFUSCATE === '1') {
+      console.warn('  • afterPack: ⚠️  TEXACORE_NO_OBFUSCATE=1 — this build keeps READABLE code (debug builds only, never release)');
+    } else {
+      const { obfuscateAppCode } = require('./lib/obfuscate-app');
+      obfuscateAppCode(path.join(resourcesDir, 'app'), { log: (m) => console.log(`  • afterPack: ${m}`) });
+    }
+  }
+
   // ── 2.0.0 gate: refuse to produce an app that cannot bootstrap its database ──
-  // (1.9.0's first trial died because the pinned baseline was not packaged.) Runs first; a throw fails the build.
+  // (1.9.0's first trial died because the pinned baseline was not packaged.) Runs first (after obfuscation); a throw fails the build.
   {
     const { verifyPacked } = require('./lib/verify-packed');
     const isMac = context.electronPlatformName === 'darwin';
@@ -24,6 +40,7 @@ exports.default = async function afterPack(context) {
       repoRoot: path.join(__dirname, '..'),
       platform: context.electronPlatformName === 'darwin' ? 'darwin' : 'win32',
       scanRoot: isMac ? path.join(context.appOutDir, appName) : context.appOutDir,
+      expectObfuscated: process.env.TEXACORE_NO_OBFUSCATE !== '1',
     });
     if (problems.length) {
       throw new Error(`afterPack: the packaged app is incomplete —\n  - ${problems.join('\n  - ')}`);

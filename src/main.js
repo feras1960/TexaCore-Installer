@@ -274,6 +274,7 @@ function createWindow() {
     titleBarStyle: isMac ? 'hidden' : 'default',
     ...(isMac ? { trafficLightPosition: { x: 16, y: 16 } } : {}),
     backgroundColor: '#0a1628',
+    show: !(HARNESS_OK && process.env.TEXACORE_UI_SMOKE === '1'),     // a release-check run creates the installer window hidden
     webPreferences: {
       preload: path.join(__dirname, 'preload.js'),
       contextIsolation: true,
@@ -1718,6 +1719,25 @@ ipcMain.handle('list-local-companies', async () => {
   catch (e) { return { success: false, companies: [], error: e.message }; }
 });
 
+async function uiSmoke() {
+  if (!mainWindow || mainWindow.isDestroyed()) return { ok: false, error: 'no installer window (start with TEXACORE_UI_SMOKE=1)' };
+  const wc = mainWindow.webContents;
+  if (wc.isLoading()) await new Promise((r) => wc.once('did-finish-load', r));
+  const js = (code) => wc.executeJavaScript(code, true);
+  const out = { ok: true };
+  out.bridgeKeys = await js('Object.keys(window.texacore || {}).length');
+  out.version = await js('window.texacore.getVersion().then((v) => (typeof v === "string" ? v : v && v.version))');
+  out.state = await js('window.texacore.getState().then((s) => ({ ok: !!s, hasConfig: !!s.config, localIp: s.localIp || null }))');
+  out.secretLength = await js('String(window.texacore.getLocalApiSecret() || "").length');
+  out.companies = await js('window.texacore.listLocalCompanies().then((r) => ({ success: r.success, n: (r.companies || []).length }))');
+  await js('_empLast = 0; _empCompanies = []; refreshEmployeesBox(currentState)');
+  await new Promise((r) => setTimeout(r, 1500));
+  out.employeesBox = await js("({ display: document.getElementById('employees-box').style.display, link: document.getElementById('lan-employee-url').textContent, companies: document.getElementById('emp-company').options.length, roles: document.getElementById('emp-role').options.length })");
+  out.i18n = await js("document.querySelector('[data-i18n=\"emp.add\"]').textContent");
+  out.documentTitle = await js('document.title');
+  return out;
+}
+
 // A TexaCore backup container starts with "TCDB" + a format-version byte (backup-manager.js writes/reads the same header).
 function isTcdbContainer(buf) {
   return Buffer.isBuffer(buf) && buf.length >= 153 && buf.subarray(0, 4).toString('latin1') === 'TCDB' && buf[4] >= 1 && buf[4] <= 2;
@@ -2408,6 +2428,11 @@ const httpServer = http.createServer(async (req, res) => {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: err.message }));
     }
+
+  } else if (HARNESS_OK && req.method === 'GET' && req.url === '/api/ui-smoke') {
+    // release-check only (isolated harness runs): drive the installer window — preload bridge, IPC handlers, renderer — against the live services
+    uiSmoke().then((r) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r)); })
+      .catch((e) => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: e.message })); });
 
   } else if (req.method === 'GET' && (req.url || '').startsWith('/api/employee-roles')) {
     (async () => {
@@ -3241,6 +3266,7 @@ app.whenReady().then(() => {
 
   if (DEV_HARNESS) {
     // Launch check: no cloud presence / heartbeat / diagnostics. Optionally auto-start the services.
+    if (process.env.TEXACORE_UI_SMOKE === '1') createWindow();      // hidden (see createWindow): the check drives the real preload bridge + renderer through /api/ui-smoke
     if (process.env.TEXACORE_E2E_AUTOSTART === '1') {
       (async () => {
         try {

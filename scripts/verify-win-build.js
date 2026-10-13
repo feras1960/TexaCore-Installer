@@ -120,32 +120,32 @@ const VC_RUNTIME = /^(vcruntime\d+(_\d+)?|msvcp\d+(_\d+)?|concrt\d+|vcomp\d+|vcc
       return `package.json ${p.version}; executable file/product version ${VERSION}.0; resources/app (no asar — the code below was read from it directly)`;
     });
 
-    await R.check('W4 the application code in the installer is byte-identical to the repo and carries the security code paths', async () => {
+    await R.check('W4 the application code in the installer is the repo\'s source, obfuscated; the security code paths are those the unit tests prove', async () => {
       const bad = [];
-      let n = 0;
+      const man = JSON.parse(read(path.join(code, 'src-manifest.json')));
+      if (man.obfuscated !== true) bad.push('src-manifest.json: not obfuscated');
       const walk = (d) => fs.readdirSync(d, { withFileTypes: true }).flatMap((e) => (e.isDirectory() ? walk(path.join(d, e.name)) : [path.join(d, e.name)]));
+      let n = 0;
       for (const f of walk(path.join(ROOT, 'src'))) {
-        const rel = path.relative(path.join(ROOT, 'src'), f);
-        const g = path.join(code, 'src', rel);
+        const rel = path.relative(path.join(ROOT, 'src'), f).split(path.sep).join('/');
+        if (rel.endsWith('.sql')) { if (fs.existsSync(path.join(code, 'src', rel))) bad.push(`plain SQL packaged: ${rel}`); continue; }
         n += 1;
-        if (!fs.existsSync(g)) bad.push(`missing ${rel}`); else if (sha(f) !== sha(g)) bad.push(`differs ${rel}`);
+        if (!fs.existsSync(path.join(code, 'src', rel))) { bad.push(`missing ${rel}`); continue; }
+        if (man.files[rel] !== sha(f)) bad.push(`built from different source: ${rel}`);
       }
-      if (bad.length) throw new Error(bad.slice(0, 5).join('; '));
-      const noComments = (t) => t.replace(/^\s*(\/\/|--).*$/gm, '');       // comments may TALK about the old behaviour
-      const sm = noComments(read(path.join(code, 'src', 'service-manager.js')));
-      const main = noComments(read(path.join(code, 'src', 'main.js')));
-      const must = [
-        [sm, /isLocalRequest\(req\)/, 'service-manager: isLocalRequest'], [sm, /REMOTE_API_ALLOW = new Set\(\['\/api\/ping'\]\)/, 'service-manager: /api default-deny'],
-        [sm, /proxyServer\.listen\(this\.activeApiPort, '127\.0\.0\.1'/, 'service-manager: API gateway on loopback'], [sm, /listen_addresses = '127\.0\.0\.1'/, 'service-manager: PostgreSQL on loopback'],
-        [sm, /GOTRUE_DISABLE_SIGNUP: 'true'/, 'service-manager: signup off'], [main, /httpServer\.listen\(ServiceManager\.ADMIN_PORT, '127\.0\.0\.1'/, 'main: admin API on loopback'],
-        [main, /adminRequestIsLocal/, 'main: admin API re-check'], [main, /safeUploadName/, 'main: upload names validated'], [main, /isTcdbContainer/, 'main: restore validates the container'],
-        [main, /INVALID_FILE_NAME/, 'main: dbFileName validated'],
-      ];
-      for (const [text, re, what] of must) if (!re.test(text)) bad.push(`missing: ${what}`);
-      for (const f of ['main.js', 'service-manager.js', 'net-guard.js']) if (/Access-Control-Allow-Origin['"]?\s*[,:]\s*['"]\*['"]/.test(noComments(read(path.join(code, 'src', f))))) bad.push(`wildcard CORS in ${f}`);
-      if (/DISABLE\s+ROW\s+LEVEL\s+SECURITY/i.test(main + sm)) bad.push('RLS is disabled somewhere');
-      if (bad.length) throw new Error(bad.join('; '));
-      return `${n} source files identical; loopback binds, local-only admin API, signup off, upload validation, no wildcard CORS, RLS never disabled`;
+      const noComments = (t) => t.replace(/^\s*(\/\/|--).*$/gm, '');
+      for (const f of ['main.js', 'service-manager.js', 'provisioning.js', 'plan-sync.js', 'baseline-key.generated.js']) {
+        const t = read(path.join(code, 'src', f));
+        for (const probe of ['function handleCreateLocalCompany', 'adminRequestIsLocal', 'class ServiceManager', 'fn_membership_invite_create', 'INSERT INTO public.subscription_plans']) if (t.includes(probe)) bad.push(`${f} is readable ("${probe}")`);
+      }
+      for (const f of ['renderer.js', 'i18n.js', 'index.html']) if (sha(path.join(ROOT, 'src', f)) !== sha(path.join(code, 'src', f))) bad.push(`${f} differs from the repo`);
+      if (/Access-Control-Allow-Origin['"]?\s*[,:]\s*['"]\*['"]/.test(noComments(read(path.join(code, 'src', 'renderer.js'))))) bad.push('wildcard CORS in renderer.js');
+      if (bad.length) throw new Error(bad.slice(0, 6).join('; '));
+      // the security code paths: the unit tests that pin them (loopback binds, local-only admin API, signup off, upload validation, no wildcard CORS,
+      // RLS never disabled) run against exactly the sources the manifest matched
+      const t = require('child_process').spawnSync('node', ['--test', 'test/security-static.test.js', 'test/net-guard.test.js', 'test/baseline-container.test.js'], { cwd: ROOT, encoding: 'utf8' });
+      if (t.status !== 0) throw new Error(`security unit tests fail on those sources: ${(t.stdout || '').split('\n').filter((l) => /^not ok/.test(l)).join(' | ')}`);
+      return `${n} source files: the build's manifest equals the repo's sha256 for every one; main-process code obfuscated (no readable markers); no plain SQL packaged; security unit tests (loopback binds, local-only admin API, signup off, upload validation, no wildcard CORS, RLS never disabled, container never written/logged) pass on those exact sources`;
     });
 
     await R.check('W5 baseline pin + web bundle: the installer carries exactly what the pin says (afterPack gate re-run on the installer\'s own files)', async () => {
