@@ -131,8 +131,9 @@ const VC_RUNTIME = /^(vcruntime\d+(_\d+)?|msvcp\d+(_\d+)?|concrt\d+|vcomp\d+|vcc
         if (!fs.existsSync(g)) bad.push(`missing ${rel}`); else if (sha(f) !== sha(g)) bad.push(`differs ${rel}`);
       }
       if (bad.length) throw new Error(bad.slice(0, 5).join('; '));
-      const sm = read(path.join(code, 'src', 'service-manager.js'));
-      const main = read(path.join(code, 'src', 'main.js'));
+      const noComments = (t) => t.replace(/^\s*(\/\/|--).*$/gm, '');       // comments may TALK about the old behaviour
+      const sm = noComments(read(path.join(code, 'src', 'service-manager.js')));
+      const main = noComments(read(path.join(code, 'src', 'main.js')));
       const must = [
         [sm, /isLocalRequest\(req\)/, 'service-manager: isLocalRequest'], [sm, /REMOTE_API_ALLOW = new Set\(\['\/api\/ping'\]\)/, 'service-manager: /api default-deny'],
         [sm, /proxyServer\.listen\(this\.activeApiPort, '127\.0\.0\.1'/, 'service-manager: API gateway on loopback'], [sm, /listen_addresses = '127\.0\.0\.1'/, 'service-manager: PostgreSQL on loopback'],
@@ -141,7 +142,7 @@ const VC_RUNTIME = /^(vcruntime\d+(_\d+)?|msvcp\d+(_\d+)?|concrt\d+|vcomp\d+|vcc
         [main, /INVALID_FILE_NAME/, 'main: dbFileName validated'],
       ];
       for (const [text, re, what] of must) if (!re.test(text)) bad.push(`missing: ${what}`);
-      for (const f of ['main.js', 'service-manager.js', 'net-guard.js']) if (/Access-Control-Allow-Origin['"]?\s*[,:]\s*['"]\*['"]/.test(read(path.join(code, 'src', f)))) bad.push(`wildcard CORS in ${f}`);
+      for (const f of ['main.js', 'service-manager.js', 'net-guard.js']) if (/Access-Control-Allow-Origin['"]?\s*[,:]\s*['"]\*['"]/.test(noComments(read(path.join(code, 'src', f))))) bad.push(`wildcard CORS in ${f}`);
       if (/DISABLE\s+ROW\s+LEVEL\s+SECURITY/i.test(main + sm)) bad.push('RLS is disabled somewhere');
       if (bad.length) throw new Error(bad.join('; '));
       return `${n} source files identical; loopback binds, local-only admin API, signup off, upload validation, no wildcard CORS, RLS never disabled`;
@@ -231,12 +232,12 @@ const VC_RUNTIME = /^(vcruntime\d+(_\d+)?|msvcp\d+(_\d+)?|concrt\d+|vcomp\d+|vcc
       for (const [k, f] of Object.entries(files)) { if (!fs.existsSync(f)) throw new Error(`${k} missing`); if (!peInfo(f).x64) throw new Error(`${k} is not x64`); }
       const grab = (f, re) => { const m = re.exec(fs.readFileSync(f).toString('latin1')); return m ? m[0] : ''; };
       const gt = (f) => grab(f, /supabase\/auth\/internal\/utilities\.Version=v?[\d.]+|GoTrue\/[\d.]+|v2\.\d+\.\d+(?=[\s\S]{0,40}gotrue)/);
-      const winPg = grab(files.postgrest, /PostgREST[\s ]+\d+\.\d+(\.\d+)?/);
-      const macPg = grab(path.join(ROOT, 'bin', 'macos-arm64', 'postgrest', 'postgrest'), /PostgREST[\s ]+\d+\.\d+(\.\d+)?/);
+      const winPg = grab(files.postgrest, /postgrest-\d+\.\d+\.\d+/);
+      const macPg = grab(path.join(ROOT, 'bin', 'macos-arm64', 'postgrest', 'postgrest'), /postgrest-\d+\.\d+\.\d+/);
       const winGt = gt(files.gotrue); const macGt = gt(path.join(ROOT, 'bin', 'macos-arm64', 'gotrue', 'auth'));
       if (macPg && winPg && macPg !== winPg) throw new Error(`PostgREST: windows "${winPg}" vs mac "${macPg}"`);
       if (macGt && winGt && macGt !== winGt) throw new Error(`GoTrue: windows "${winGt}" vs mac "${macGt}"`);
-      return `x64 PE: auth.exe ${Math.round(fs.statSync(files.gotrue).size / 1e6)} MB, postgrest.exe, cloudflared.exe; PostgREST win="${winPg || 'n/a'}" mac="${macPg || 'n/a'}"; GoTrue win="${winGt || 'n/a'}" mac="${macGt || 'n/a'}"`;
+      return `x64 PE: auth.exe ${Math.round(fs.statSync(files.gotrue).size / 1e6)} MB, postgrest.exe, cloudflared.exe; PostgREST win="${winPg || 'n/a'}" mac="${macPg || 'n/a'}"; GoTrue win="${winGt.replace(/^.*Version=/, '') || 'n/a'}" (the macOS binary does not print its version; both were added by the same 1.8.0 commit)`;
     });
   } catch (e) {
     R.rows.push({ name: 'harness', ok: false, evidence: e.message, ms: 0 });
