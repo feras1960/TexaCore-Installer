@@ -40,6 +40,15 @@ test('the tray menu labels are plain text', () => {
   assert.deepEqual(found(main.slice(a, b)), []);
 });
 
+test('the tray title row is a disabled status line: version + running / stopped (Arabic like the rest of the menu)', () => {
+  const main = read('src/main.js');
+  const a = main.indexOf('function createTray()');
+  const block = main.slice(a, main.indexOf('tray.on(', a));
+  const m = /label: `TexaCore ERP \$\{app\.getVersion\(\)\} — \$\{running \? 'يعمل' : 'متوقف'\}`,\s*enabled: false,/.exec(block);
+  assert.ok(m, 'the first tray item must show the version and the running state and stay disabled');
+  assert.ok(/const running = svcManager \? svcManager\.isRunning\(\) : false;/.test(block), 'the running flag comes from the service manager');
+});
+
 test('every icon the markup, script and styles ask for exists in the set, and nothing in the set is dead weight', () => {
   const icons = read('src/icons.js');
   const body = icons.slice(icons.indexOf('const ICONS = {'), icons.indexOf('\n};', icons.indexOf('const ICONS = {')));

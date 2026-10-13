@@ -3161,7 +3161,8 @@ function createTray() {
     const running = svcManager ? svcManager.isRunning() : false;
     const contextMenu = Menu.buildFromTemplate([
       {
-        label: 'TexaCore ERP',
+        // the title row is a status line (greyed out on purpose): the version and whether the system is running; rebuilt every 10 s and after start/stop
+        label: `TexaCore ERP ${app.getVersion()} — ${running ? 'يعمل' : 'متوقف'}`,
         enabled: false,
         icon: icon,
       },
