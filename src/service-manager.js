@@ -19,6 +19,7 @@ const netGuard = require('./net-guard');
 const { openBaselineStore } = require('./baseline-store');
 const { openMigrationsStore } = require('./migrations-store');
 const { TunnelMonitor, redact } = require('./tunnel-monitor');
+const tunnelRoute = require('./tunnel-route');
 
 // ─── Ports (defaults — TEXACORE_PORT_BASE moves the whole block; see ports.js) ───
 const PG_PORT = PORTS.pg;
@@ -65,6 +66,24 @@ class ServiceManager {
     this.tunnel = new TunnelMonitor();   // the honest state of the Cloudflare connector (tunnel-monitor.js)
     this.logger = null;                  // main.js passes its file logger (heartbeat.log) so tunnel events are diagnosable from the log the owner sends
     this.hardwareIdProvider = null;      // main.js passes licenseGuard.getHardwareId (register-subdomain compares it with the licence's bound hardware)
+
+    // 2.0.2: «connected» must mean the PUBLIC LINK reaches this machine, not only that cloudflared registered a connection (tunnel-route.js).
+    this.bootId = tunnelRoute.newBootId();            // per process: the probe answers `texacore-probe:<nonce>:<bootId>`
+    this.nameTaken = null;                            // set when the repair was told the name belongs to another licence
+    this.repairing = false;
+    this.lastRepair = null;                           // { outcome, code, retryAfterSec, trigger, at } — what the launcher tells the user
+    this._repairBlockedUntil = 0;                     // RATE_LIMITED: no register call before this
+    this._autoRepairDone = false;                     // the automatic repair runs at most once per boot
+    this._timing = {};                                // harness-only timing override (isolated runs)
+    try {
+      if (process.env.TEXACORE_TUNNEL_PROBE_TIMING && harnessAllowed(require('electron').app.isPackaged)) this._timing = tunnelRoute.parseTimingOverride(process.env.TEXACORE_TUNNEL_PROBE_TIMING);
+    } catch { /* not under Electron (unit tests) */ }
+    this.route = new tunnelRoute.RouteVerifier({
+      bootId: this.bootId,
+      probe: (nonce) => this._probeFetch(nonce),
+      schedule: this._timing.schedule, quick: this._timing.quick, recheckMs: this._timing.recheckMs,
+      onVerdict: (v) => this._onRouteVerdict(v),
+    });
 
     // 2.0.0: classify the data dir BEFORE anything reads it. A pre-2.0 (PostgreSQL 15/16) data dir is moved aside whole —
     // never reused, never deleted; an interrupted first run's half-built cluster is moved aside too (see bootstrap.js).
@@ -147,8 +166,140 @@ class ServiceManager {
   getTunnelStatus() {
     const cfg = this._readConfig();
     const snap = this.tunnel.snapshot();
-    return { enabled: !!cfg.enableCloud, subdomain: cfg.subdomain || null, ...snap };
+    this._syncRoute();
+    const route = this.route.snapshot();
+    // the state the user sees: «connected» only when the public link was PROVEN to reach this process (tunnel-route.js deriveStatus)
+    const shown = tunnelRoute.deriveStatus(snap, route, { nameTaken: this.nameTaken, repairing: this.repairing });
+    return { enabled: !!cfg.enableCloud, subdomain: cfg.subdomain || null, ...snap, state: shown.state, reason: shown.reason, detail: shown.detail,
+      connector: snap.state, route, repairing: this.repairing, repair: this.lastRepair };
   }
+
+  // ─── Does the public link reach THIS machine? (tunnel-route.js) ─────────────
+  /** Start / stop the route proof to follow the connector: proven only after cloudflared registered a connection. */
+  _syncRoute() {
+    const st = this.tunnel.state;
+    if (st === 'connected') {
+      if (this.route.state === 'idle') this.route.begin().catch((e) => this._tlog('[Tunnel] route check failed to run:', e && e.message));
+    } else if (this.route.state !== 'idle') {
+      this.route.stop();
+    }
+  }
+
+  _probeUrl(nonce) {
+    const cfg = this._readConfig();
+    let base = cfg.subdomain ? `https://${cfg.subdomain}.texacore.ai` : null;
+    try { if (process.env.TEXACORE_TUNNEL_PROBE_BASE && harnessAllowed(require('electron').app.isPackaged)) base = process.env.TEXACORE_TUNNEL_PROBE_BASE.replace(/\/+$/, ''); } catch { /* unit tests */ }
+    return base ? `${base}${tunnelRoute.PROBE_PREFIX}${nonce}` : null;
+  }
+
+  async _probeFetch(nonce) {
+    const url = this._probeUrl(nonce);
+    if (!url) return { error: { code: 'ENOSUB', message: 'no subdomain' } };
+    return tunnelRoute.defaultProbe(url, { timeoutMs: this._timing.timeoutMs || tunnelRoute.PROBE_TIMEOUT_MS });
+  }
+
+  /** The network came back / the machine woke up / the user asked: prove the route again. */
+  reprobeRoute(reason = 'manual') {
+    this._syncRoute();
+    return this.route.recheck(reason);
+  }
+
+  _onRouteVerdict(v) {
+    const cfg = this._readConfig();
+    const name = cfg.subdomain ? `${cfg.subdomain}.texacore.ai` : '(no name)';
+    if (v.state === 'verified') {
+      this.nameTaken = null;
+      this._logOnce(`route-ok:${name}`, `[Tunnel] ✅ the public link ${name} reaches this computer (probe answered with this process's id)`, 10 * 60 * 1000);
+      return;
+    }
+    this._tlog(`[Tunnel] ⚠️ route check (${v.kind}): ${v.state}${v.reason ? ' / ' + v.reason : ''}${v.http ? ' / HTTP ' + v.http : ''}${v.cfError ? ' / Cloudflare ' + v.cfError : ''} for ${name}`);
+    // At startup, once per boot: a link that reaches no tunnel of this machine (stale / carried-over name or token) is re-registered with the real hardware id — no loop.
+    if (v.kind === 'start' && v.state === 'mismatch' && !this._autoRepairDone && !this.repairing && this._cloudWanted()) {
+      this._autoRepairDone = true;
+      this._tlog('[Tunnel] repairing the link automatically (once per start)…');
+      this.repairTunnelLink({ trigger: 'auto' }).catch((e) => this._tlog('[Tunnel] automatic repair failed:', e && e.message));
+    }
+  }
+
+  /** register-subdomain, the same call the launcher and /api/tunnel-fix make. Harness runs may point it at a local mock (TEXACORE_REGISTER_URL). Resolves { status, body, retryAfter } or { error }. */
+  _postRegister(payload) {
+    return new Promise((resolve) => {
+      let urlText = 'https://wzkklenfsaepegymfxfz.supabase.co/functions/v1/register-subdomain';
+      try { if (process.env.TEXACORE_REGISTER_URL && harnessAllowed(require('electron').app.isPackaged)) urlText = process.env.TEXACORE_REGISTER_URL; } catch { /* unit tests */ }
+      let settled = false;
+      const done = (v) => { if (!settled) { settled = true; resolve(v); } };
+      try {
+        const url = new URL(urlText);
+        const lib = url.protocol === 'http:' ? require('http') : require('https');
+        const data = JSON.stringify(payload);
+        const req = lib.request({ hostname: url.hostname, port: url.port || (url.protocol === 'http:' ? 80 : 443), path: url.pathname, method: 'POST', agent: false,
+          headers: { 'Content-Type': 'application/json', 'Content-Length': Buffer.byteLength(data) } }, (res) => {
+          let body = '';
+          res.on('data', (c) => { body += c; if (body.length > 65536) req.destroy(); });
+          res.on('end', () => { let parsed = null; try { parsed = JSON.parse(body); } catch { /* not JSON */ } done({ status: res.statusCode, body: parsed, retryAfter: Number(res.headers['retry-after']) || undefined }); });
+        });
+        req.on('error', (e) => done({ error: { code: e.code, message: e.message } }));
+        req.setTimeout(15000, () => { req.destroy(); done({ error: { code: 'ETIMEDOUT', message: 'timeout' } }); });
+        req.write(data); req.end();
+      } catch (e) { done({ error: { code: e.code, message: e.message } }); }
+    });
+  }
+
+  /**
+   * THE repair (the «إصلاح الرابط» button, /api/tunnel-fix, and the automatic once-per-boot attempt): re-register this name with the REAL hardware id, save the fresh token,
+   * restart cloudflared with it and prove the route again. Every answer of register-subdomain has its own outcome (tunnel-route.repairOutcome); nothing loops.
+   * Resolves { success, outcome, code, retryAfterSec?, subdomain, tunnel } — never throws.
+   */
+  async repairTunnelLink({ trigger = 'user' } = {}) {
+    if (this._repairInFlight) return this._repairInFlight;
+    this._repairInFlight = this._repairInner(trigger).finally(() => { this._repairInFlight = null; this.repairing = false; });
+    return this._repairInFlight;
+  }
+
+  async _repairInner(trigger) {
+    const cfg = this._readConfig();
+    const record = (o) => { this.lastRepair = { ...o, trigger, at: Date.now() }; return { success: o.outcome === 'fixed' || o.outcome === 'registered_unverified', subdomain: cfg.subdomain || null, tunnel: this.getTunnelStatus(), ...o }; };
+    if (!cfg.subdomain) return record({ outcome: 'no_subdomain', code: null });
+    if (Date.now() < this._repairBlockedUntil) return record({ outcome: 'rate_limited', code: 'RATE_LIMITED', retryAfterSec: Math.ceil((this._repairBlockedUntil - Date.now()) / 1000), throttled: true });
+    this.repairing = true;
+    this._tlog(`[Tunnel] repair (${trigger}): re-registering ${cfg.subdomain}.texacore.ai with this computer's hardware id`);
+    let hw = null; try { hw = this.hardwareIdProvider ? this.hardwareIdProvider() : null; } catch { /* fall back to the hostname */ }
+    const res = await this._postRegister({ licenseKey: cfg.licenseKey || 'desktop-user', subdomain: cfg.subdomain, machineId: hw || require('os').hostname(), hostname: require('os').hostname(), companyName: 'TexaCore Desktop' });
+    const o = tunnelRoute.repairOutcome(res);
+    if (o.outcome !== 'registered') {
+      this._tlog(`[Tunnel] repair (${trigger}): register-subdomain answered ${o.outcome}${o.code ? ' (' + o.code + ')' : ''}${o.retryAfterSec ? ', retry after ' + o.retryAfterSec + 's' : ''} — nothing changed`);
+      if (o.outcome === 'taken') this.nameTaken = { reason: o.reason || 'taken' };
+      if (o.outcome === 'rate_limited') this._repairBlockedUntil = Date.now() + o.retryAfterSec * 1000;
+      return record(o);
+    }
+    // a fresh token: save it (0600), replace the connector, prove the route
+    const fresh = this._readConfig();
+    fresh.tunnelToken = res.body.tunnel_token; fresh.enableCloud = true;
+    this._writeConfig(fresh);
+    this.nameTaken = null;
+    this.route.stop();
+    if (this.processes.cloudflared) { this.stopCloudflared(); await new Promise((r) => setTimeout(r, 1000)); }
+    await this.startCloudflared({ skipReregister: true, skipVerify: true });
+    const settled = await this._waitRouteSettled(this._timing.repairWaitMs || 120000);
+    const out = settled === 'verified' ? { outcome: 'fixed', code: null } : settled === 'mismatch' ? { outcome: 'still_mismatch', code: null } : { outcome: 'registered_unverified', code: null };
+    this._tlog(`[Tunnel] repair (${trigger}): token refreshed — ${out.outcome}`);
+    return record(out);
+  }
+
+  async _waitRouteSettled(maxMs) {
+    const t0 = Date.now();
+    while (Date.now() - t0 < maxMs) {
+      this._syncRoute();
+      const m = this.tunnel.state; const r = this.route.state;
+      if (m === 'error' || m === 'off') return 'error';
+      if (r === 'verified' || r === 'mismatch' || r === 'unverified') return r;
+      await new Promise((res) => setTimeout(res, 250));
+    }
+    return 'timeout';
+  }
+
+  /** A new name was registered / cloud access was switched: forget the old verdict and any "name taken" state. */
+  resetRouteState() { this.nameTaken = null; this.lastRepair = null; this._repairBlockedUntil = 0; this.route.stop(); }
 
   async getHealth() {
     const pg = !!this.processes.postgres;
@@ -1116,6 +1267,9 @@ class ServiceManager {
       if (this.frontendServer) return resolve();
 
       const app = express();
+
+      // 2.0.2: «does the public link reach THIS process?» — answered before everything else, for the tunnel too: `texacore-probe:<nonce>:<bootId>`, no data, no secret (tunnel-route.js)
+      app.use((req, res, next) => (tunnelRoute.handleProbeRequest(req, res, this.bootId) ? undefined : next()));
       
       // Determine frontend path (packaged app or dev mode)
       const isPackaged = require('electron').app.isPackaged;
@@ -1429,7 +1583,7 @@ window.__TEXACORE_CONFIG__ = {
     // Test/launch-check stub: never open a tunnel (and never call the cloud) from a harness run.
     if (process.env.TEXACORE_STUB_TUNNEL === '1' && harnessAllowed(require('electron').app.isPackaged)) {
       console.log('[ServiceManager] TEXACORE_STUB_TUNNEL=1 — cloudflared stubbed (launch check)');
-      this.tunnel.off('stub');
+      this.tunnel.off('stub'); this.route.stop();
       return;
     }
 
@@ -1444,13 +1598,13 @@ window.__TEXACORE_CONFIG__ = {
 
     if (!config.enableCloud) {
       console.log('[ServiceManager] Cloud access not enabled — skipping cloudflared');
-      this.tunnel.off('disabled');
+      this.tunnel.off('disabled'); this.route.stop();
       return;
     }
 
     if (!config.subdomain) {
       console.log('[ServiceManager] No subdomain configured — skipping cloudflared');
-      this.tunnel.off('no_subdomain');
+      this.tunnel.off('no_subdomain'); this.route.stop();
       return;
     }
 
@@ -1470,7 +1624,7 @@ window.__TEXACORE_CONFIG__ = {
       } catch (dnsErr) {
         if (dnsErr && (dnsErr.code === 'ENOTFOUND' || dnsErr.code === 'ENODATA')) {
           this._tlog(`[Tunnel] ⚠️ Subdomain "${config.subdomain}.texacore.ai" no longer resolves — it was deleted. Skipping tunnel; create a new subdomain from the app.`);
-          this.tunnel.off('subdomain_deleted');
+          this.tunnel.off('subdomain_deleted'); this.route.stop();
           return;
         }
       }
@@ -1630,6 +1784,7 @@ window.__TEXACORE_CONFIG__ = {
           }
         }
         if (this.tunnel.state === 'connected' && !connectedAt) connectedAt = Date.now();
+        this._syncRoute();                                  // a registered connection starts the proof that the public link reaches THIS process (tunnel-route.js)
       };
       proc.stdout.on('data', onData(''));
       proc.stderr.on('data', onData('[stderr] '));
@@ -1638,6 +1793,7 @@ window.__TEXACORE_CONFIG__ = {
         this._tlog('[Tunnel] ❌ cloudflared spawn error:', redact(err.message, [config.tunnelToken]));
         this.processes.cloudflared = null;
         this.tunnel.fail('spawn_failed', err.message);
+        this._syncRoute();
       });
       proc.on('exit', (code, signal) => {
         const snap = this.tunnel.snapshot();
@@ -1645,6 +1801,7 @@ window.__TEXACORE_CONFIG__ = {
         const wasStopped = proc.texaStopRequested === true || signal === 'SIGTERM' || signal === 'SIGKILL';   // cloudflared traps SIGTERM and exits 0 — the flag says WE asked
         this.tunnel.exited({ code, signal, expected: wasStopped });
         const after = this.tunnel.snapshot();
+        this._syncRoute();
         this._tlog(`[Tunnel] cloudflared exited — code ${code}, signal ${signal}; state ${after.state}${after.reason ? ' (' + after.reason + ')' : ''}${after.detail ? ' — ' + after.detail : ''}`);
         try { logStream.end(); } catch { /* ignore */ }
         if (wasStopped) return;
@@ -1680,9 +1837,10 @@ window.__TEXACORE_CONFIG__ = {
   // stays down.
   stopCloudflared() {
     const proc = this.processes.cloudflared;
-    if (!proc) { this.tunnel.off('stopped'); return false; }
+    if (!proc) { this.tunnel.off('stopped'); this.route.stop(); return false; }
     this.processes.cloudflared = null;
     this.tunnel.off('stopped');
+    this.route.stop();
     proc.texaStopRequested = true;
     try { proc.kill('SIGTERM'); } catch { /* ignore */ }
     setTimeout(() => { try { proc.kill('SIGKILL'); } catch { /* ignore */ } }, 2000);
@@ -1744,6 +1902,7 @@ window.__TEXACORE_CONFIG__ = {
 
     // Stop cloudflared
     this._killProcess('cloudflared');
+    try { this.route.stop(); } catch { /* ignore */ }
 
     // Stop proxy
     if (this.proxyServer) {
@@ -1860,6 +2019,7 @@ window.__TEXACORE_CONFIG__ = {
   _writeConfig(cfg) {
     const p = path.join(this.dataDir, 'config.json');
     fs.writeFileSync(p, JSON.stringify(cfg, null, 2), { mode: 0o600 });
+    try { fs.chmodSync(p, 0o600); } catch { /* the mode above only applies to a NEW file: an older config.json (tunnel token, licence key) is made private too */ }
   }
 
   async _withPgClient(fn) {

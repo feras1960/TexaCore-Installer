@@ -153,8 +153,8 @@ function updateUI(state) {
   
   // If registered (and not known-deleted), show active view. Otherwise setup view.
   if (state.config?.subdomain && _deletedSubdomain !== state.config.subdomain) {
-    document.getElementById('input-subdomain').value = state.config.subdomain;
-    document.getElementById('cloud-setup').style.display = 'none';
+    if (!_tunnelNameTaken) document.getElementById('input-subdomain').value = state.config.subdomain;     // name_taken: leave the field to the user (choose another name)
+    document.getElementById('cloud-setup').style.display = _tunnelNameTaken ? 'block' : 'none';
     document.getElementById('cloud-active').style.display = 'block';
     document.getElementById('cloud-url').textContent = `https://${state.config.subdomain}.texacore.ai`;
     
@@ -280,7 +280,15 @@ function renderTunnelStatus(state) {
   } else if (tn.state === 'connected') {
     text = t('cloud.connected'); color = 'var(--accent)'; ico = 'circle-check';
   } else if (tn.state === 'starting') {
-    text = t('cloud.connecting'); color = 'var(--warning)'; ico = 'loader';
+    text = tn.reason === 'repairing' ? t('cloud.repairing') : tn.reason === 'verifying_route' ? t('cloud.verifying') : t('cloud.connecting'); color = 'var(--warning)'; ico = 'loader';
+  } else if (tn.state === 'route_mismatch') {
+    text = t('cloud.st.routeMismatch'); color = 'var(--danger)'; ico = 'triangle-alert';
+    detail = tn.detail || '';
+  } else if (tn.state === 'connected_unverified') {
+    text = t('cloud.st.unverified'); color = 'var(--warning)'; ico = 'triangle-alert';
+    detail = tn.detail || '';
+  } else if (tn.state === 'name_taken') {
+    text = t('cloud.st.nameTaken'); color = 'var(--danger)'; ico = 'triangle-alert';
   } else if (tn.state === 'error') {
     text = (t('cloud.err.' + tn.reason) !== 'cloud.err.' + tn.reason ? t('cloud.err.' + tn.reason) : t('cloud.disconnected')); color = 'var(--danger)'; ico = 'circle-x';
     detail = tn.detail || '';
@@ -294,6 +302,69 @@ function renderTunnelStatus(state) {
   el.dataset.tunnelState = tn ? `${tn.state}${tn.reason ? ':' + tn.reason : ''}` : 'none';
   el.dataset.tunnelIcon = ico;
   if (det) { det.textContent = detail; det.style.display = detail ? 'block' : 'none'; }
+  renderTunnelFix(tn, !!(state && state.containerRunning && tn && tn.enabled));
+}
+
+// 2.0.2: «connected» is shown only when the public link was PROVEN to reach this computer (tunnel-route.js). When it does not (route_mismatch), cannot be verified
+// (connected_unverified) or the name belongs to an earlier licence (name_taken), this box says why in words and offers «إصلاح الرابط» (IPC → the same repair the app
+// tries once per start). For a taken name the subdomain field of the setup view is shown too, to choose another name.
+let _tunnelNameTaken = false;       // while true the setup view (the subdomain input) stays visible beside the active view
+function tunnelRepairMessage(r) {
+  if (!r || !r.outcome) return '';
+  const key = 'cloud.repair.' + r.outcome;
+  if (r.outcome === 'taken') return t(r.reason === 'quarantined' ? 'cloud.nameTakenQuarantined' : 'cloud.nameTaken');
+  if (t(key) === key) return '';
+  return t(key).replace('{min}', String(Math.max(1, Math.ceil((r.retryAfterSec || 60) / 60))));
+}
+function renderTunnelFix(tn, active) {
+  const box = document.getElementById('tunnel-fix-box');
+  if (!box) return;
+  const btn = document.getElementById('btn-fix-link');
+  const msg = document.getElementById('tunnel-route-msg');
+  const rep = document.getElementById('tunnel-repair-msg');
+  const st = active && tn ? tn.state : null;
+  let line = '';
+  if (st === 'route_mismatch') line = t('cloud.route.' + tn.reason) !== 'cloud.route.' + tn.reason ? t('cloud.route.' + tn.reason) : t('cloud.route.no_route');
+  else if (st === 'connected_unverified') line = (t('cloud.unverified.' + tn.reason) !== 'cloud.unverified.' + tn.reason) ? t('cloud.unverified.' + tn.reason) : t('cloud.connectedUnverified');
+  else if (st === 'name_taken') line = t(tn.reason === 'quarantined' ? 'cloud.nameTakenQuarantined' : 'cloud.nameTaken');
+  else if (st === 'starting' && tn.reason === 'repairing') line = t('cloud.repairing');
+  const show = !!line;
+  box.style.display = show ? 'block' : 'none';
+  if (msg) msg.textContent = line;
+  const canFix = st === 'route_mismatch' || st === 'name_taken';
+  if (btn) { btn.style.display = canFix ? 'block' : 'none'; btn.disabled = !!(tn && tn.repairing) || _repairBusy; }
+  // what the last repair attempt said (kept for 10 minutes; «fixed» only while the link is fine)
+  const r = tn && tn.repair;
+  const fresh = r && (Date.now() - r.at < 10 * 60 * 1000);
+  const rtext = fresh && (r.outcome !== 'fixed' || st === 'connected') ? tunnelRepairMessage(r) : '';
+  if (rep) { rep.textContent = rtext; rep.style.display = rtext ? 'block' : 'none'; }
+  if (rtext && r.outcome === 'fixed') box.style.display = 'block';
+  _tunnelNameTaken = st === 'name_taken';
+  const setup = document.getElementById('cloud-setup');
+  if (setup && _tunnelNameTaken) setup.style.display = 'block';
+  else if (setup && !_tunnelNameTaken && _nameTakenForcedSetup && currentState && currentState.config && currentState.config.subdomain) setup.style.display = 'none';
+  _nameTakenForcedSetup = _tunnelNameTaken;
+  box.dataset.tunnelFix = st || 'none';
+}
+let _nameTakenForcedSetup = false;
+let _repairBusy = false;
+async function repairTunnelLink() {
+  const btn = document.getElementById('btn-fix-link');
+  const rep = document.getElementById('tunnel-repair-msg');
+  if (_repairBusy || !window.texacore || !window.texacore.repairTunnelLink) return;
+  _repairBusy = true;
+  if (btn) { btn.disabled = true; setWithIcon(btn, 'loader', t('cloud.repairing'), 16, 'icon-lead spin'); }
+  try {
+    const r = await window.texacore.repairTunnelLink();
+    const text = tunnelRepairMessage(r);
+    if (rep && text) { rep.textContent = text; rep.style.display = 'block'; }
+  } catch (e) {
+    if (rep) { rep.textContent = t('cloud.repair.network'); rep.style.display = 'block'; }
+  } finally {
+    _repairBusy = false;
+    if (btn) { btn.textContent = t('cloud.fixBtn'); btn.disabled = false; }
+    refreshStatus();
+  }
 }
 
 // ─── Update Control Panel ────────────────────────────────────

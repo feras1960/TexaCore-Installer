@@ -1272,6 +1272,13 @@ ipcMain.handle('activate-license', async (_, licenseKey) => {
   }
 });
 
+// «إصلاح الرابط»: the same repair the automatic once-per-start attempt and /api/tunnel-fix use (service-manager.repairTunnelLink). No admin secret crosses the renderer.
+ipcMain.handle('repair-tunnel-link', async () => {
+  if (!svcManager) return { success: false, outcome: 'network', code: null };
+  try { return await svcManager.repairTunnelLink({ trigger: 'user' }); }
+  catch (e) { return { success: false, outcome: 'network', code: null, error: e.message }; }
+});
+
 // Register Subdomain via Supabase Edge Function
 ipcMain.handle('register-subdomain', async (_, subdomain) => {
   try {
@@ -1300,6 +1307,7 @@ ipcMain.handle('register-subdomain', async (_, subdomain) => {
       // edge via the token regardless — so the tunnel comes up right away.
       if (svcManager) {
         try { await svcManager.stopCloudflared(); } catch { /* wasn't running */ }
+        svcManager.resetRouteState();      // a new name: forget the old verdict, any «name taken» and the repair history
         svcManager.startCloudflared({ skipReregister: true, skipVerify: true })
           .catch(e => console.warn('[register-subdomain] tunnel start failed:', e.message));
       }
@@ -2716,7 +2724,7 @@ const httpServer = http.createServer(async (req, res) => {
         const tunnel = svcManager.getTunnelStatus();   // the real state: «running» used to mean only "a process object exists"
         
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, running: tunnel.state === 'connected' || tunnel.state === 'starting', connected: tunnel.state === 'connected', tunnel }));
+        res.end(JSON.stringify({ success: true, running: tunnel.connector === 'connected' || tunnel.state === 'starting', connected: tunnel.state === 'connected', tunnel }));
       } else {
         res.writeHead(500, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: 'Service manager not initialized' }));
@@ -2729,65 +2737,17 @@ const httpServer = http.createServer(async (req, res) => {
   // ─── GET /api/tunnel-fix ────────────────────────────────────
   // Re-registers subdomain to get a fresh tunnel token and starts cloudflared
   } else if (req.method === 'GET' && req.url === '/api/tunnel-fix') {
+    // 2.0.2: the SAME repair as the launcher's «إصلاح الرابط» button and the automatic once-per-start attempt (service-manager.repairTunnelLink):
+    // re-register with the real hardware id, save the token (0600), restart cloudflared with it, PROVE that the public link reaches this process.
     try {
-      const config = loadConfig();
-      const subdomain = config.subdomain;
-      
-      if (!subdomain) {
-        res.writeHead(400, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: 'No subdomain configured' }));
-        return;
-      }
-      
-      console.log(`[TunnelFix] Re-registering subdomain: ${subdomain}`);
-      
-      // Call Edge Function to get a fresh token
-      const result = await httpPost(`${LICENSING_URL}/register-subdomain`, {
-        licenseKey: config.licenseKey || 'desktop-user',
-        subdomain,
-        machineId: (() => { try { if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR); return licenseGuard.getHardwareId(); } catch { return require('os').hostname(); } })(),
-        hostname: require('os').hostname(),
-        companyName: 'TexaCore Desktop'
-      });
-      
-      if (result.success && result.tunnel_token) {
-        // Save token to config
-        config.tunnelToken = result.tunnel_token;
-        config.enableCloud = true;
-        saveConfig(config);
-        console.log(`[TunnelFix] ✅ Token saved (${result.tunnel_token.length} chars)`);
-        
-        // Kill existing and restart
-        if (svcManager) {
-          if (svcManager.processes.cloudflared) {
-            svcManager.stopCloudflared();
-            await new Promise(r => setTimeout(r, 1000));
-          }
-          // We just fetched + saved a fresh token above — reuse it (don't
-          // re-register a second time, which would mint yet another tunnel id).
-          await svcManager.startCloudflared({ skipReregister: true });
-          await new Promise(r => setTimeout(r, 3000));
-          
-          const tunnel = svcManager.getTunnelStatus();
-          
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ 
-            success: true, 
-            subdomain,
-            url: `https://${subdomain}.texacore.ai`,
-            tunnelRunning: tunnel.state === 'connected' || tunnel.state === 'starting',
-            tunnelConnected: tunnel.state === 'connected',
-            tunnel,
-            tokenLength: result.tunnel_token.length
-          }));
-        } else {
-          res.writeHead(200, { 'Content-Type': 'application/json' });
-          res.end(JSON.stringify({ success: true, subdomain, tokenSaved: true, note: 'Restart the app to apply' }));
-        }
-      } else {
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: result.error || 'Failed to get token' }));
-      }
+      if (!svcManager) { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ success: false, error: 'Service manager not initialized' })); return; }
+      const r = await svcManager.repairTunnelLink({ trigger: 'api' });
+      const tunnel = r.tunnel || svcManager.getTunnelStatus();
+      const status = r.outcome === 'no_subdomain' ? 400 : (r.success ? 200 : (r.outcome === 'rate_limited' ? 429 : r.outcome === 'taken' ? 409 : 502));
+      res.writeHead(status, { 'Content-Type': 'application/json', ...(r.retryAfterSec ? { 'Retry-After': String(r.retryAfterSec) } : {}) });
+      res.end(JSON.stringify({ success: !!r.success, outcome: r.outcome, code: r.code || null, retryAfterSec: r.retryAfterSec, subdomain: r.subdomain,
+        url: r.subdomain ? `https://${r.subdomain}.texacore.ai` : null, tunnelRunning: tunnel.connector === 'connected' || tunnel.state === 'starting', tunnelConnected: tunnel.state === 'connected', tunnel,
+        error: r.success ? undefined : r.outcome }));
     } catch (err) {
       console.error('[TunnelFix] ❌ Error:', err.message);
       res.writeHead(500, { 'Content-Type': 'application/json' });
@@ -3166,6 +3126,7 @@ ipcMain.handle('set-cloud-access', async (_, enabled) => {
     saveConfig(config);
     if (svcManager) {
       if (enabled) {
+        svcManager.resetRouteState();
         // Fast reconnect: reuse the existing tunnel token (same tunnel id) so it
         // comes back in seconds, not the ~30-60s a fresh tunnel needs to propagate.
         await svcManager.startCloudflared({ skipReregister: true });
@@ -3615,12 +3576,12 @@ function watchNetworkForUpdates() {
     let online = net.isOnline();
     const t = setInterval(() => {
       let now = online; try { now = net.isOnline(); } catch { /* not ready */ }
-      if (now && !online) { fileLog('[Update] network is back'); activeUpdater()?.networkUp('online'); }
+      if (now && !online) { fileLog('[Update] network is back'); activeUpdater()?.networkUp('online'); if (svcManager) svcManager.reprobeRoute('network-resume'); }
       online = now;
     }, 5000);
     if (t.unref) t.unref();
-    powerMonitor.on('resume', () => setTimeout(() => { fileLog('[Update] woke from sleep'); activeUpdater()?.networkUp('resume'); }, 3000));
-    powerMonitor.on('unlock-screen', () => activeUpdater()?.networkUp('unlock'));
+    powerMonitor.on('resume', () => setTimeout(() => { fileLog('[Update] woke from sleep'); activeUpdater()?.networkUp('resume'); if (svcManager) svcManager.reprobeRoute('network-resume'); }, 3000));
+    powerMonitor.on('unlock-screen', () => { activeUpdater()?.networkUp('unlock'); if (svcManager) svcManager.reprobeRoute('network-resume'); });
   } catch (e) { fileLog('[Update] network watch not available:', e.message); }
 }
 // isolated harness runs only: tuning of the download engine (stall / backoff times) so a test does not wait 45 s and 15 s
