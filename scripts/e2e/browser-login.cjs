@@ -35,6 +35,15 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
     await page.waitForLoadState('networkidle', { timeout: 60000 }).catch(() => {});
     await page.waitForTimeout(3000);
     await page.screenshot({ path: path.join(SHOTS, '2-dashboard.png') });
+    // evidence for the release report (best effort): close the first-run dialog and show the header on its own
+    try {
+      await page.keyboard.press('Escape'); await page.waitForTimeout(600);
+      const x = page.locator('div[role="dialog"] button, div.fixed.inset-0 button').first();
+      if (await x.count()) await x.click({ timeout: 2000 }).catch(() => {});
+      await page.waitForTimeout(1200);
+      await page.screenshot({ path: path.join(SHOTS, '3-dashboard-clean.png') });
+      await page.screenshot({ path: path.join(SHOTS, '4-header.png'), clip: { x: 0, y: 0, width: 1440, height: 110 } });
+    } catch { /* evidence only */ }
     const token = await page.evaluate(() => { try { return JSON.parse(localStorage.getItem('sb-local-auth-token') || 'null'); } catch { return null; } });
     if (!token || !token.access_token) throw new Error('no session in localStorage after login');
     const profile = await page.evaluate(async ({ url, tok, anon }) => {
