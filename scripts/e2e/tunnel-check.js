@@ -36,7 +36,8 @@ const children = (ppid) => {
   return out.map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: +m[1], ppid: +m[2], cmd: m[3] })).filter((p) => p.ppid === ppid);
 };
 const allProcs = () => spawnSync('ps', ['-axo', 'pid=,ppid=,command='], { encoding: 'utf8' }).stdout.split('\n').map((l) => /^\s*(\d+)\s+(\d+)\s+(.*)$/.exec(l)).filter(Boolean).map((m) => ({ pid: +m[1], ppid: +m[2], cmd: m[3] }));
-const allCloudflared = () => allProcs().filter((p) => /^(\S*\/)?cloudflared(\s|$)/.test(p.cmd)).map((p) => `${p.pid} ${p.cmd}`);
+// only THIS run's connectors (the app under test): another TexaCore on the machine may legitimately run its own
+const allCloudflared = () => allProcs().filter((p) => /(^|\/)cloudflared( |$)/.test(p.cmd) && p.cmd.startsWith(appPath)).map((p) => `${p.pid} ${p.cmd}`);
 
 async function runCase(name, { token, extraEnv = {}, work }, body) {
   const userData = path.join(work, 'userdata');
@@ -112,7 +113,7 @@ async function runCase(name, { token, extraEnv = {}, work }, body) {
       const seen = new Set();
       const snap = await c.until(async () => {
         const t = await c.tunnel(); if (t) seen.add(t.state);
-        const kids = (APP ? children(c.child.pid) : allProcs()).filter((p) => /^(\S*\/)?cloudflared(\s|$)/.test(p.cmd));
+        const kids = (APP ? children(c.child.pid) : allProcs()).filter((p) => /(^|\/)cloudflared( |$)/.test(p.cmd));
         if (kids.length && !cfPid) { cfPid = kids[0].pid; evidence.cfCmd = kids[0].cmd; }
         return t && t.state === 'error' ? t : null;
       }, 90000, 'the refusal');

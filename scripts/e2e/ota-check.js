@@ -343,7 +343,7 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
         secrets = JSON.parse(fs.readFileSync(path.join(dataDir, 'secrets.json'), 'utf8'));
         await until(() => /staged v/.test(logOf(userData)), 240000, 'the update to be staged', 1000);
         const log = logOf(userData);
-        if (!/update available: v2\.0\.1-test/.test(log) || !/sha512 verified/.test(log)) throw new Error('detection / sha512 lines missing');
+        if (!new RegExp(`update available: v${NV.replace(/[.+-]/g, '\\$&')}`).test(log) || !/sha512 verified/.test(log)) throw new Error('detection / sha512 lines missing');
         const chain = mockRows(mock).slice(0, 3);
         if (!/^302 github\.com\/feras1960\/TexaCore-Installer\/releases\/latest\/download\/latest-mac\.yml/.test(chain[0] || '')) throw new Error(`feed request: ${chain[0]}`);
         const blocked = fs.existsSync(path.join(WORK, 'net-b-client.jsonl')) ? fs.readFileSync(path.join(WORK, 'net-b-client.jsonl'), 'utf8').split('\n').filter((l) => /BLOCKED/.test(l)).length : 0;

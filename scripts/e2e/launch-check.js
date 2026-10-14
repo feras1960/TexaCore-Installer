@@ -327,6 +327,42 @@ async function main() {
       return `${got.length} modules reported (${got.slice(0, 5).join(', ')}…) = the plan's included_modules; the old text fails with 42883 (function jsonb_array_elements_text(text[]) does not exist)`;
     });
 
+    // ── 3.9 the module guards of the ERP's row-level policies / RPCs, on the plan rows the installer BUNDLES (this run is OFFLINE: no control panel to sync from) ──
+    await R.check(`3.9 OFFLINE first run on the ${LICENSE} plan: the admin can read the chart of accounts, insert a customer, insert a fabric_materials row and post a manual journal entry (the bundled plan rows carry the modules the guards need)`, async () => {
+      const hb = path.join(userData, 'logs', 'heartbeat.log');
+      const logs = [logFile, hb].filter((f) => fs.existsSync(f)).map((f) => fs.readFileSync(f, 'utf8')).join('\n');
+      if (!/active plan synced: .*\(offline: last synced values\)/.test(logs)) throw new Error('this run is not offline (the plan was not taken from the bundled rows): ' + (logs.match(/\[Plan\][^\n]*/g) || []).slice(-2).join(' | '));
+      const mods = (await pg(`SELECT array_agg(module_code ORDER BY module_code) m FROM tenant_modules WHERE tenant_id=$1 AND is_active AND is_enabled`, [A.tenantId])).rows[0].m || [];
+      const need = ['accounting', 'sales', 'inventory', 'purchases', 'fabric'];
+      // the PLAN ROW itself (not the always-on core modules that the bundled `modules` table adds to every tenant): it is what the control panel's row is replaced by online, and
+      // what any database whose `modules` rows are not flagged core (production's) gets its modules from — so it must carry what the guards need
+      const planMods = (await pg(`SELECT sp.code, sp.included_modules FROM tenant_subscriptions ts JOIN subscription_plans sp ON sp.id=ts.plan_id WHERE ts.tenant_id=$1 AND ts.status IN ('active','trial','grace') ORDER BY ts.created_at DESC LIMIT 1`, [A.tenantId])).rows[0];
+      const planMissing = need.filter((m) => !(planMods.included_modules || []).includes(m));
+      if (planMissing.length) throw new Error(`the bundled plan row "${planMods.code}" lacks ${planMissing.join(', ')} (it has: ${(planMods.included_modules || []).join(', ')})`);
+      const missing = need.filter((m) => !mods.includes(m));
+      if (missing.length) throw new Error(`tenant modules lack ${missing.join(', ')} (have: ${mods.join(', ')})`);
+      const authA = { apikey: secrets.anonKey, Authorization: `Bearer ${A.accessToken}` };
+      const inDb = (await pg('SELECT count(*)::int n FROM chart_of_accounts WHERE company_id=$1', [A.companyId])).rows[0].n;
+      const chart = await request('GET', `${API}/rest/v1/chart_of_accounts?select=id&company_id=eq.${A.companyId}&limit=1000`, { headers: authA });
+      if (chart.status !== 200) throw new Error(`chart read → ${chart.status} ${chart.text.slice(0, 200)}`);
+      if (!inDb || chart.json.length !== Math.min(inDb, 1000)) throw new Error(`the admin sees ${chart.json.length} chart rows, the company has ${inDb}`);
+      const colsOf = async (t) => (await pg(`SELECT column_name FROM information_schema.columns WHERE table_schema='public' AND table_name=$1`, [t])).rows.map((r) => r.column_name);
+      const withCompany = async (t, row) => ((await colsOf(t)).includes('company_id') ? { ...row, company_id: A.companyId } : row);
+      const cust = await request('POST', `${API}/rest/v1/customers`, { headers: { ...authA, Prefer: 'return=representation' }, body: await withCompany('customers', { tenant_id: A.tenantId, code: 'LC-CUST-1', name_ar: 'عميل فحص الإطلاق' }) });
+      if (cust.status !== 201) throw new Error(`insert customer → ${cust.status} ${cust.text.slice(0, 240)}`);
+      const mat = await request('POST', `${API}/rest/v1/fabric_materials`, { headers: { ...authA, Prefer: 'return=representation' }, body: await withCompany('fabric_materials', { tenant_id: A.tenantId, code: 'LC-MAT-1', name_ar: 'مادة فحص الإطلاق' }) });
+      if (mat.status !== 201) throw new Error(`insert fabric_materials → ${mat.status} ${mat.text.slice(0, 240)}`);
+      const leaf = (await pg(`SELECT id FROM chart_of_accounts WHERE company_id=$1 AND COALESCE(is_group,false)=false AND COALESCE(is_active,true) ORDER BY account_code LIMIT 2`, [A.companyId])).rows;
+      if (leaf.length < 2) throw new Error(`the chart has ${leaf.length} postable accounts`);
+      const je = await request('POST', `${API}/rest/v1/rpc/save_journal_entry_draft`, { headers: authA, body: { p_payload: {
+        company_id: A.companyId, entry_date: new Date().toISOString().slice(0, 10), description: 'launch-check manual entry', post: true,
+        lines: [{ account_id: leaf[0].id, debit: 100, credit: 0 }, { account_id: leaf[1].id, debit: 0, credit: 100 }] } } });
+      if (je.status !== 200 || !je.json || je.json.success !== true) throw new Error(`manual journal entry → ${je.status} ${je.text.slice(0, 300)}`);
+      const posted = (await pg('SELECT is_posted, status FROM journal_entries WHERE company_id=$1 AND description=$2', [A.companyId, 'launch-check manual entry'])).rows[0];
+      if (!posted || posted.is_posted !== true) throw new Error(`the entry was not posted: ${JSON.stringify(posted)}`);
+      return `offline plan sync (bundled rows); plan "${planMods.code}" carries ${need.join('/')} itself; tenant modules ${mods.length}; chart ${chart.json.length}/${inDb} rows visible; customer + fabric_materials inserted; manual journal entry posted`;
+    });
+
     // ── 4. security ──
     const anon = { apikey: secrets.anonKey, Authorization: `Bearer ${secrets.anonKey}` };
     await R.check('4.1 anon cannot read any tenant data through the proxy (every public table)', async () => {
@@ -492,8 +528,12 @@ async function main() {
     const remoteCases = [];
     if (lanIp) {
       remoteCases.push([`LAN client at ${lanIp} (natural Host)`, `http://${lanIp}:${PORTS.ui}`, '', {}]);
-      remoteCases.push([`LAN client forging Host: 127.0.0.1`, `http://${lanIp}:${PORTS.ui}`, `127.0.0.1:${PORTS.ui}`, {}]);
+      // NB: a connection from THIS machine to its own LAN address with a forged `Host: 127.0.0.1` is NOT a remote client — the peer address is one of the machine's own
+      // addresses, which only a program on this machine can have (net-guard rule 2; Windows shows a local program bound to the LAN address that way). A real LAN client
+      // can't be simulated from one host, so the forged-Host remote shapes below are the ones a real remote peer can produce: a reverse proxy / tunnel naming the client.
     }
+    remoteCases.push(['reverse proxy on this machine in front of a LAN client: Host: 127.0.0.1 + X-Forwarded-For naming the LAN client', UI, `127.0.0.1:${PORTS.ui}`, { 'x-forwarded-for': '192.168.77.20' }]);
+    remoteCases.push(['reverse proxy with the standard Forwarded header naming a remote client, Host: localhost', UI, `localhost:${PORTS.ui}`, { forwarded: 'for=198.51.100.7;proto=https' }]);
     remoteCases.push(['loopback socket, LAN-style Host header (forged)', UI, `192.168.77.20:${PORTS.ui}`, {}]);
     remoteCases.push(['loopback socket, Host: localhost + tunnel headers (a tunnel whose origin settings rewrite Host)', UI, `localhost:${PORTS.ui}`, { 'cf-connecting-ip': '203.0.113.9', 'x-forwarded-for': '203.0.113.9', 'cf-ray': 'abc-FRA' }]);
     await R.check('4.9 LAN / forged-Host callers: never the admin secret in /config.js, 403 on every /api/* except ping, no raw API/admin ports on the LAN', async () => {
