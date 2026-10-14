@@ -972,6 +972,28 @@ async function main() {
         return `refused twice with no write; opened with the phrase; rows ${JSON.stringify(after)}`;
       });
 
+      await R.check('7.7b opening another .tcdb never writes this company\'s data over the PREVIOUS company\'s program copy; the previous manager stops', async () => {
+        await dialog({ open: rsfFile });
+        const p3 = (await api('POST', '/api/pick-company-file', {})).json;
+        const r = await api('POST', '/api/create-local-company', body({ adminEmail: 'rashid-third@e2e.test', companyName: 'شركة ثالثة', storagePath: undefined, dbFileName: undefined, purpose: 'rsf_import', rsfSourceRef: p3.ref }));
+        if (!r.json || !r.json.success) throw new Error(`create → ${r.text.slice(0, 300)}`);
+        const copy3 = r.json.tcdbCopyPath;
+        await waitFor(async () => { const s_ = await status(); return s_.backupPath === r.json.tcdbPath && s_.targets.length === 2 && s_.targets.every((t) => t.state === 'ok'); }, 'the third company\'s targets');
+        const copyShaBefore = sha(fs.readFileSync(copy3));
+        // (a restore REPLACES the tables of the file: use an export of the database as it is NOW, so the replace is exact)
+        const fresh = await api('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'TexaCore-REOPEN' });
+        if (!fresh.json.success) throw new Error(`export → ${fresh.text.slice(0, 200)}`);
+        const bytes = fs.readFileSync(fresh.json.path);
+        const m = multipart(bytes, 'reopened.tcdb');
+        const post = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m.ct }, body: m.body });
+        if (post.status !== 200 || !post.json.success) throw new Error(`restore → ${post.status} ${post.buf.toString().slice(0, 200)}`);
+        await api('POST', '/api/backup', {}); await api('POST', '/api/backup', {});
+        const s_ = await status();
+        if (s_.targets.length !== 1 || !/reopened\.tcdb$/.test(s_.backupPath)) throw new Error(`targets after the reopen: ${JSON.stringify(s_.targets.map((t) => t.path))}`);
+        if (sha(fs.readFileSync(copy3)) !== copyShaBefore) throw new Error('the previous company\'s program copy was overwritten by the reopened company');
+        return 'the reopened file is the only live target; the previous program copy is byte-identical';
+      });
+
       await R.check('7.8 pick-save-location: the native save window for a NEW company (nothing is written; an existing name is not replaced)', async () => {
         const target = path.join(WORK, 'by hand', 'My Shop.tcdb');
         await dialog({ save: target });

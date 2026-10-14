@@ -777,7 +777,7 @@ async function refreshBackupsBox() {
       const ok = tg.state === 'ok' || tg.state === 'pending';
       const color = tg.state === 'error' ? '#b91c1c' : tg.state === 'syncing' ? 'var(--accent)' : tg.state === 'ok' ? '#16a34a' : 'var(--text-muted)';
       ico.style.color = color;
-      ico.appendChild(iconEl(tg.state === 'error' ? 'triangle-alert' : tg.state === 'syncing' ? 'loader' : 'check', 14));
+      ico.appendChild(iconEl(tg.state === 'error' ? 'triangle-alert' : tg.state === 'syncing' ? 'loader' : 'check', 16, tg.state === 'syncing' ? 'spin' : ''));
       const txt = document.createElement('span');
       txt.style.cssText = 'flex:1; min-width:0; word-break:break-word; color:' + color + ';';
       if (tg.state === 'error') {

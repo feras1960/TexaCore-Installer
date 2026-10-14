@@ -1535,6 +1535,8 @@ async function handleCreateLocalCompany(companyData) {
     // ── 4. Real-time backup sync ──
     if (tcdbFilePath) {
       try {
+        // 2.0.2: this company replaces the previous one in config.companies - its manager must stop writing to the previous company's files
+        if (backupManager) { try { backupManager.stopSync(); } catch { /* already stopped */ } }
         backupManager = new BackupManager({
           pgBinDir: path.join(svcManager.binsDir, 'pg', 'bin'),
           dbHost: '127.0.0.1',
@@ -2161,6 +2163,7 @@ async function restoreTcdbFromPath(selectedPath, { passphrase = '' } = {}) {
 
   // Point backup to the ORIGINAL file (USB, Desktop, wherever)
   backupManager.backupPath = liveTarget;
+  backupManager.secondaryBackupPath = null;   // 2.0.2: the program's second copy belonged to the PREVIOUS company file - never write this company's data over it
   
   // Restore DB from the file
   const restoreResult = await backupManager.restore(selectedPath, { passphrase });
@@ -3025,6 +3028,7 @@ const httpServer = http.createServer(async (req, res) => {
         
         // Restore the database from TCDB
         backupManager.backupPath = tcdbPath;
+        backupManager.secondaryBackupPath = null;   // 2.0.2: see restoreTcdbFromPath - the second copy belongs to the previous company file
         const restoreResult = await backupManager.restore(tcdbPath, { passphrase });
 
         // Inject the vendor support account into the just-restored DB — vendor
