@@ -31,6 +31,7 @@ function safeFileBase(raw, fallback = 'company', maxLen = 100) {
   let n = String(raw == null ? '' : raw).replace(/[\\/:*?"<>|\x00-\x1f\x7f]/g, ' ').replace(/\s+/g, ' ').trim();
   n = n.replace(/^[. ]+/, '').replace(/[. ]+$/, '').trim();
   if (n.length > maxLen) n = n.slice(0, maxLen).replace(/[. ]+$/, '');
+  if (/^(con|prn|aux|nul|com[0-9\u00b9\u00b2\u00b3]|lpt[0-9\u00b9\u00b2\u00b3])(\.|$)/i.test(n)) n = `_${n}`;   // Windows device names
   return n || fallback;
 }
 

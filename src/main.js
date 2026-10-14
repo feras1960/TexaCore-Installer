@@ -1878,7 +1878,7 @@ async function handleCompanyFileRoutes(req, res) {
           if (r.canceled || !r.filePath) { sendJson(res, 200, { success: false, canceled: true }); return true; }
           target = /\.tcdb$/i.test(r.filePath) ? r.filePath : `${r.filePath}.tcdb`;
           // The OS save dialog asks "replace it?" itself — an answer of yes is the user's own explicit choice. A harness answer was never asked.
-          overwrite = !r.harness && fs.existsSync(target);
+          overwrite = !r.harness && path.resolve(target) === path.resolve(r.filePath) && fs.existsSync(target);   // "report" confirmed != "report.tcdb" replaced
         }
         if (sameFile(target, live)) throw Object.assign(new Error('هذا هو ملف الشركة الحي — اختر اسماً آخر | That is the live company file - choose another name'), { code: 'EXPORT_IS_LIVE_FILE' });
         exportInFlight = true;
@@ -2117,7 +2117,8 @@ function adminRequestIsLocal(req) {
     return netGuard.isLoopbackHost(req.headers.host) && !netGuard.forwardedFromElsewhere(req.headers).forwarded;
   }
   // (the UI server computed "forwarded from elsewhere" with the same rule; its client may be this machine's own LAN address, not only loopback)
-  return netGuard.isLoopbackHost(fwdHost) && netGuard.isThisMachineAddress(fwdPeer) && fwdProxied === '0';
+  // the UI proxy always sends Host: 127.0.0.1:<admin port>; a page that set x-texacore-fwd-* itself (DNS rebinding to this port) carries its own Host
+  return netGuard.isLoopbackHost(req.headers.host) && netGuard.isLoopbackHost(fwdHost) && netGuard.isThisMachineAddress(fwdPeer) && fwdProxied === '0';
 }
 // ─── Open a .tcdb: restore it into the running database and keep syncing back to the SAME file ───────────────
 // Shared by the file-dialog route (GET /api/open-tcdb) and the launcher's upgrade notice («فتح» beside a company file named in the old config).
@@ -2162,6 +2163,7 @@ async function restoreTcdbFromPath(selectedPath, { passphrase = '' } = {}) {
   if (openedWithPassphrase) fs.mkdirSync(path.dirname(liveTarget), { recursive: true });
 
   // Point backup to the ORIGINAL file (USB, Desktop, wherever)
+  try { backupManager.stopSync(); } catch { /* not running */ }   // no tick of the previous timer may dump the old / half-restored DB into the opened file
   backupManager.backupPath = liveTarget;
   backupManager.secondaryBackupPath = null;   // 2.0.2: the program's second copy belonged to the PREVIOUS company file - never write this company's data over it
   
@@ -2352,7 +2354,8 @@ const httpServer = http.createServer(async (req, res) => {
   // (no Origin — the Electron app / local tooling). Any foreign Origin (a
   // malicious site the user visited, or a spoofed remote) is rejected.
   {
-    const urlPath = (req.url || '').split('?')[0];
+    let urlPath;   // the same normalised pathname handleCompanyFileRoutes() routes on - dot segments must not skip this guard
+    try { urlPath = new URL(req.url || '/', 'http://127.0.0.1').pathname; } catch { urlPath = (req.url || '').split('?')[0]; }
     if (DESTRUCTIVE_API.has(urlPath)) {
       const origin = req.headers['origin'] || '';
       const sameMachine = !origin || /^https?:\/\/(localhost|127\.0\.0\.1)(:\d+)?$/i.test(origin);
@@ -2993,7 +2996,9 @@ const httpServer = http.createServer(async (req, res) => {
           ? path.resolve(process.env.TEXACORE_TCDB_DIR)
           : (isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore'));
         if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
-        const tcdbPath = path.join(tcdbDir, fileName);
+        // 2.0.2 (review): a FREE name - the picked file may itself live in this folder (a passphrase-protected export saved to the company folder):
+        // the live sync below rewrites tcdbPath every minute with the install key, so tcdbPath must never be an existing file.
+        const tcdbPath = companyFile.uniqueTcdbPath(tcdbDir, fileName.replace(/\.tcdb$/i, ''));
         // Belt and braces: whatever the name was, the final path must be a direct child of the TexaCore folder.
         if (path.dirname(path.resolve(tcdbPath)) !== path.resolve(tcdbDir)) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
@@ -3004,7 +3009,14 @@ const httpServer = http.createServer(async (req, res) => {
         const tmpPath = path.join(tcdbDir, `.restore-${process.pid}-${Date.now()}.tmp`);
         try {
           fs.writeFileSync(tmpPath, fileData, { flag: 'wx', mode: 0o600 });
-          fs.renameSync(tmpPath, tcdbPath);
+          try { fs.linkSync(tmpPath, tcdbPath); }   // fails with EEXIST instead of replacing a file that appeared meanwhile (EEXIST always throws)
+          catch (le) {
+            if (!le || !['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS'].includes(le.code)) throw le;
+            // FAT/exFAT sticks and some shares have no hard links: copy with COPYFILE_EXCL (still never replaces an existing file)
+            try { fs.copyFileSync(tmpPath, tcdbPath, fs.constants.COPYFILE_EXCL); }
+            catch (ce) { if (ce && ce.code !== 'EEXIST') { try { fs.unlinkSync(tcdbPath); } catch { /* nothing was created */ } } throw ce; }
+          }
+          fs.unlinkSync(tmpPath);
         } catch (werr) {
           try { fs.unlinkSync(tmpPath); } catch { /* already gone */ }
           throw werr;
@@ -3027,6 +3039,7 @@ const httpServer = http.createServer(async (req, res) => {
         }
         
         // Restore the database from TCDB
+        try { backupManager.stopSync(); } catch { /* not running */ }   // the previous timer must not write into the new target mid-restore (startSync below re-arms it)
         backupManager.backupPath = tcdbPath;
         backupManager.secondaryBackupPath = null;   // 2.0.2: see restoreTcdbFromPath - the second copy belongs to the previous company file
         const restoreResult = await backupManager.restore(tcdbPath, { passphrase });

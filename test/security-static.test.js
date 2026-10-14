@@ -93,7 +93,8 @@ test('restore-tcdb: the multipart file name is validated and the bytes checked B
   const iWrite = block.indexOf('writeFileSync');
   assert.ok(iName > 0 && iMagic > 0 && iWrite > 0, 'validation and write both present');
   assert.ok(iName < iWrite && iMagic < iWrite, 'validation precedes the write');
-  assert.match(block, /renameSync\(tmpPath, tcdbPath\)/);
+  assert.match(block, /linkSync\(tmpPath, tcdbPath\)/, 'no-clobber move: an existing file is never replaced');
+  assert.match(block, /uniqueTcdbPath\(tcdbDir,/, 'a free name: the picked file itself (e.g. a protected export in this folder) is never the live target');
   assert.doesNotMatch(block, /writeFileSync\(tcdbPath/, 'never writes straight to the caller-named path');
 });
 

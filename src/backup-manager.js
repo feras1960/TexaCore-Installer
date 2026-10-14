@@ -297,7 +297,17 @@ class BackupManager {
       fs.writeFileSync(tempPath, tcdbBuffer, { mode: 0o600 });
       // an atomic move: a half-written export never appears under the final name. Without overwrite the target is re-checked at the last moment.
       if (!overwrite && fs.existsSync(target)) throw Object.assign(new Error(`الملف موجود مسبقاً ولن يُستبدل | A file with this name already exists: ${target}`), { code: 'EXPORT_EXISTS' });
-      fs.renameSync(tempPath, target);
+      if (overwrite) fs.renameSync(tempPath, target);
+      else {
+        // no-clobber: a file created after the check above makes this fail (EEXIST) instead of being replaced
+        try { fs.linkSync(tempPath, target); fs.unlinkSync(tempPath); }
+        catch (le) {
+          if (le && le.code === 'EEXIST') throw Object.assign(new Error(`الملف موجود مسبقاً ولن يُستبدل | A file with this name already exists: ${target}`), { code: 'EXPORT_EXISTS' });
+          if (!le || !['EPERM', 'ENOTSUP', 'EXDEV', 'ENOSYS'].includes(le.code)) throw le;
+          fs.copyFileSync(tempPath, target, fs.constants.COPYFILE_EXCL);   // FAT/exFAT sticks and some shares have no hard links
+          fs.unlinkSync(tempPath);
+        }
+      }
     } catch (e) {
       try { fs.unlinkSync(tempPath); } catch { /* already gone */ }
       throw e;

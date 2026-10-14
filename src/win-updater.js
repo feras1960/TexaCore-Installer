@@ -218,6 +218,11 @@ class WinUpdater {
     const dir = helper.cacheDirForPendingUpdate;
     fs.mkdirSync(dir, { recursive: true });
     for (const f of fs.readdirSync(dir)) { if (f !== target.fileName) { try { fs.rmSync(path.join(dir, f), { recursive: true, force: true }); } catch { /* best effort */ } } }
+    // electron-updater checks the publisher signature ONLY in its own download task; a cached file skips it - so check here (null = ok / no publisherName configured)
+    if (typeof au.verifySignature === 'function') {
+      const bad = await au.verifySignature(file);
+      if (bad != null) { try { fs.rmSync(file, { force: true }); } catch { /* gone */ } throw new Error(`v${target.version} is not signed by the application owner: ${bad}`); }
+    }
     const dest = path.join(dir, target.fileName);
     try { fs.renameSync(file, dest); } catch (e) {
       if (e.code !== 'EXDEV') throw e;
