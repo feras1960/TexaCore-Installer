@@ -10,7 +10,8 @@ const { getVendorAccount } = require('./vendor-support');
 const https = require('https');
 const http = require('http');
 const { autoUpdater } = require('electron-updater');
-const { MacUpdater, applyUpdateEvent } = require('./mac-updater');
+const { MacUpdater, applyUpdateEvent, createUpdateStatus } = require('./mac-updater');
+const { WinUpdater } = require('./win-updater');
 const ServiceManager = require('./service-manager');
 const LicenseGuard = require('./license-guard');
 const netGuard = require('./net-guard');
@@ -1709,7 +1710,7 @@ function initBackupOnStartup() {
 const DESTRUCTIVE_API = new Set([
   '/api/delete-company', '/api/restore-tcdb', '/api/import-rsf', '/api/import-rsf-path',
   '/api/create-local-company', '/api/backup', '/api/open-tcdb', '/api/tunnel-fix', '/api/tunnel-restart',
-  '/api/update/install', '/api/invite-employee',
+  '/api/update/install', '/api/update/pause', '/api/update/resume', '/api/update/retry', '/api/invite-employee',
 ]);
 // 2.0.0: every admin-API call except /api/ping must carry this install's secret (secrets.json → /config.js, same-origin only;
 // the Electron window gets it over IPC). It keeps other local programs and foreign web pages — which CORS "*" and a loopback
@@ -2297,8 +2298,25 @@ const httpServer = http.createServer(async (req, res) => {
   // ─── GET /api/update/status ──────────────────────────────
   // Live OTA update status for the ERP web UI widget (DesktopUpdateWidget).
   } else if (req.method === 'GET' && req.url === '/api/update/status') {
+    // `state` (idle | downloading | ready) + version/percent/transferredMB/totalMB are the original fields; `phase` and the rest describe the download in detail
+    // (paused / waiting-retry with the countdown and the last error / verifying …) so the ERP page can show them.
     res.writeHead(200, { 'Content-Type': 'application/json' });
-    res.end(JSON.stringify({ success: true, ...updateStatus }));
+    res.end(JSON.stringify({ success: true, ...updateStatus, nextRetryInSec: updateStatus.nextRetryAt ? Math.max(0, Math.ceil((updateStatus.nextRetryAt - Date.now()) / 1000)) : null }));
+
+  // ─── POST /api/update/pause | resume | retry ─────────────
+  // The same controls the installer window has (Pause / Resume / Retry now). Local-only like /api/update/install (DESTRUCTIVE_API + the loopback check below).
+  } else if (req.method === 'POST' && (req.url === '/api/update/pause' || req.url === '/api/update/resume' || req.url === '/api/update/retry')) {
+    const remote = req.socket.remoteAddress || '';
+    const isLoopback = remote === '127.0.0.1' || remote === '::1' || remote === '::ffff:127.0.0.1';
+    if (!isLoopback) {
+      res.writeHead(403, { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: 'forbidden: update controls are local-only' }));
+      return;
+    }
+    const action = req.url.split('/').pop();
+    const ok = updateControl(action === 'retry' ? 'retry' : action);
+    res.writeHead(ok ? 200 : 409, { 'Content-Type': 'application/json' });
+    res.end(JSON.stringify({ success: !!ok, status: { ...updateStatus } }));
 
   // ─── POST /api/update/install ────────────────────────────
   // Restart-to-install, triggered from the ERP web UI. Same path as the
@@ -2531,6 +2549,15 @@ const httpServer = http.createServer(async (req, res) => {
     // release-check only (isolated harness runs): drive the installer window — preload bridge, IPC handlers, renderer — against the live services
     uiSmoke().then((r) => { res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(r)); })
       .catch((e) => { res.writeHead(500, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: e.message })); });
+
+  } else if (HARNESS_OK && req.method === 'POST' && req.url === '/api/ui-update-emit') {
+    // release-check only (isolated harness runs): push a synthetic updater event through the REAL path (shared status → IPC → the window), to photograph each state
+    let body = '';
+    req.on('data', (c) => { if (body.length < 20000) body += c.toString(); });
+    req.on('end', () => {
+      try { const o = JSON.parse(body || '{}'); emitUpdateEvent(String(o.channel || 'update-status'), o.payload); res.writeHead(200, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: true, status: { ...updateStatus } })); }
+      catch (e) { res.writeHead(400, { 'Content-Type': 'application/json' }); res.end(JSON.stringify({ ok: false, error: e.message })); }
+    });
 
   } else if (HARNESS_OK && (req.url || '').startsWith('/api/ui-update')) {
     // release-check only (isolated harness runs): read the installer window's OTA widget (what the user is shown) and press its «restart now» button
@@ -3236,22 +3263,59 @@ let macUpdater = null;
 // ERP web UI (localhost:8080) can show a live update widget. Fed by BOTH the
 // mac MacUpdater flow and the Windows electron-updater flow through
 // emitUpdateEvent(), which also forwards the event to the installer renderer.
-const updateStatus = { state: 'idle', version: null, percent: null, transferredMB: null, totalMB: null };
+const updateStatus = createUpdateStatus();
 function emitUpdateEvent(channel, payload) {
   applyUpdateEvent(updateStatus, channel, payload);
-  mainWindow?.webContents.send(channel, payload);
+  try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send(channel, payload); } catch { /* the window is closing */ }
+}
+let winUpdater = null;
+const activeUpdater = () => macUpdater || winUpdater;
+// The installer window's Pause / Resume / Retry-now buttons, the ERP page and the tray all land here. Returns whether the action applied.
+function updateControl(action) {
+  const u = activeUpdater();
+  if (!u) return false;
+  if (action === 'pause') return !!u.pause();
+  if (action === 'resume') return !!u.resume();
+  if (action === 'retry') return !!u.retryNow();
+  return false;
+}
+// "The network is back" → retry the download at once instead of waiting out the backoff: Electron's online state flipping to online, and the machine
+// waking from sleep (a connection that was open before the sleep is dead; the updater drops it and resumes). Both are cheap and run for the app's lifetime.
+function watchNetworkForUpdates() {
+  try {
+    const { net, powerMonitor } = require('electron');
+    let online = net.isOnline();
+    const t = setInterval(() => {
+      let now = online; try { now = net.isOnline(); } catch { /* not ready */ }
+      if (now && !online) { fileLog('[Update] network is back'); activeUpdater()?.networkUp('online'); }
+      online = now;
+    }, 5000);
+    if (t.unref) t.unref();
+    powerMonitor.on('resume', () => setTimeout(() => { fileLog('[Update] woke from sleep'); activeUpdater()?.networkUp('resume'); }, 3000));
+    powerMonitor.on('unlock-screen', () => activeUpdater()?.networkUp('unlock'));
+  } catch (e) { fileLog('[Update] network watch not available:', e.message); }
+}
+// isolated harness runs only: tuning of the download engine (stall / backoff times) so a test does not wait 45 s and 15 s
+function updaterTuning() {
+  if (!HARNESS_OK || !process.env.TEXACORE_UPDATE_TUNING) return {};
+  try { return JSON.parse(process.env.TEXACORE_UPDATE_TUNING); } catch { return {}; }
 }
 
 function setupAutoUpdater() {
   const isMac = process.platform === 'darwin';
 
   if (isMac) {
+    const tuning = updaterTuning();
     macUpdater = new MacUpdater({
       getVersion: () => app.getVersion(),
       userDataPath: app.getPath('userData'),
       isPackaged: app.isPackaged,
       log: fileLog,
       emit: emitUpdateEvent,
+      isOnline: () => { try { return require('electron').net.isOnline(); } catch { return true; } },
+      engine: tuning.engine,
+      checkInitialDelayMs: tuning.checkInitialDelayMs,
+      checkIntervalMs: tuning.checkIntervalMs,
       // No native modal on "ready": the subtle in-app update widget (fed by the
       // 'update-downloaded' event above) is the only surface. The staged update
       // installs on the next quit/relaunch via the quit-hook installer, or
@@ -3259,47 +3323,29 @@ function setupAutoUpdater() {
       onStaged: (version) => fileLog('[MacUpdater] update staged & ready (widget-only, no modal):', version),
     });
     macUpdater.start();
+    watchNetworkForUpdates();
     return;
   }
 
-  autoUpdater.autoDownload = !isMac;
-  autoUpdater.autoInstallOnAppQuit = true;
-
-  autoUpdater.on('update-available', (info) => {
-    emitUpdateEvent('update-available', {
-      version: info.version,
-      releaseNotes: info.releaseNotes,
-    });
+  // Windows: electron-updater installs; src/win-updater.js puts the resumable download (Range resume, stall detector, backoff, pause) in front of its
+  // download step and hands the verified installer over through electron-updater's own cache. A failed hand-over falls back to its stock download.
+  const tuning = updaterTuning();
+  winUpdater = new WinUpdater({
+    autoUpdater,
+    getVersion: () => app.getVersion(),
+    userDataPath: app.getPath('userData'),
+    log: fileLog,
+    emit: (channel, payload) => {
+      if (channel === 'update-downloaded' && autoUpdater.updateInfoAndProvider?.info?.version) updateStatus.version = autoUpdater.updateInfoAndProvider.info.version;
+      emitUpdateEvent(channel, payload);
+    },
+    isOnline: () => { try { return require('electron').net.isOnline(); } catch { return true; } },
+    engine: tuning.engine,
+    checkInitialDelayMs: tuning.checkInitialDelayMs,
+    checkIntervalMs: tuning.checkIntervalMs,
   });
-
-  autoUpdater.on('update-not-available', () => {
-    emitUpdateEvent('update-not-available');
-  });
-
-  autoUpdater.on('download-progress', (progress) => {
-    emitUpdateEvent('update-progress', {
-      percent: Math.round(progress.percent),
-      transferred: (progress.transferred / 1024 / 1024).toFixed(1),
-      total: (progress.total / 1024 / 1024).toFixed(0),
-    });
-  });
-
-  autoUpdater.on('update-downloaded', (info) => {
-    if (info?.version) updateStatus.version = info.version;
-    // No native modal: the subtle in-app update widget is the only surface.
-    // autoInstallOnAppQuit (set above) installs the staged update on the next
-    // quit, or the widget's restart action triggers it immediately.
-    emitUpdateEvent('update-downloaded');
-  });
-
-  autoUpdater.on('error', (err) => {
-    console.error('Update error:', err);
-  });
-
-  // Initial check shortly after launch, then poll every 6 hours.
-  const check = () => autoUpdater.checkForUpdates().catch(() => {});
-  setTimeout(check, 5000);
-  setInterval(check, 6 * 60 * 60 * 1000);
+  winUpdater.start();
+  watchNetworkForUpdates();
 }
 
 // Check for update (manual)
@@ -3328,6 +3374,11 @@ ipcMain.handle('download-update', async () => {
     return { success: false, error: err.message };
   }
 });
+
+// The current download status (the window asks when it opens or reloads: a paused or waiting download sends no events for minutes)
+ipcMain.handle('get-update-status', () => ({ ...updateStatus }));
+// Pause / Resume / Retry now — one entry for the three buttons of the installer window
+ipcMain.handle('update-control', (_, action) => ({ ok: updateControl(String(action)), status: { ...updateStatus } }));
 
 // Install update
 ipcMain.handle('install-update', () => {
@@ -3580,6 +3631,7 @@ app.on('before-quit', (event) => {
       // If a verified mac update is staged, launch the detached installer
       // script now — it waits for our PID to exit, swaps the bundle,
       // re-signs it ad-hoc, and relaunches the app.
+      try { await activeUpdater()?.stop(); } catch { /* noop */ }           // flush the partial download (it is resumed next start)
       try { macUpdater?.spawnInstallerIfStaged(); } catch { /* noop */ }
       app.exit(0);
     }

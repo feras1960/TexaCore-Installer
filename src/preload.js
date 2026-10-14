@@ -55,6 +55,10 @@ contextBridge.exposeInMainWorld('texacore', {
   onUpdateProgress: (cb) => ipcRenderer.on('update-progress', (_, d) => cb(d)),
   onUpdateDownloaded: (cb) => ipcRenderer.on('update-downloaded', () => cb()),
   onUpdateNotAvailable: (cb) => ipcRenderer.on('update-not-available', () => cb()),
+  // the detailed download status (phase, bytes, speed, countdown to the next try, last error …) and its three controls
+  onUpdateStatus: (cb) => ipcRenderer.on('update-status', (_, d) => cb(d)),
+  getUpdateStatus: () => ipcRenderer.invoke('get-update-status'),
+  updateControl: (action) => ipcRenderer.invoke('update-control', action),   // 'pause' | 'resume' | 'retry'
   // one-time notice after an upgrade over a 1.x install
   getUpgradeNotice: () => ipcRenderer.invoke('upgrade-notice-get'),
   dismissUpgradeNotice: () => ipcRenderer.invoke('upgrade-notice-dismiss'),
