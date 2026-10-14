@@ -28,7 +28,17 @@ test('NO plan limit or module list is written in the program: plan-sync.js carri
   assert.deepEqual(row('texa-starter').slice(0, 8), [3, 1, 1, 2, 2000, 1000, -1, -1]);
   assert.deepEqual(row('texa-professional').slice(0, 8), [10, 3, 5, 10, 20000, 5000, -1, -1]);
   assert.deepEqual(row('texa-enterprise').slice(0, 8), [-1, -1, -1, -1, -1, -1, -1, -1]);
-  assert.match(seed, /'free'[\s\S]{0,400}ARRAY\['fabric'/, 'free carries the fabric module (a Rashid fabric import needs it)');
+  // MODULES: production's included_modules (read 2026-10-14) — an OFFLINE first run lives on these rows until the first plan sync, and the ERP's row-level guards
+  // need accounting (journal entries / chart), sales (customers), inventory, purchases; free also carries fabric (the item master of every activity is gated by it)
+  const modulesOf = (code) => new Set([...new RegExp(`'${code}', '[^']+', '[^']+', '(?:free|paid)'[^\\n]*?ARRAY\\[([^\\]]*)\\]::text\\[\\]`).exec(seed)[1].matchAll(/'([^']+)'/g)].map((m) => m[1]));
+  const prod = {
+    free: 'accounting activity_log ai_analytics crm dashboard inventory manufacturing purchases sales system_config fabric',
+    'texa-starter': 'dashboard accounting inventory sales purchases crm ai_analytics system_config activity_log fabric hr contracts manufacturing',
+    'texa-professional': 'dashboard accounting inventory sales purchases crm ai_analytics system_config activity_log fabric hr e-commerce pbx manufacturing contracts',
+    'texa-enterprise': 'dashboard fabric accounting inventory sales purchases crm hr e-commerce growth-ai pbx ai_analytics inspiration_studio workflow_center support_mdm system_config general_trade doctors gold vehicles exchange manufacturing website activity_log contracts',
+  };
+  for (const [code, list] of Object.entries(prod)) assert.deepEqual([...modulesOf(code)].sort(), list.split(' ').sort(), `${code}: bundled included_modules differ from production's`);
+  for (const m of ['accounting', 'sales', 'inventory', 'purchases', 'fabric']) assert.ok(modulesOf('free').has(m), `the free plan must carry ${m} (offline first run)`);
 });
 
 test('normalizeCloudPlan keeps only validated control-panel columns', () => {
