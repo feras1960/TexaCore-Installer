@@ -47,7 +47,7 @@ function request(method, url, { headers = {}, body, timeout = 120000 } = {}) {
     const u = new URL(url);
     const payload = body === undefined ? '' : (typeof body === 'string' ? body : JSON.stringify(body));
     const req = http.request({
-      hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, timeout,
+      hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, timeout, agent: false,   // one connection per request: a pooled keep-alive socket that the app's server closes at its 5 s idle limit surfaced as EPIPE / ECONNRESET on the first call after a pause
       headers: { ...(payload && typeof body !== 'string' ? { 'Content-Type': 'application/json' } : {}), ...headers, ...(payload ? { 'Content-Length': Buffer.byteLength(payload) } : {}) },
     }, (res) => {
       const chunks = [];

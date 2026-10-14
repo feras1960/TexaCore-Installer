@@ -769,7 +769,7 @@ async function main() {
       const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
       const rawRequest = (method, url, { headers = {}, body = null } = {}) => new Promise((resolve, reject) => {
         const u = new URL(url);
-        const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers: { ...headers, ...(body ? { 'Content-Length': body.length } : {}) } }, (res) => {
+        const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, agent: false, headers: { ...headers, ...(body ? { 'Content-Length': body.length } : {}) } }, (res) => {
           const chunks = []; res.on('data', (c) => chunks.push(c));
           res.on('end', () => { const buf = Buffer.concat(chunks); let json = null; try { json = JSON.parse(buf.toString('utf8')); } catch { /* binary */ } resolve({ status: res.statusCode, headers: res.headers, buf, json }); });
         });
