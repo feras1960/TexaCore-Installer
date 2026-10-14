@@ -5,7 +5,8 @@
 // under sandbox-exec like ota-check.js; nothing from the real GitHub release; the real updater code, unmodified: only the stall / backoff timings are shortened through
 // TEXACORE_UPDATE_TUNING, which the app honours in isolated harness runs only).
 //
-//   node scripts/e2e/ota-resume-check.js --workdir <empty dir>
+//   node scripts/e2e/ota-resume-check.js --workdir <empty dir> [--app "<packaged TexaCore ERP.app>"]
+//     --app  run the PACKAGED, obfuscated app (a test copy of it: ota-boot.js wrapper that installs the network redirect, ad-hoc re-signed) instead of this checkout under Electron
 //
 // The mock GitHub (scripts/e2e/mock-github.js, GitHub's real redirect chain, Range / If-Range / ETag) serves a REAL zip of a small fake "TexaCore ERP.app" (56 MB of random
 // payload, paced at 2 MB/s; the release is published only once the app is ready, and the app looks again every 5 s) as release 2.0.2-test, and cuts the connection at 60 % of the file.
@@ -32,7 +33,10 @@ const WORK = path.resolve(arg('workdir'));
 const MOCK_PORT = 47398;
 const HOME = os.homedir();
 const MB = 1048576;
-const VERSION = '2.0.2-test';
+const APP = arg('app', '') ? path.resolve(arg('app')) : '';
+// the fake release must be NEWER than the app under test ("2.0.2-test" is older than 2.0.2 in semver): next patch of the running version + "-test"
+const RUNNING_VERSION = APP ? JSON.parse(fs.readFileSync(path.join(APP, 'Contents', 'Resources', 'app', 'package.json'), 'utf8')).version : require('../../package.json').version;
+const VERSION = (() => { const m = /^(\d+)\.(\d+)\.(\d+)/.exec(RUNNING_VERSION); return `${m[1]}.${m[2]}.${Number(m[3]) + 1}-test`; })();
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 const sha512b64 = (f) => crypto.createHash('sha512').update(fs.readFileSync(f)).digest('base64');
 const shots = path.join(WORK, 'shots');
@@ -74,17 +78,35 @@ function makeRelease(dir) {
   return { zip, name, sha, size, yml, payloadSha: sha512b64(payload) };
 }
 
+/** --app: a test copy of the packaged app with a wrapper entry that installs the network redirect before the app's own main runs (as ota-check.js does), ad-hoc re-signed. */
+function prepareAppCopy() {
+  const copy = path.join(WORK, 'app-under-test', path.basename(APP));
+  fs.rmSync(path.dirname(copy), { recursive: true, force: true }); fs.mkdirSync(path.dirname(copy), { recursive: true });
+  execFileSync('/usr/bin/ditto', ['--noextattr', '--norsrc', APP, copy]); spawnSync('/usr/bin/xattr', ['-cr', copy]);
+  const res = path.join(copy, 'Contents', 'Resources', 'app'); const pj = path.join(res, 'package.json');
+  const pkg = JSON.parse(fs.readFileSync(pj, 'utf8'));
+  fs.writeFileSync(path.join(res, 'ota-boot.js'), `'use strict';\nrequire(process.env.OTA_PRELOAD);\nrequire('./${pkg.main}');\n`);
+  pkg.main = 'ota-boot.js'; fs.writeFileSync(pj, JSON.stringify(pkg, null, 2));
+  execFileSync('/usr/bin/codesign', ['--force', '--deep', '--sign', '-', copy], { stdio: 'ignore' });
+  return copy;
+}
+let APP_COPY = '';
 function launch(userData, tag, extraEnv = {}) {
   const log = fs.openSync(path.join(WORK, `app-${tag}.log`), 'a');
-  const bin = path.join(ROOT, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron');
   const cleanEnv = Object.fromEntries(Object.entries(process.env).filter(([k]) => !/^(TEXACORE_|ELECTRON_RUN_AS_NODE|NODE_OPTIONS)/.test(k)));
   const preload = path.join(__dirname, 'net-redirect-preload.js');
-  const child = spawn('/usr/bin/sandbox-exec', ['-f', path.join(WORK, 'ota.sb'), bin, ROOT, '--no-sandbox', `--user-data-dir=${userData}`], {
-    stdio: ['ignore', log, log], cwd: ROOT,
-    env: { ...cleanEnv, NODE_OPTIONS: `--require ${preload}`, OTA_PRELOAD: preload, OTA_MOCK_PORT: String(MOCK_PORT), OTA_NET_LOG: path.join(WORK, `net-${tag}.jsonl`),
-      TEXACORE_HEADLESS: '1', TEXACORE_PORT_BASE: '47391', TEXACORE_USER_DATA: userData, TEXACORE_STUB_TUNNEL: '1', TEXACORE_STUB_MDM: '1', TEXACORE_E2E_AUTOSTART: '1',
-      TEXACORE_E2E_LICENSE: 'free', TEXACORE_UPDATE_TEST: '1', TEXACORE_UI_SMOKE: '1', TEXACORE_SHOT_DIR: shots, ...extraEnv },
-  });
+  const harnessEnv = { OTA_PRELOAD: preload, OTA_MOCK_PORT: String(MOCK_PORT), OTA_NET_LOG: path.join(WORK, `net-${tag}.jsonl`),
+    TEXACORE_HEADLESS: '1', TEXACORE_PORT_BASE: '47391', TEXACORE_USER_DATA: userData, TEXACORE_STUB_TUNNEL: '1', TEXACORE_STUB_MDM: '1', TEXACORE_E2E_AUTOSTART: '1',
+    TEXACORE_E2E_LICENSE: 'free', TEXACORE_UPDATE_TEST: '1', TEXACORE_UI_SMOKE: '1', TEXACORE_SHOT_DIR: shots, ...extraEnv };
+  let child;
+  if (APP) {
+    const bin = path.join(APP_COPY, 'Contents', 'MacOS', path.basename(APP_COPY, '.app'));
+    child = spawn('/usr/bin/sandbox-exec', ['-f', path.join(WORK, 'ota.sb'), bin, '--no-sandbox', `--user-data-dir=${userData}`], { stdio: ['ignore', log, log], env: { ...cleanEnv, ...harnessEnv } });
+  } else {
+    const bin = path.join(ROOT, 'node_modules', 'electron', 'dist', 'Electron.app', 'Contents', 'MacOS', 'Electron');
+    child = spawn('/usr/bin/sandbox-exec', ['-f', path.join(WORK, 'ota.sb'), bin, ROOT, '--no-sandbox', `--user-data-dir=${userData}`], { stdio: ['ignore', log, log], cwd: ROOT,
+      env: { ...cleanEnv, NODE_OPTIONS: `--require ${preload}`, ...harnessEnv } });
+  }
   child.exited = new Promise((resolve) => child.on('exit', (code, sig) => resolve({ code, sig })));
   return child;
 }
@@ -96,6 +118,7 @@ const hbLog = (userData) => { try { return fs.readFileSync(path.join(userData, '
   for (const p of [...Object.values(PORTS), MOCK_PORT]) if (!(await portFree(p))) { console.error(`port ${p} busy`); process.exit(2); }
   fs.rmSync(WORK, { recursive: true, force: true }); fs.mkdirSync(shots, { recursive: true });
   sandboxProfile();
+  if (APP) APP_COPY = prepareAppCopy();
   const rel = makeRelease(path.join(WORK, 'release'));
   const userData = path.join(WORK, 'userdata');
   const upd = path.join(userData, 'updates');
