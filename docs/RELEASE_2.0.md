@@ -34,7 +34,11 @@ packaged web bundle is not this version, if fonts/binaries/bootstrap SQL are mis
   `pack-baseline` — otherwise the repo's generated key no longer matches the first platform's package and `verify-mac-build` M5 / `verify-win-build` W4 report "built from different source".
 - **Do not build inside an iCloud-synced folder.** File-provider attributes on directories make `codesign` refuse in place; `afterPack` then signs a clean copy in the temp folder and puts it back, and fails the build if the final bundle does not verify.
 - **After the mac build run `node scripts/verify-mac-build.js`** (zip + dmg + latest-mac.yml, signature validity of the extracted zip and the mounted dmg). Earlier builds shipped an invalid signature and the launch checks did not notice, because they run the inner binary.
-- Update check: `node scripts/e2e/ota-check.js` (hops a, tamper, tamper2, b; mock GitHub with the real redirect chain, outside the product) and `node scripts/e2e/ui-shots.js` (launcher window, Arabic RTL + English LTR).
+- Update check: `node scripts/e2e/ota-check.js` (hops a, tamper, tamper2, b; mock GitHub with the real redirect chain, outside the product) and `node scripts/e2e/ui-shots.js` (launcher window, Arabic RTL + English LTR; U12 = the update progress widget, every state).
+  Hops tamper / tamper2 / b drive the CLIENT you give them (`--old180`, `--client200`): they test that client's updater, so they only exercise the resumable download once the client is a 2.0.2+ build.
+- Resumable download (2.0.2+): `npm test` (test/update-resume.test.js — drops at 40 % and 80 %, stall, restart, no-Range server, corrupt bytes, pause, disk space, network-up) and, on the real app, `node scripts/e2e/ota-resume-check.js --workdir <dir>`
+  (isolated userData, ports 47391+, mock GitHub; kills the app mid-download and checks that the restart resumes).
+- Before uploading: `node scripts/release-assets.js` (uploads nothing; verifies dist/ and prints the `gh release upload` commands — binaries + blockmaps first, feeds last).
 
 ## Opening a 1.x company file (.tcdb) in 2.0 — measured 2026-10-13, and what 2.0 does about it
 **Result: it cannot work, so 2.0 refuses it before touching anything.** A real 1.8.0 file (PostgreSQL 15, plain `pg_dump` of the 1.x local schema, written by the 1.8.0 build `c05be42` in a lab run with 4 companies / 6 entries / 6 customers)
@@ -142,5 +146,9 @@ in `test/license-signature.test.js`. Flip the flag only after the cloud signs ev
 ## Publish
 
 `npm run publish` (never upload a hand-renamed exe: names with spaces 404). Windows installer name is `TexaCore-ERP-Setup-<version>.exe`.
-`latest.yml` / `latest-mac.yml` carry the version from package.json. After the files are live, insert the `licensing.app_versions` row for 2.0.0
+`latest.yml` / `latest-mac.yml` carry the version from package.json.
+**Always upload the `.blockmap` files** (`TexaCore-ERP-Setup-<v>.exe.blockmap`, `TexaCore-ERP-<v>-arm64.zip.blockmap`): electron-updater's differential download on Windows needs the blockmap of the NEW version and of the INSTALLED one;
+2.0.0 and 2.0.1 shipped without them. `node scripts/release-assets.js` lists and verifies the complete set (and `--blockmaps-only` adds just the blockmaps to a release that is already live, after proving the published binary is the one in dist/).
+GitHub layout today: macOS is the **Latest** release `v<version>` (`latest-mac.yml`, zip, dmg — the Mac self-updater reads `releases/latest/download/latest-mac.yml`); Windows is a separate **pre-release** `v<version>-windows-test` that holds only the exe
+(no `latest.yml`, so electron-updater finds nothing to update to). That strategy is unchanged here. After the files are live, insert the `licensing.app_versions` row for 2.0.0
 (not before — clients would be told to fetch a file that does not exist).
