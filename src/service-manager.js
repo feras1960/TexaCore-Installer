@@ -22,6 +22,8 @@ const { TunnelMonitor, redact } = require('./tunnel-monitor');
 // ─── Ports (defaults — TEXACORE_PORT_BASE moves the whole block; see ports.js) ───
 const PG_PORT = PORTS.pg;
 const DEFAULT_POSTGREST_PORT = PORTS.postgrest;
+// How long startPostgREST() waits for the first HTTP answer: slow customer PCs and a schema of about 1,300 tables (the schema cache load) need far more than the old 10 s.
+const POSTGREST_START_TIMEOUT_MS = 45000;
 const DEFAULT_GOTRUE_PORT = PORTS.gotrue;
 const DEFAULT_API_PORT = PORTS.api; // Unified API port (replaces Kong)
 const ADMIN_PORT = PORTS.admin;     // the installer's local admin API (main.js)
@@ -770,7 +772,8 @@ class ServiceManager {
     this.processes.postgrest = proc;
 
     // Wait for PostgREST
-    for (let i = 0; i < 20; i++) {
+    const waitUntil = Date.now() + POSTGREST_START_TIMEOUT_MS;
+    while (Date.now() < waitUntil) {
       await this._sleep(500);
       
       if (!this.processes.postgrest) {
@@ -787,7 +790,7 @@ class ServiceManager {
     
     let logContent = '';
     try { logContent = fs.readFileSync(logFile, 'utf8').slice(-1000); } catch {}
-    throw new Error(`PostgREST failed to start within 10 seconds.\nLog: ${logContent}`);
+    throw new Error(`PostgREST failed to start within ${POSTGREST_START_TIMEOUT_MS / 1000} seconds.\nLog: ${logContent}`);
   }
 
   // ─── Start GoTrue ────────────────────────────────────────────
