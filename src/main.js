@@ -17,6 +17,7 @@ const LicenseGuard = require('./license-guard');
 const netGuard = require('./net-guard');
 const cloudClient = require('./cloud-client');
 const BackupManager = require('./backup-manager');
+const companyFile = require('./company-file');
 const { RsfReader, detectFileType } = require('./rsf-reader');
 const { RsfExporter, RsfSyncManager } = require('./rsf-exporter');
 const { PORTS, harnessAllowed } = require('./ports');
@@ -1471,23 +1472,52 @@ async function handleCreateLocalCompany(companyData) {
     fileLog('[TexaCore] Tenant, admin and company created:', companyId);
 
     // ── 2. Where the .tcdb backup file lives + remember the company for backup auto-resume ──
+    // 2.0.2: a company made from a Rashid file picked in the native dialog (rsfSourceRef) keeps its file BESIDE that Rashid file, named after it
+    // (<folder of the .rsf>/<rsf name>.tcdb) - the way 1.x's import-rsf-path did and the way Rashid itself keeps its file. Any other new company
+    // keeps the folder/name it asked for, and a rsf_import company with neither goes to the default TexaCore folder instead of having NO file.
+    // In every case an existing .tcdb is never the target: the name gets " (2)", " (3)"... so a new company's first backup cannot replace another's file.
     let tcdbFilePath = null;
+    let tcdbPlacement = null;       // 'beside-rsf' | 'chosen' | 'default' | 'fallback-default'
+    let tcdbFallbackReason = null;
     const config = loadConfig();
-    config.storagePath = companyData.storagePath;
-    if (companyData.storagePath) {
-      try {
+    const pickedSource = companyData.rsfSourceRef ? pickedFiles.get(companyData.rsfSourceRef) : null;
+    let storageDir = companyData.storagePath || null;
+    try {
+      let dir = null; let base = null;
+      if (pickedSource && pickedSource.type === 'rsf') {
+        const plan = companyFile.rsfCompanyFilePlan(pickedSource.filePath);
+        const w = companyFile.folderIsWritable(plan.dir);
+        if (w.ok) { dir = plan.dir; base = plan.base; tcdbPlacement = 'beside-rsf'; }
+        else { tcdbFallbackReason = w.reason; fileLog('[TexaCore] The Rashid file folder is not writable (' + w.reason + ') - using the default folder'); }
+      }
+      if (!dir && companyData.storagePath) {
         let basePath = companyData.storagePath;
         if (basePath.startsWith('~')) basePath = path.join(require('os').homedir(), basePath.slice(1));
-        if (!fs.existsSync(basePath)) fs.mkdirSync(basePath, { recursive: true });
-        const fileName = (companyData.dbFileName || 'my_company') + '.tcdb';
-        tcdbFilePath = path.join(basePath, fileName);
-        fileLog('[TexaCore] Backup file path:', tcdbFilePath);
-      } catch (err) {
-        console.warn('[TexaCore] Could not setup backup path:', err.message);
+        dir = basePath; base = companyData.dbFileName || 'my_company'; tcdbPlacement = 'chosen';
       }
+      if (!dir && (pickedSource || companyData.purpose === 'rsf_import')) {
+        dir = companyFile.defaultCompanyDir(); base = companyData.companyName || 'company';
+        tcdbPlacement = tcdbFallbackReason ? 'fallback-default' : 'default';
+      }
+      if (dir) {
+        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
+        tcdbFilePath = companyFile.uniqueTcdbPath(dir, base);
+        storageDir = dir;
+        fileLog('[TexaCore] Backup file path:', tcdbFilePath, '(' + tcdbPlacement + ')');
+      }
+    } catch (err) {
+      console.warn('[TexaCore] Could not setup backup path:', err.message);
     }
-    config.companies = [{ name: companyData.companyName, tcdbPath: tcdbFilePath, storagePath: companyData.storagePath }];
+    // A company made from a Rashid file keeps TWO copies in step: the one beside the Rashid file and one in the program's own backup folder
+    // (<app data>/backups/<same name>) - the user's folder may be a USB stick, a cloud folder or deleted; the program's copy is always there.
+    let tcdbCopyPath = null;
+    if (tcdbFilePath && (pickedSource || companyData.purpose === 'rsf_import')) {
+      try { tcdbCopyPath = companyFile.programCopyPath(DATA_DIR, tcdbFilePath); } catch (err) { console.warn('[TexaCore] Could not choose the program copy path:', err.message); }
+    }
+    config.storagePath = storageDir;
+    config.companies = [{ name: companyData.companyName, tcdbPath: tcdbFilePath, storagePath: storageDir, ...(tcdbCopyPath ? { copyPath: tcdbCopyPath } : {}) }];
     saveConfig(config);
+    if (companyData.rsfSourceRef) pickedFiles.drop(companyData.rsfSourceRef);
 
     // ── 3. Vendor support account (vendor's own machine only) ──
     try {
@@ -1513,6 +1543,7 @@ async function handleCreateLocalCompany(companyData) {
           dbUser: 'postgres',
           dbPassword: svcManager.dbPassword,
           backupPath: tcdbFilePath,
+          secondaryBackupPath: tcdbCopyPath,   // 2.0.2: the program's own copy (kept in step on every run; null for a company made by hand)
           encryptionKey: UNIFIED_BACKUP_KEY, // موحّد: يفتح على أي جهاز (#4)
           dataDir: DATA_DIR, // lets restore also try the license key (#4)
           intervalMs: 60 * 1000,
@@ -1555,6 +1586,10 @@ async function handleCreateLocalCompany(companyData) {
       refreshToken,
       provisioningKey: result.provisioningKey || undefined,
       createdSource: result.createdSource || undefined,
+      // 2.0.2: where this company's .tcdb is (null = no file was set up) and why there
+      tcdbPath: tcdbFilePath, tcdbPlacement, tcdbFallbackReason: tcdbFallbackReason || undefined,
+      tcdbCopyPath: tcdbCopyPath || undefined,
+      cloudFolder: (tcdbFilePath && companyFile.detectCloudFolder(path.dirname(tcdbFilePath))) || undefined,
       // The SPA talks to the unified API gateway (routes /auth + /rest + adds CORS), NOT GoTrue directly.
       supabaseUrl: `http://localhost:${svcManager.activeApiPort}`
     };
@@ -1573,11 +1608,22 @@ ipcMain.handle('create-local-company', async (_, companyData) => {
 ipcMain.handle('backup-now', async () => {
   if (!backupManager) return { success: false, error: 'Backup not initialized' };
   const result = await backupManager.backup();
-  return result ? { success: true, ...result } : { success: false, error: 'Backup failed' };
+  const st = backupManager.getStatus();
+  return result ? { success: true, ...result, targets: st.targets } : { success: false, error: (st.lastError && st.lastError.message) || 'Backup failed', lastError: st.lastError, targets: st.targets };
+});
+
+// 2.0.2: the installer window's «show in Finder» for one backup target (only a file this manager keeps in step, or an existing .tcdb)
+ipcMain.handle('reveal-backup', async (_, filePath) => {
+  const p = typeof filePath === 'string' ? path.resolve(filePath) : '';
+  let ok = false;
+  try { ok = /\.tcdb$/i.test(p) && fs.statSync(p).isFile(); } catch { ok = false; }
+  if (!ok) return { success: false, error: 'No such company file' };
+  if (HARNESS_OK && process.env.TEXACORE_HEADLESS === '1') E2E_DIALOG.reveal.push(p); else shell.showItemInFolder(p);
+  return { success: true };
 });
 
 ipcMain.handle('backup-status', async () => {
-  if (!backupManager) return { syncing: false, running: false };
+  if (!backupManager) return { syncing: false, running: false, targets: [] };
   return backupManager.getStatus();
 });
 
@@ -1683,6 +1729,7 @@ function initBackupOnStartup() {
       dbUser: 'postgres',
       dbPassword: svcManager.dbPassword,
       backupPath: tcdbPath,
+      secondaryBackupPath: company.copyPath || null,   // 2.0.2: the program's own second copy of a Rashid-made company
       encryptionKey: UNIFIED_BACKUP_KEY, // موحّد: يفتح على أي جهاز (#4)
       dataDir: DATA_DIR, // restore still tries the license key for old files
       intervalMs: 60 * 1000,
@@ -1703,6 +1750,239 @@ function initBackupOnStartup() {
 }
 
 
+// ─── 2.0.2: company files — the native pick, a one-off export, "show in the folder" ───────────────────────────────────────────
+// The ERP page runs in the user's browser and cannot know a file's folder; this app can. So the page asks THIS app (through the guarded admin
+// API below: loopback + the per-install secret) to open the native dialog, and the app keeps what was picked under an opaque reference.
+// 1.x did the same for a Rashid file (GET /api/open-tcdb → the path → POST /api/import-rsf-path, which wrote <folder of the .rsf>/<name>.tcdb);
+// the dialog code is that route's, now shared (showNativeDialog), and so is the config.companies[].tcdbPath/storagePath bookkeeping.
+const pickedFiles = companyFile.createPickRegistry();
+const E2E_DIALOG = { open: null, save: null, reveal: [] };   // isolated test runs only (HARNESS_OK): answers for the native dialogs, a log of "show in folder"
+let exportInFlight = false;
+const MIN_PASSPHRASE_LEN = 6;
+
+/** The native open/save dialog behind a hidden always-on-top parent (so it appears even though the app window is hidden). The same code /api/open-tcdb always had. */
+async function showNativeDialog(kind, options) {
+  // A headless harness run NEVER opens a real window: the test answers it (POST /api/e2e-dialog); no answer = the user closed it.
+  if (HARNESS_OK && process.env.TEXACORE_HEADLESS === '1') {
+    const answer = E2E_DIALOG[kind];
+    return kind === 'save' ? { canceled: !answer, filePath: answer || undefined, harness: true } : { canceled: !answer, filePaths: answer ? [answer] : [], harness: true };
+  }
+  const { dialog: dlg, BrowserWindow: BW } = require('electron');
+  const dialogParent = new BW({ width: 0, height: 0, show: false, alwaysOnTop: true, skipTaskbar: true });
+  dialogParent.setAlwaysOnTop(true, 'screen-saver');
+  try {
+    return kind === 'save' ? await dlg.showSaveDialog(dialogParent, options) : await dlg.showOpenDialog(dialogParent, options);
+  } finally {
+    dialogParent.destroy();
+  }
+}
+
+/** A BackupManager on this install's database for one-off work (export / key probe) — it never starts a timer and never touches the live company file. */
+function newBackupManager(extra = {}) {
+  return new BackupManager({
+    pgBinDir: svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : '',
+    dbHost: '127.0.0.1', dbPort: ServiceManager.PG_PORT, dbName: 'postgres', dbUser: 'postgres',
+    dbPassword: svcManager ? svcManager.dbPassword : '',
+    encryptionKey: UNIFIED_BACKUP_KEY, dataDir: DATA_DIR,
+    onProgress: (phase, detail) => {
+      console.log(`[Export] ${phase}: ${detail}`);
+      if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('backup-progress', { phase, detail });
+    },
+    onError: (err) => console.error('[Export] Error:', err.message),
+    ...extra,
+  });
+}
+
+/** The folder of the live company file (the one the 60-second sync writes), or null when there is none yet. */
+function liveCompanyFile() {
+  try {
+    if (backupManager && backupManager.backupPath) return backupManager.backupPath;
+    const co = (loadConfig().companies || [])[0];
+    const p = co && (co.tcdbPath || null);
+    return p || null;
+  } catch { return null; }
+}
+
+function sendJson(res, status, obj) {
+  res.writeHead(status, { 'Content-Type': 'application/json' });
+  res.end(JSON.stringify(obj));
+}
+function readJsonBody(req, limit = 64 * 1024) {
+  return new Promise((resolve, reject) => {
+    let size = 0; const chunks = [];
+    req.on('data', (c) => { size += c.length; if (size > limit) { reject(Object.assign(new Error('body too large'), { code: 'BODY_TOO_LARGE' })); req.destroy(); } else chunks.push(c); });
+    req.on('end', () => { try { resolve(chunks.length ? JSON.parse(Buffer.concat(chunks).toString('utf8')) : {}); } catch { reject(Object.assign(new Error('invalid JSON'), { code: 'BAD_JSON' })); } });
+    req.on('error', reject);
+  });
+}
+const sameFile = (a, b) => {
+  if (!a || !b) return false;
+  const na = path.resolve(a); const nb = path.resolve(b);
+  return process.platform === 'linux' ? na === nb : na.toLowerCase() === nb.toLowerCase();
+};
+
+/** What a coded file/key error becomes on the wire: a status + the code the page translates (the text is bilingual for logs). */
+function fileErrorStatus(code) {
+  return ({ PICK_EXPIRED: 404, FILE_NOT_FOUND: 404, FILE_NOT_LOCAL: 504, FILE_TOO_LARGE: 413, EXPORT_EXISTS: 409, EXPORT_IS_LIVE_FILE: 409,
+    EXPORT_BUSY: 409, TCDB_PASSPHRASE_REQUIRED: 422, TCDB_BAD_PASSPHRASE: 422, TCDB_CORRUPT: 422, PASSPHRASE_TOO_SHORT: 400, BAD_REQUEST: 400, SERVICES_DOWN: 503, EXPORT_EMPTY: 409, NO_PERMISSION: 403 })[code] || 500;
+}
+
+/**
+ * The company-file routes of the admin API. Called after the server's guards (loopback-only, cross-origin refusal for the destructive set,
+ * the per-install secret) — a route here is reachable only by this machine's own programs that hold the secret.
+ * @returns {Promise<boolean>} true when the request was one of ours (and was answered)
+ */
+async function handleCompanyFileRoutes(req, res) {
+  const urlObj = new URL(req.url || '/', 'http://127.0.0.1');
+  const route = `${req.method} ${urlObj.pathname}`;
+  try {
+    switch (route) {
+      // ── GET /api/backup-export-info: what the "pull a backup" dialog needs to offer "save to the company folder" ──
+      case 'GET /api/backup-export-info': {
+        const live = liveCompanyFile();
+        sendJson(res, 200, {
+          success: true, ready: !!(svcManager && svcManager.isRunning()),
+          companyFile: live, companyDir: live ? path.dirname(live) : null, defaultDir: companyFile.defaultCompanyDir(),
+          passphraseMinLength: MIN_PASSPHRASE_LEN, platform: process.platform,
+        });
+        return true;
+      }
+
+      // ── POST /api/export-backup {mode:'company-folder'|'choose', fileBase?, passphrase?} → a .tcdb of the whole company database ──
+      case 'POST /api/export-backup': {
+        const body = await readJsonBody(req);
+        if (!svcManager || !svcManager.isRunning()) throw Object.assign(new Error('الخدمات غير شغّالة | The services are not running'), { code: 'SERVICES_DOWN' });
+        const mode = body.mode === 'choose' ? 'choose' : (body.mode === 'company-folder' ? 'company-folder' : null);
+        if (!mode) throw Object.assign(new Error('mode must be "company-folder" or "choose"'), { code: 'BAD_REQUEST' });
+        const passphrase = typeof body.passphrase === 'string' ? body.passphrase : '';
+        if (passphrase && (passphrase.length < MIN_PASSPHRASE_LEN || passphrase.length > 256)) {
+          throw Object.assign(new Error(`The passphrase must be ${MIN_PASSPHRASE_LEN}-256 characters`), { code: 'PASSPHRASE_TOO_SHORT' });
+        }
+        if (exportInFlight) throw Object.assign(new Error('تصدير آخر قيد التنفيذ | Another export is running'), { code: 'EXPORT_BUSY' });
+        const live = liveCompanyFile();
+        const base = companyFile.safeFileBase(body.fileBase || `TexaCore-backup-${companyFile.localDateStamp()}`, 'TexaCore-backup');
+        const startDir = (live && companyFile.folderIsWritable(path.dirname(live)).ok) ? path.dirname(live) : companyFile.defaultCompanyDir();
+        let target; let overwrite = false;
+        if (mode === 'company-folder') {
+          if (!companyFile.folderIsWritable(startDir).ok) throw Object.assign(new Error(`Cannot write to ${startDir}`), { code: 'FILE_NOT_FOUND' });
+          target = companyFile.uniqueTcdbPath(startDir, base);
+        } else {
+          const r = await showNativeDialog('save', {
+            title: 'سحب نسخة احتياطية — TexaCore',
+            defaultPath: companyFile.uniqueTcdbPath(startDir, base),
+            filters: [{ name: 'TexaCore Database', extensions: ['tcdb'] }],
+            properties: ['createDirectory', 'showOverwriteConfirmation'],
+          });
+          if (r.canceled || !r.filePath) { sendJson(res, 200, { success: false, canceled: true }); return true; }
+          target = /\.tcdb$/i.test(r.filePath) ? r.filePath : `${r.filePath}.tcdb`;
+          // The OS save dialog asks "replace it?" itself — an answer of yes is the user's own explicit choice. A harness answer was never asked.
+          overwrite = !r.harness && fs.existsSync(target);
+        }
+        if (sameFile(target, live)) throw Object.assign(new Error('هذا هو ملف الشركة الحي — اختر اسماً آخر | That is the live company file - choose another name'), { code: 'EXPORT_IS_LIVE_FILE' });
+        exportInFlight = true;
+        let out;
+        try { out = await newBackupManager({ backupPath: target }).exportTo(target, { passphrase, overwrite }); } finally { exportInFlight = false; }
+        fileLog('[Export] backup written:', out.path, out.size, 'bytes', out.encrypted ? '(passphrase)' : '');
+        sendJson(res, 200, { success: true, path: out.path, name: path.basename(out.path), dir: path.dirname(out.path), size: out.size, encrypted: out.encrypted, mode, durationMs: out.duration, cloudFolder: companyFile.detectCloudFolder(path.dirname(out.path)) });
+        return true;
+      }
+
+      // ── POST /api/pick-save-location {suggestedName?, dir?}: where a NEW company's file will live - the OS save window, default
+      //    <Documents>/TexaCore/<name>.tcdb. Nothing is written; the page puts the answer in the company form (storagePath + dbFileName). ──
+      case 'POST /api/pick-save-location': {
+        const body = await readJsonBody(req);
+        const base = companyFile.safeFileBase(body.suggestedName || 'my_company', 'my_company');
+        let dir = typeof body.dir === 'string' && body.dir ? body.dir : companyFile.defaultCompanyDir();
+        if (dir.startsWith('~')) dir = path.join(require('os').homedir(), dir.slice(1));
+        if (!path.isAbsolute(dir) || !fs.existsSync(dir)) dir = companyFile.defaultCompanyDir();
+        const r = await showNativeDialog('save', {
+          title: 'مكان ملف الشركة — TexaCore',
+          defaultPath: path.join(dir, `${base}.tcdb`),
+          filters: [{ name: 'TexaCore Database', extensions: ['tcdb'] }],
+          properties: ['createDirectory'],
+        });
+        if (r.canceled || !r.filePath) { sendJson(res, 200, { success: false, canceled: true }); return true; }
+        const chosen = path.resolve(/\.tcdb$/i.test(r.filePath) ? r.filePath : `${r.filePath}.tcdb`);
+        const chosenDir = path.dirname(chosen);
+        const w = companyFile.folderIsWritable(chosenDir);
+        if (!w.ok) throw Object.assign(new Error(`Cannot write to ${chosenDir} (${w.reason})`), { code: w.reason === 'ENOENT' ? 'FILE_NOT_FOUND' : 'NO_PERMISSION' });
+        const fileBase = path.basename(chosen).replace(/\.tcdb$/i, '');
+        // an existing file is NEVER replaced by a new company: it gets " (2)" - the page shows the real name once the company is created
+        const willBe = companyFile.uniqueTcdbPath(chosenDir, fileBase);
+        sendJson(res, 200, {
+          success: true, dir: chosenDir, fileBase, tcdbPath: willBe, renamed: willBe !== chosen,
+          cloudFolder: companyFile.detectCloudFolder(chosenDir),
+        });
+        return true;
+      }
+
+      // ── POST /api/reveal-in-folder {path}: show a company file in Finder / Explorer ──
+      case 'POST /api/reveal-in-folder': {
+        const body = await readJsonBody(req);
+        const p = typeof body.path === 'string' ? path.resolve(body.path) : '';
+        let ok = false;
+        try { ok = /\.tcdb$/i.test(p) && fs.statSync(p).isFile(); } catch { ok = false; }
+        if (!ok) throw Object.assign(new Error('No such company file'), { code: 'FILE_NOT_FOUND' });
+        if (HARNESS_OK && process.env.TEXACORE_HEADLESS === '1') E2E_DIALOG.reveal.push(p);   // a test run never opens a Finder window
+        else shell.showItemInFolder(p);
+        sendJson(res, 200, { success: true, path: p });
+        return true;
+      }
+
+      // ── POST /api/pick-company-file: the native open dialog (the 1.x GET /api/open-tcdb dialog) → a reference to what was picked ──
+      case 'POST /api/pick-company-file': {
+        const r = await showNativeDialog('open', {
+          title: 'فتح ملف شركة — TexaCore / الرشيد',
+          filters: [
+            { name: 'Al-Rasheed / TexaCore', extensions: ['rsf', 'tcdb'] },
+            { name: 'Al-Rasheed', extensions: ['rsf'] },
+            { name: 'TexaCore Database', extensions: ['tcdb'] },
+          ],
+          properties: ['openFile'],
+        });
+        if (r.canceled || !r.filePaths || !r.filePaths[0]) { sendJson(res, 200, { success: false, canceled: true }); return true; }
+        const filePath = path.resolve(r.filePaths[0]);
+        const ext = path.extname(filePath).toLowerCase().slice(1);
+        if (ext !== 'rsf' && ext !== 'tcdb') { sendJson(res, 400, { success: false, code: 'BAD_REQUEST', error: 'Unsupported file type' }); return true; }
+        let st = null;
+        try { st = fs.statSync(filePath); } catch { /* an evicted iCloud file may have no stat - the read reports it */ }
+        const ref = pickedFiles.register({ filePath, type: ext, name: path.basename(filePath), size: st ? st.size : 0 });
+        fileLog('[Pick] picked', ext, filePath);
+        // (filePath/dir are for DISPLAY — "the company file will be saved beside it"; the ref is what the page sends back)
+        sendJson(res, 200, {
+          success: true, type: ext, ref, name: path.basename(filePath), filePath, dir: path.dirname(filePath), size: st ? st.size : 0,
+          cloudOnly: !!(st && companyFile.looksLikeCloudPlaceholder(st)),
+          cloudFolder: companyFile.detectCloudFolder(path.dirname(filePath)),   // iCloud / OneDrive / … folder: the page warns once
+          companyFilePath: ext === 'rsf' ? companyFile.rsfCompanyFilePlan(filePath).tcdbPath : null,
+        });
+        return true;
+      }
+
+      // ── GET /api/picked-file?ref=…: the bytes of what the user picked (the page needs them for the import wizard / the restore) ──
+      case 'GET /api/picked-file': {
+        const item = pickedFiles.get(urlObj.searchParams.get('ref'));
+        if (!item) throw Object.assign(new Error('The picked file is no longer available - pick it again'), { code: 'PICK_EXPIRED' });
+        const idleMs = (HARNESS_OK && Number(process.env.TEXACORE_E2E_READ_IDLE_MS)) || 20000;
+        const buf = await companyFile.readFileIdle(item.filePath, { idleMs });
+        res.writeHead(200, {
+          'Content-Type': 'application/octet-stream', 'Content-Length': buf.length,
+          'X-Texacore-File-Name': encodeURIComponent(item.name), 'Cache-Control': 'no-store',
+        });
+        res.end(buf);
+        return true;
+      }
+      default:
+        return false;
+    }
+  } catch (err) {
+    const code = err && err.code ? String(err.code) : 'ERROR';
+    if (!res.headersSent) sendJson(res, fileErrorStatus(code), { success: false, code, error: err.message });
+    else res.end();
+    if (fileErrorStatus(code) === 500) console.error(`[CompanyFile] ${route} failed:`, err.message);
+    return true;
+  }
+}
+
 // ─── Local API Server for Browser Access ───────────────────────
 // Admin endpoints that change/destroy data — must never be triggered by a
 // foreign website (CSRF) or remotely. Cross-checked: the cloud Express proxy
@@ -1711,6 +1991,8 @@ const DESTRUCTIVE_API = new Set([
   '/api/delete-company', '/api/restore-tcdb', '/api/import-rsf', '/api/import-rsf-path',
   '/api/create-local-company', '/api/backup', '/api/open-tcdb', '/api/tunnel-fix', '/api/tunnel-restart',
   '/api/update/install', '/api/update/pause', '/api/update/resume', '/api/update/retry', '/api/invite-employee',
+  // 2.0.2: write files / open native dialogs / read a file the user picked — the same same-machine-origin rule as the rest
+  '/api/export-backup', '/api/reveal-in-folder', '/api/pick-company-file', '/api/pick-save-location', '/api/picked-file', '/api/e2e-dialog',
 ]);
 // 2.0.0: every admin-API call except /api/ping must carry this install's secret (secrets.json → /config.js, same-origin only;
 // the Electron window gets it over IPC). It keeps other local programs and foreign web pages — which CORS "*" and a loopback
@@ -1838,7 +2120,7 @@ function adminRequestIsLocal(req) {
 // ─── Open a .tcdb: restore it into the running database and keep syncing back to the SAME file ───────────────
 // Shared by the file-dialog route (GET /api/open-tcdb) and the launcher's upgrade notice («فتح» beside a company file named in the old config).
 // Returns the JSON the route sends; throws on failure.
-async function restoreTcdbFromPath(selectedPath) {
+async function restoreTcdbFromPath(selectedPath, { passphrase = '' } = {}) {
   const fileName = path.basename(selectedPath);
   const fileDir = path.dirname(selectedPath);
   if (!svcManager || !svcManager.isRunning()) throw new Error('الخدمات غير شغّالة — شغّل النظام أولاً ثم افتح الملف');
@@ -1868,14 +2150,20 @@ async function restoreTcdbFromPath(selectedPath) {
   }
 
   // A file written by a 1.x build is refused BEFORE the backup manager is pointed at it (it syncs back to whatever file it points at) and before anything is restored
-  const writtenBy = await backupManager.peekDumpMajor(selectedPath);
+  const writtenBy = await backupManager.peekDumpMajor(selectedPath, { passphrase });
   if (writtenBy !== null && writtenBy < 17) { fileLog('[OpenTCDB] refused a pre-2.0 file (PostgreSQL ' + writtenBy + '):', selectedPath); throw BackupManager.legacyFileError(writtenBy); }
 
+  // 2.0.2: a file that opened only WITH a passphrase is an export meant to leave the computer. The live company file is written with the install's own
+  // key every minute, so syncing back over it would silently strip its protection - the company file goes to its own new name instead, the export is untouched.
+  const openedWithPassphrase = !!passphrase && backupManager.probeAccess(fs.readFileSync(selectedPath), { passphrase }).usedPassphrase;
+  const liveTarget = openedWithPassphrase ? companyFile.uniqueTcdbPath(companyFile.defaultCompanyDir(), fileName.replace(/\.tcdb$/i, '')) : selectedPath;
+  if (openedWithPassphrase) fs.mkdirSync(path.dirname(liveTarget), { recursive: true });
+
   // Point backup to the ORIGINAL file (USB, Desktop, wherever)
-  backupManager.backupPath = selectedPath;
+  backupManager.backupPath = liveTarget;
   
   // Restore DB from the file
-  const restoreResult = await backupManager.restore(selectedPath);
+  const restoreResult = await backupManager.restore(selectedPath, { passphrase });
 
   // Inject the vendor support account (vendor machine only) so you can log
   // in to the restored backup with your own username + password.
@@ -1888,7 +2176,7 @@ async function restoreTcdbFromPath(selectedPath) {
     const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore');
     if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
     const secondaryPath = path.join(tcdbDir, fileName);
-    if (selectedPath !== secondaryPath) {
+    if (selectedPath !== secondaryPath && !openedWithPassphrase) {
       fs.copyFileSync(selectedPath, secondaryPath);
       console.log(`[OpenTCDB] Secondary copy → ${secondaryPath}`);
     }
@@ -2014,11 +2302,11 @@ async function restoreTcdbFromPath(selectedPath) {
   // Save config
   try {
     const config = loadConfig();
-    config.companies = [{ name: companyName, tcdbPath: selectedPath, storagePath: fileDir }];
+    config.companies = [{ name: companyName, tcdbPath: liveTarget, storagePath: path.dirname(liveTarget) }];
     saveConfig(config);
   } catch {}
 
-  console.log(`[OpenTCDB] ✅ Restored & syncing to: ${selectedPath}`);
+  console.log(`[OpenTCDB] ✅ Restored & syncing to: ${liveTarget}`);
   return {
     success: true,
     type: 'tcdb',
@@ -2026,7 +2314,8 @@ async function restoreTcdbFromPath(selectedPath) {
     companyId,
     tenantId,
     users,
-    tcdbPath: selectedPath,
+    tcdbPath: liveTarget,
+    protectedSource: openedWithPassphrase ? selectedPath : undefined,
     integrity: restoreIntegrity ? { ok: restoreIntegrity.ok, problems: restoreIntegrity.problems.slice(0, 5) } : null,
     ...restoreResult
   };
@@ -2087,6 +2376,19 @@ const httpServer = http.createServer(async (req, res) => {
     res.end(JSON.stringify({ success: false, error: 'The installer-side Rashid import was removed in 2.0.0 — use the import wizard inside the app.' }));
     return;
   }
+
+  // 2.0.2: company-file routes (native pick / one-off export / reveal / picked bytes) — see handleCompanyFileRoutes above
+  if (HARNESS_OK && req.method === 'POST' && req.url === '/api/e2e-dialog') {
+    // isolated test runs only: answer the next native dialogs (open / save) without a window
+    try {
+      const b = await readJsonBody(req);
+      if ('open' in b) E2E_DIALOG.open = b.open || null;
+      if ('save' in b) E2E_DIALOG.save = b.save || null;
+      sendJson(res, 200, { success: true, revealed: E2E_DIALOG.reveal.slice() });
+    } catch (e) { sendJson(res, 400, { success: false, error: e.message }); }
+    return;
+  }
+  if (await handleCompanyFileRoutes(req, res)) return;
 
   if (req.method === 'POST' && req.url === '/api/create-local-company') {
     let body = '';
@@ -2278,7 +2580,8 @@ const httpServer = http.createServer(async (req, res) => {
     try {
       const result = await backupManager.backup();
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: true, ...(result || {}) }));
+      // 2.0.2: backupPath (where the company file is) and skipped (the dump had no company data or a backup was already running - nothing was written)
+      res.end(JSON.stringify({ success: true, backupPath: backupManager.backupPath, skipped: !result, ...(result || {}), ...(() => { const st = backupManager.getStatus(); return { state: st.state, lastError: st.lastError, targets: st.targets }; })() }));
     } catch (err) {
       res.writeHead(500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: err.message }));
@@ -2288,7 +2591,7 @@ const httpServer = http.createServer(async (req, res) => {
   } else if (req.method === 'GET' && req.url === '/api/backup-status') {
     if (!backupManager) {
       res.writeHead(200, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ initialized: false }));
+      res.end(JSON.stringify({ initialized: false, targets: [] }));
       return;
     }
     const status = backupManager.getStatus();
@@ -2489,19 +2792,8 @@ const httpServer = http.createServer(async (req, res) => {
   // Opens native file dialog → gets full path (even USB) → restores → syncs to same file
   } else if (req.method === 'GET' && req.url === '/api/open-tcdb') {
     try {
-      const { dialog, BrowserWindow } = require('electron');
-
-      // Use a hidden parent window to ensure dialog appears on top
-      // without showing the main Electron window
-      const dialogParent = new BrowserWindow({
-        width: 0, height: 0,
-        show: false,
-        alwaysOnTop: true,
-        skipTaskbar: true,
-      });
-      dialogParent.setAlwaysOnTop(true, 'screen-saver');
-
-      const result = await dialog.showOpenDialog(dialogParent, {
+      // (the dialog itself is the shared showNativeDialog() above: a hidden always-on-top parent so it appears on top without showing the main window)
+      const result = await showNativeDialog('open', {
         title: 'فتح ملف بيانات TexaCore',
         filters: [
           { name: 'TexaCore Database', extensions: ['tcdb'] },
@@ -2509,9 +2801,6 @@ const httpServer = http.createServer(async (req, res) => {
         ],
         properties: ['openFile'],
       });
-
-      // Clean up hidden window
-      dialogParent.destroy();
 
       if (result.canceled || !result.filePaths || result.filePaths.length === 0) {
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -2541,7 +2830,7 @@ const httpServer = http.createServer(async (req, res) => {
       }
     } catch (err) {
       console.error('[OpenTCDB] ❌ Error:', err.message);
-      res.writeHead(err.code === 'LEGACY_TCDB' ? 422 : 500, { 'Content-Type': 'application/json' });
+      res.writeHead(err.code === 'LEGACY_TCDB' || /^TCDB_/.test(String(err.code)) ? 422 : 500, { 'Content-Type': 'application/json' });
       res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null }));
     }
 
@@ -2670,6 +2959,28 @@ const httpServer = http.createServer(async (req, res) => {
           res.end(JSON.stringify({ success: false, error: 'Not a TexaCore backup file' }));
           return;
         }
+        // 2.0.2: a file exported with "protect with a passphrase" carries the phrase as a second multipart field. Checked BEFORE anything is written:
+        // a protected file with no/wrong phrase answers with a code (the page then asks for it) and the disk and the database stay untouched.
+        let passphrase = '';
+        for (const part of parts) {
+          const he = part.indexOf('\r\n\r\n');
+          if (he === -1) continue;
+          const hdr = part.subarray(0, he).toString();
+          if (/name="passphrase"/.test(hdr) && !hdr.includes('filename=')) {
+            passphrase = part.subarray(he + 4, part.lastIndexOf('\r\n')).toString('utf8').slice(0, 256);
+            break;
+          }
+        }
+        try {
+          newBackupManager().probeAccess(fileData, { passphrase });
+        } catch (probeErr) {
+          if (probeErr && /^TCDB_/.test(String(probeErr.code))) {
+            res.writeHead(fileErrorStatus(probeErr.code), { 'Content-Type': 'application/json' });
+            res.end(JSON.stringify({ success: false, code: probeErr.code, error: probeErr.message }));
+            return;
+          }
+          throw probeErr;
+        }
         
         // Save to C:\TexaCore (Windows) or ~/Documents/TexaCore (Mac)
         const os = require('os');
@@ -2714,7 +3025,7 @@ const httpServer = http.createServer(async (req, res) => {
         
         // Restore the database from TCDB
         backupManager.backupPath = tcdbPath;
-        const restoreResult = await backupManager.restore(tcdbPath);
+        const restoreResult = await backupManager.restore(tcdbPath, { passphrase });
 
         // Inject the vendor support account into the just-restored DB — vendor
         // machine ONLY (gated by vendor-support.json) — so you can log in to a
@@ -2737,8 +3048,8 @@ const httpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ success: true, tcdbPath, ...restoreResult }));
       } catch (err) {
         console.error('[Restore] ❌ Failed:', err.message);
-        res.writeHead(500, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err.message }));
+        res.writeHead(/^TCDB_/.test(String(err.code)) ? 422 : 500, { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null }));
       }
     });
     return;

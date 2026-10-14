@@ -96,6 +96,45 @@ const integrity = async () => {
       if (co.status !== 200 || !co.json.length) throw new Error(`admin reads companies → ${co.status} ${co.text.slice(0, 120)}`);
       return `${email} signs in and reads ${co.json.length} company(ies)`;
     });
+    // ── 2.0.2: a file exported with "protect with a passphrase" ──
+    await R.check('RT.5 passphrase-protected export -> restore: without / with a wrong phrase NOTHING is executed (rows identical), with the phrase the same rows come back and the baseline is intact', async () => {
+      const prot = path.join(WORK, 'roundtrip-protected.tcdb');
+      fs.rmSync(prot, { force: true });
+      const exp = await mgr.exportTo(prot, { passphrase: 'correct horse battery' });
+      if (!exp.encrypted || fs.statSync(prot).size < 100000) throw new Error('the protected export was not written');
+      const plain = await mgr.exportTo(path.join(WORK, 'roundtrip-plain.tcdb'), { overwrite: true });
+      if (fs.readFileSync(prot).equals(fs.readFileSync(plain.path))) throw new Error('protected and plain exports are identical');
+      const snap0 = JSON.stringify(await snapshot());
+      for (const [phrase, code] of [['', 'TCDB_PASSPHRASE_REQUIRED'], ['not the phrase', 'TCDB_BAD_PASSPHRASE']]) {
+        let got = null;
+        try { await mgr.restore(prot, phrase ? { passphrase: phrase } : undefined); } catch (e) { got = e.code; }
+        if (got !== code) throw new Error(`restore with ${phrase ? 'a wrong' : 'no'} phrase -> ${got}, wanted ${code}`);
+        if (JSON.stringify(await snapshot()) !== snap0) throw new Error('a refused restore changed the database');
+      }
+      await mgr.restore(prot, { passphrase: 'correct horse battery' });
+      if (JSON.stringify(await snapshot()) !== snap0) throw new Error(`rows changed after the protected restore: ${snap0} -> ${JSON.stringify(await snapshot())}`);
+      const i = await integrity();
+      if (!i.functionsOk || i.rls !== i.rlsExpected || i.anonWithoutRls !== 0) throw new Error('the baseline is not intact after the protected restore');
+      // an UNprotected file still restores with no phrase at all (the common case is unchanged)
+      await mgr.restore(plain.path);
+      if (JSON.stringify(await snapshot()) !== snap0) throw new Error('the plain restore changed the rows');
+      return `protected ${(exp.size / 1048576).toFixed(1)} MB: refused twice with no write, restored with the phrase; plain file still restores with no phrase`;
+    });
+    await R.check('RT.6 export never replaces an existing file and leaves the live company file alone', async () => {
+      const f = path.join(WORK, 'roundtrip-keep.tcdb');
+      fs.writeFileSync(f, 'precious');
+      let code = null;
+      try { await mgr.exportTo(f); } catch (e) { code = e.code; }
+      if (code !== 'EXPORT_EXISTS' || fs.readFileSync(f, 'utf8') !== 'precious') throw new Error(`existing file: ${code}`);
+      const liveBefore = fs.readFileSync(file);
+      const snapDir = path.join(WORK, 'snapshots');   // (the live backup of RT.1 made it) - an export must not add to it or refresh anything in it
+      const snaps = () => (fs.existsSync(snapDir) ? fs.readdirSync(snapDir).sort().map((n) => `${n}:${fs.statSync(path.join(snapDir, n)).mtimeMs}`).join('|') : '');
+      const snapsBefore = snaps();
+      await mgr.exportTo(path.join(WORK, 'roundtrip-other.tcdb'), { overwrite: true });
+      if (!fs.readFileSync(file).equals(liveBefore)) throw new Error('the live company file changed during an export');
+      if (snaps() !== snapsBefore) throw new Error('an export touched the daily snapshots');
+      return 'EXPORT_EXISTS, existing file byte-identical, live file untouched, daily snapshots untouched';
+    });
   } catch (e) {
     R.rows.push({ name: 'harness', ok: false, evidence: e.stack || e.message, ms: 0 });
     console.log(`  FAIL  harness — ${e.message}`);

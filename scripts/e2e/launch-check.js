@@ -761,6 +761,231 @@ async function main() {
         return (out.stdout || '').trim().split('\n').slice(-1)[0];
       });
     } else console.log('  SKIP  6.1 Rashid import (pass --rsf <file> and --erp <ERP checkout>)');
+
+    // ── 7. company files (2.0.2): where a company's .tcdb lives, that the user can SEE it stay in step, the one-off export, a protected file ──
+    // The native windows are answered through the harness route (POST /api/e2e-dialog, isolated runs only); everything else is the real server.
+    {
+      const http = require('http');
+      const sha = (b) => crypto.createHash('sha256').update(b).digest('hex');
+      const rawRequest = (method, url, { headers = {}, body = null } = {}) => new Promise((resolve, reject) => {
+        const u = new URL(url);
+        const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, headers: { ...headers, ...(body ? { 'Content-Length': body.length } : {}) } }, (res) => {
+          const chunks = []; res.on('data', (c) => chunks.push(c));
+          res.on('end', () => { const buf = Buffer.concat(chunks); let json = null; try { json = JSON.parse(buf.toString('utf8')); } catch { /* binary */ } resolve({ status: res.statusCode, headers: res.headers, buf, json }); });
+        });
+        req.on('error', reject); if (body) req.write(body); req.end();
+      });
+      const multipart = (file, filename, fields = {}) => {
+        const b = '----rel202' + crypto.randomBytes(6).toString('hex');
+        const parts = [];
+        for (const [k, v] of Object.entries(fields)) parts.push(Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+        parts.push(Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`), file, Buffer.from(`\r\n--${b}--\r\n`));
+        return { ct: `multipart/form-data; boundary=${b}`, body: Buffer.concat(parts) };
+      };
+      const api = (method, p, body, extra = {}) => request(method, `${ADMIN}${p}`, { headers: { ...H, ...extra }, body });
+      const dialog = (o) => api('POST', '/api/e2e-dialog', o);
+      const status = async () => (await api('GET', '/api/backup-status')).json;
+      const waitFor = async (pred, what, ms = 90000) => { const t0 = Date.now(); for (;;) { const v = await pred(); if (v) return v; if (Date.now() - t0 > ms) throw new Error(`timed out waiting for ${what}`); await new Promise((r) => setTimeout(r, 700)); } };
+      const rashidDir = path.join(WORK, 'rashid-folder');
+      fs.mkdirSync(rashidDir, { recursive: true });
+      const rsfFile = path.join(rashidDir, 'شركة الرشيد.rsf');
+      const rsfBytes = crypto.randomBytes(300000);
+      fs.writeFileSync(rsfFile, rsfBytes);   // the installer no longer parses .rsf (the ERP wizard does) - it only has to know WHERE the file is and hand out its bytes
+      const copyDir = path.join(userData, 'texacore-data', 'backups');
+      let pick1 = null; let created1 = null; let created2 = null;
+
+      await R.check('7.1 the app opens the native window and knows the real path: a reference + the folder, the bytes are served (identical), a made-up reference is refused', async () => {
+        await dialog({ open: rsfFile });
+        const r = await api('POST', '/api/pick-company-file', {});
+        if (!r.json || !r.json.success) throw new Error(`pick → ${r.status} ${r.text.slice(0, 200)}`);
+        pick1 = r.json;
+        if (pick1.type !== 'rsf' || !/^[0-9a-f]{32}$/.test(pick1.ref) || pick1.dir !== rashidDir || pick1.filePath !== rsfFile) throw new Error(`unexpected pick ${JSON.stringify(pick1)}`);
+        if (pick1.companyFilePath !== path.join(rashidDir, 'شركة الرشيد.tcdb')) throw new Error(`companyFilePath ${pick1.companyFilePath}`);
+        const bytes = await rawRequest('GET', `${ADMIN}/api/picked-file?ref=${pick1.ref}`, { headers: H });
+        if (bytes.status !== 200 || sha(bytes.buf) !== sha(rsfBytes)) throw new Error(`the served bytes differ (${bytes.status}, ${bytes.buf.length} bytes)`);
+        if (decodeURIComponent(bytes.headers['x-texacore-file-name']) !== 'شركة الرشيد.rsf') throw new Error('file name header');
+        const bad = await api('GET', `/api/picked-file?ref=${'0'.repeat(32)}`);
+        if (bad.status !== 404 || bad.json.code !== 'PICK_EXPIRED') throw new Error(`unknown ref → ${bad.status} ${bad.text.slice(0, 100)}`);
+        const path_ = await api('GET', `/api/picked-file?ref=${encodeURIComponent(rsfFile)}`);
+        if (path_.status === 200) throw new Error('a PATH was accepted where only a reference is allowed');
+        await dialog({ open: null });
+        const cancelled = await api('POST', '/api/pick-company-file', {});
+        if (!cancelled.json || cancelled.json.canceled !== true) throw new Error('a cancelled window is not reported as canceled');
+        return `ref ${pick1.ref.slice(0, 8)}…, folder ${pick1.dir}, ${bytes.buf.length} bytes served identical`;
+      });
+
+      await R.check('7.1b the picker and its siblings are guarded like the rest of the admin API: secret needed, foreign Origin refused, not from a LAN Host', async () => {
+        for (const [m, p_] of [['POST', '/api/pick-company-file'], ['POST', '/api/export-backup'], ['POST', '/api/reveal-in-folder'], ['POST', '/api/pick-save-location'], ['GET', '/api/picked-file?ref=' + '0'.repeat(32)], ['GET', '/api/backup-export-info']]) {
+          const noSecret = await request(m, `${ADMIN}${p_}`, { body: m === 'POST' ? {} : undefined });
+          if (noSecret.status !== 401) throw new Error(`${p_} without the secret → ${noSecret.status}`);
+          const lan = await request(m, `${ADMIN}${p_}`, { headers: { ...H, Host: '192.168.77.20:80' }, body: m === 'POST' ? {} : undefined });
+          if (lan.status !== 403) throw new Error(`${p_} with a LAN Host → ${lan.status}`);
+        }
+        for (const p_ of ['/api/pick-company-file', '/api/export-backup', '/api/reveal-in-folder', '/api/pick-save-location']) {
+          const foreign = await request('POST', `${ADMIN}${p_}`, { headers: { ...H, Origin: 'https://evil.example' }, body: {} });
+          if (foreign.status !== 403) throw new Error(`${p_} from a foreign Origin → ${foreign.status}`);
+        }
+        return 'no secret → 401, LAN Host → 403, foreign Origin → 403 on every new route';
+      });
+
+      await R.check('7.2 a company made from the Rashid file: its .tcdb is BESIDE the .rsf (<rsf name>.tcdb) AND a second copy sits in the program\'s own backup folder; both are written', async () => {
+        await dialog({ open: rsfFile });
+        pick1 = (await api('POST', '/api/pick-company-file', {})).json;
+        const r = await api('POST', '/api/create-local-company', body({ adminEmail: 'rashid-beside@e2e.test', companyName: 'شركة الرشيد', storagePath: undefined, dbFileName: undefined, purpose: 'rsf_import', rsfSourceRef: pick1.ref }));
+        if (!r.json || !r.json.success) throw new Error(`create → ${r.text.slice(0, 300)}`);
+        created1 = r.json;
+        const want = path.join(rashidDir, 'شركة الرشيد.tcdb');
+        if (created1.tcdbPath !== want || created1.tcdbPlacement !== 'beside-rsf') throw new Error(`tcdb ${created1.tcdbPath} (${created1.tcdbPlacement}), wanted ${want}`);
+        const wantCopy = path.join(copyDir, 'شركة الرشيد.tcdb');
+        if (created1.tcdbCopyPath !== wantCopy) throw new Error(`copy ${created1.tcdbCopyPath}, wanted ${wantCopy}`);
+        const st = await waitFor(async () => { const s_ = await status(); return s_.targets && s_.targets.length === 2 && s_.targets.every((t) => t.state === 'ok') ? s_ : null; }, 'both targets to be written');
+        for (const f of [want, wantCopy]) {
+          const b = fs.readFileSync(f);
+          if (b.subarray(0, 4).toString('latin1') !== 'TCDB' || b.length < 100000) throw new Error(`${f} is not a company file (${b.length} bytes)`);
+        }
+        if (!fs.readFileSync(want).equals(fs.readFileSync(wantCopy))) throw new Error('the two copies differ');
+        if (!fs.existsSync(rsfFile) || !fs.readFileSync(rsfFile).equals(rsfBytes)) throw new Error('the Rashid file itself was touched');
+        // the reference is single-use for creation: it is gone
+        const again = await api('GET', `/api/picked-file?ref=${pick1.ref}`);
+        if (again.status !== 404) throw new Error(`the used reference still reads (${again.status})`);
+        const cfg = JSON.parse(fs.readFileSync(path.join(userData, 'texacore-data', 'config.json'), 'utf8'));
+        if (cfg.companies[0].tcdbPath !== want || cfg.companies[0].copyPath !== wantCopy) throw new Error(`config.json: ${JSON.stringify(cfg.companies[0])}`);
+        return `${want} + ${wantCopy}; targets ${st.targets.map((t) => t.role + ':' + t.state).join(', ')}`;
+      });
+
+      await R.check('7.3 the user can SEE the sync: each target\'s path, last successful sync, state; "sync now" refreshes both; the old fields of /api/backup-status are intact', async () => {
+        const s0 = await status();
+        for (const k of ['initialized', 'syncing', 'running', 'lastBackup', 'backupCount', 'backupPath']) if (!(k in s0)) throw new Error(`the existing field ${k} is gone`);
+        if (s0.state !== 'ok' || s0.consecutiveFailures !== 0 || s0.lastError !== null) throw new Error(`state ${s0.state}`);
+        const before = s0.targets.map((t) => Date.parse(t.lastSuccess));
+        await new Promise((r) => setTimeout(r, 1200));
+        const sync = await api('POST', '/api/backup', {});
+        if (!sync.json || !sync.json.success || sync.json.skipped || !sync.json.targets || sync.json.targets.length !== 2) throw new Error(`sync now → ${sync.text.slice(0, 200)}`);
+        const s1 = await status();
+        s1.targets.forEach((t, i) => { if (!(Date.parse(t.lastSuccess) > before[i])) throw new Error(`${t.role}: lastSuccess did not move`); if (t.state !== 'ok' || !t.exists || !(t.size > 100000)) throw new Error(`${t.role}: ${t.state}`); });
+        return s1.targets.map((t) => `${t.role} ${t.path.split(path.sep).slice(-2).join('/')} ok @ ${t.lastSuccess}`).join('; ');
+      });
+
+      await R.check('7.4 the Rashid folder disappears: the failure is VISIBLE with its reason (folder missing), repeats count up, nothing is re-created behind the user\'s back; it recovers when the folder is back', async () => {
+        const gone = rashidDir + '.gone';
+        fs.renameSync(rashidDir, gone);
+        try {
+          await api('POST', '/api/backup', {}); await api('POST', '/api/backup', {});
+          const s_ = await status();
+          if (s_.state !== 'error' || s_.consecutiveFailures < 2 || !s_.lastError || s_.lastError.reason !== 'folder-missing') throw new Error(`status ${JSON.stringify({ state: s_.state, n: s_.consecutiveFailures, e: s_.lastError })}`);
+          const prim = s_.targets.find((t) => t.role === 'primary');
+          if (prim.state !== 'error' || prim.exists !== false) throw new Error('the primary row does not show the failure');
+          if (fs.existsSync(rashidDir)) throw new Error('the missing folder was silently re-created');
+          const cp = s_.targets.find((t) => t.role === 'copy');
+          if (!cp || !cp.exists) throw new Error('the program\'s own copy vanished with the folder');
+        } finally { fs.renameSync(gone, rashidDir); }
+        await api('POST', '/api/backup', {});
+        const ok = await status();
+        if (ok.state !== 'ok' || ok.consecutiveFailures !== 0) throw new Error(`did not recover: ${ok.state}`);
+        return 'error(folder-missing) ×2 → ok after the folder came back';
+      });
+
+      await R.check('7.5 a second company from a Rashid file of the same name: " (2)", the first company\'s file is never replaced', async () => {
+        const first = fs.readFileSync(path.join(rashidDir, 'شركة الرشيد.tcdb'));
+        await dialog({ open: rsfFile });
+        const p2 = (await api('POST', '/api/pick-company-file', {})).json;
+        if (p2.companyFilePath !== path.join(rashidDir, 'شركة الرشيد (2).tcdb')) throw new Error(`planned ${p2.companyFilePath}`);
+        const r = await api('POST', '/api/create-local-company', body({ adminEmail: 'rashid-beside2@e2e.test', companyName: 'شركة الرشيد 2', storagePath: undefined, dbFileName: undefined, purpose: 'rsf_import', rsfSourceRef: p2.ref }));
+        if (!r.json || !r.json.success) throw new Error(`create → ${r.text.slice(0, 300)}`);
+        created2 = r.json;
+        if (created2.tcdbPath !== path.join(rashidDir, 'شركة الرشيد (2).tcdb')) throw new Error(`tcdb ${created2.tcdbPath}`);
+        if (created2.tcdbCopyPath !== path.join(copyDir, 'شركة الرشيد (2).tcdb')) throw new Error(`copy ${created2.tcdbCopyPath}`);
+        await waitFor(async () => { const s_ = await status(); return s_.backupPath === created2.tcdbPath && s_.targets.length === 2 && s_.targets.every((t) => t.state === 'ok'); }, 'the second company\'s targets');
+        const now = fs.readFileSync(path.join(rashidDir, 'شركة الرشيد.tcdb'));
+        if (now.subarray(0, 4).toString('latin1') !== 'TCDB' || now.length < first.length * 0.5) throw new Error('the first company\'s file was replaced by something else');
+        // the by-hand path never replaces a file either: asking for the same folder + name again gives "(2)"
+        const manual = await api('POST', '/api/create-local-company', body({ adminEmail: 'by-hand@e2e.test', companyName: 'By hand', storagePath: rashidDir, dbFileName: 'شركة الرشيد' }));
+        if (!manual.json || !manual.json.success) throw new Error(`by-hand create → ${manual.text.slice(0, 300)}`);
+        if (manual.json.tcdbPath !== path.join(rashidDir, 'شركة الرشيد (3).tcdb') || manual.json.tcdbCopyPath) throw new Error(`by-hand ${manual.json.tcdbPath} copy=${manual.json.tcdbCopyPath} (a by-hand company has ONE file)`);
+        return 'beside: (2); by hand: (3), one file only';
+      });
+
+      let protectedExport = null; let counts0 = null;
+      const rowCounts = async () => (await pg('SELECT (SELECT count(*) FROM public.companies)::int c, (SELECT count(*) FROM public.tenants)::int t, (SELECT count(*) FROM auth.users)::int u, (SELECT count(*) FROM public.chart_of_accounts)::int a')).rows[0];
+      await R.check('7.6 export: "company folder" (no window) and "choose a folder" (the OS window) write a .tcdb; an existing file is never replaced; the live company file is refused; the full path comes back', async () => {
+        const info = await api('GET', '/api/backup-export-info');
+        if (!info.json.success || !info.json.ready || !info.json.companyDir || !info.json.defaultDir) throw new Error(`info ${info.text.slice(0, 200)}`);
+        const live = info.json.companyFile;
+        const a = await api('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'TexaCore-E2E-2026-10-14' });
+        if (!a.json.success || a.json.path !== path.join(info.json.companyDir, 'TexaCore-E2E-2026-10-14.tcdb') || a.json.encrypted !== false) throw new Error(`company-folder → ${a.text.slice(0, 250)}`);
+        const a2 = await api('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'TexaCore-E2E-2026-10-14' });
+        if (!a2.json.success || a2.json.path !== path.join(info.json.companyDir, 'TexaCore-E2E-2026-10-14 (2).tcdb')) throw new Error(`second export did not get "(2)": ${a2.text.slice(0, 250)}`);
+        if (sha(fs.readFileSync(a.json.path)).length !== 64 || fs.readFileSync(a.json.path).subarray(0, 4).toString('latin1') !== 'TCDB') throw new Error('not a .tcdb');
+        const chosenDir = path.join(WORK, 'chosen folder'); const chosen = path.join(chosenDir, 'my export.tcdb');
+        await dialog({ save: chosen });
+        const b = await api('POST', '/api/export-backup', { mode: 'choose', fileBase: 'ignored' });
+        if (!b.json.success || b.json.path !== chosen || !fs.existsSync(chosen)) throw new Error(`choose → ${b.text.slice(0, 250)}`);
+        const chosenSha = sha(fs.readFileSync(chosen));
+        const b2 = await api('POST', '/api/export-backup', { mode: 'choose', fileBase: 'ignored' });
+        if (b2.status !== 409 || b2.json.code !== 'EXPORT_EXISTS') throw new Error(`choosing an existing file (never asked by the OS) → ${b2.status} ${b2.text.slice(0, 150)}`);
+        if (sha(fs.readFileSync(chosen)) !== chosenSha) throw new Error('the existing export was modified');
+        if (fs.readdirSync(chosenDir).some((f) => f.endsWith('.tmp'))) throw new Error('a temp file was left behind');
+        await dialog({ save: live });
+        const c = await api('POST', '/api/export-backup', { mode: 'choose', fileBase: 'x' });
+        if (c.status !== 409 || c.json.code !== 'EXPORT_IS_LIVE_FILE') throw new Error(`the live file was not refused → ${c.status} ${c.text.slice(0, 150)}`);
+        await dialog({ save: null });
+        const d = await api('POST', '/api/export-backup', { mode: 'choose', fileBase: 'x' });
+        if (d.json.canceled !== true) throw new Error('a cancelled save window is not reported');
+        const e = await api('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'p', passphrase: 'short' });
+        if (e.status !== 400 || e.json.code !== 'PASSPHRASE_TOO_SHORT') throw new Error(`a 5-character phrase → ${e.status}`);
+        const f = await api('POST', '/api/export-backup', { mode: 'nonsense' });
+        if (f.status !== 400) throw new Error(`bad mode → ${f.status}`);
+        const rev = await api('POST', '/api/reveal-in-folder', { path: a.json.path });
+        if (!rev.json.success) throw new Error('reveal');
+        const bad1 = await api('POST', '/api/reveal-in-folder', { path: '/etc/passwd' });
+        const bad2 = await api('POST', '/api/reveal-in-folder', { path: path.join(WORK, 'nope.tcdb') });
+        if (bad1.status !== 404 || bad2.status !== 404) throw new Error(`reveal of a non-company file → ${bad1.status}/${bad2.status}`);
+        return `company folder: ${path.basename(a.json.path)} then ${path.basename(a2.json.path)}; chosen: ${chosen}; existing/live refused; cancel/short phrase/bad mode refused`;
+      });
+
+      await R.check('7.7 a passphrase-protected export: written, reported as protected, and a restore asks for the phrase BEFORE anything is written or replaced (none -> 422, wrong -> 422, right -> restored, same rows)', async () => {
+        const exp = await api('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'TexaCore-PROTECTED', passphrase: 'correct horse battery' });
+        if (!exp.json.success || exp.json.encrypted !== true) throw new Error(`protected export → ${exp.text.slice(0, 250)}`);
+        protectedExport = exp.json.path;
+        const bytes = fs.readFileSync(protectedExport);
+        const plain = fs.readFileSync(path.join(path.dirname(protectedExport), 'TexaCore-E2E-2026-10-14.tcdb'));
+        if (bytes.equals(plain)) throw new Error('the protected export equals the plain one');
+        const protectedSha = sha(bytes);
+        counts0 = await rowCounts();
+        const restoreDir = path.join(WORK, 'restore-tcdb');
+        const filesBefore = fs.existsSync(restoreDir) ? fs.readdirSync(restoreDir).sort().join('|') : '';
+        const post = async (fields) => { const m = multipart(bytes, 'TexaCore-PROTECTED.tcdb', fields); return rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m.ct }, body: m.body }); };
+        const none = await post({});
+        if (none.status !== 422 || none.json.code !== 'TCDB_PASSPHRASE_REQUIRED') throw new Error(`no phrase → ${none.status} ${none.buf.toString().slice(0, 150)}`);
+        const wrong = await post({ passphrase: 'not the phrase' });
+        if (wrong.status !== 422 || wrong.json.code !== 'TCDB_BAD_PASSPHRASE') throw new Error(`wrong phrase → ${wrong.status} ${wrong.buf.toString().slice(0, 150)}`);
+        const filesAfter = fs.existsSync(restoreDir) ? fs.readdirSync(restoreDir).sort().join('|') : '';
+        if (filesAfter !== filesBefore) throw new Error(`a refused restore wrote files: ${filesBefore} -> ${filesAfter}`);
+        if (JSON.stringify(await rowCounts()) !== JSON.stringify(counts0)) throw new Error('a refused restore changed the database');
+        const good = await post({ passphrase: 'correct horse battery' });
+        if (good.status !== 200 || !good.json.success) throw new Error(`right phrase → ${good.status} ${good.buf.toString().slice(0, 250)}`);
+        const after = await rowCounts();
+        if (JSON.stringify(after) !== JSON.stringify(counts0)) throw new Error(`rows changed: ${JSON.stringify(counts0)} -> ${JSON.stringify(after)}`);
+        if (sha(fs.readFileSync(protectedExport)) !== protectedSha) throw new Error('the protected export file was modified by the restore');
+        const still = await post({});
+        if (still.status !== 422) throw new Error('the export lost its protection');
+        return `refused twice with no write; opened with the phrase; rows ${JSON.stringify(after)}`;
+      });
+
+      await R.check('7.8 pick-save-location: the native save window for a NEW company (nothing is written; an existing name is not replaced)', async () => {
+        const target = path.join(WORK, 'by hand', 'My Shop.tcdb');
+        await dialog({ save: target });
+        const r = await api('POST', '/api/pick-save-location', { suggestedName: 'My Shop' });
+        if (!r.json.success || r.json.tcdbPath !== target || r.json.renamed !== false || r.json.dir !== path.dirname(target) || r.json.fileBase !== 'My Shop') throw new Error(`save location → ${r.text.slice(0, 250)}`);
+        if (fs.existsSync(target)) throw new Error('the picker wrote the file');
+        fs.writeFileSync(target, 'existing');
+        const r2 = await api('POST', '/api/pick-save-location', { suggestedName: 'My Shop' });
+        if (!r2.json.renamed || r2.json.tcdbPath !== path.join(path.dirname(target), 'My Shop (2).tcdb')) throw new Error(`existing name → ${r2.text.slice(0, 250)}`);
+        if (fs.readFileSync(target, 'utf8') !== 'existing') throw new Error('an existing file was touched');
+        await dialog({ save: null });
+        return 'ok';
+      });
+    }
   } catch (e) {
     R.rows.push({ name: 'harness', ok: false, evidence: e.stack || e.message, ms: 0 });
     console.log(`  FAIL  harness — ${e.message}`);

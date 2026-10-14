@@ -9,6 +9,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const zlib = require('zlib');
+const companyFile = require('./company-file');
 
 // ─── Encryption Constants ────────────────────────────────────
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
@@ -67,6 +68,25 @@ class BackupManager {
     this._running = false;
     this._lastBackupTime = null;
     this._backupCount = 0;
+    // 2.0.2: what the user is shown - per target ('primary' = the company file, 'copy' = the program's own second copy): when it last
+    // succeeded and, if it did not, why. consecutiveFailures counts primary runs in a row that wrote nothing because something failed.
+    this._status = { primary: { lastSuccess: null, error: null, failures: 0 }, copy: { lastSuccess: null, error: null, failures: 0 } };
+    this._consecutiveFailures = 0;
+    this._lastSkipped = null;
+  }
+
+  _markOk(role, when = new Date()) {
+    const t = this._status[role];
+    t.lastSuccess = when; t.error = null; t.failures = 0;
+    if (role === 'primary') this._consecutiveFailures = 0;
+  }
+
+  _markFail(role, err, stage = 'write') {
+    const t = this._status[role];
+    const c = companyFile.classifyFsError(err, stage);
+    t.error = { code: c.code, reason: c.reason, message: String((err && err.message) || err).slice(0, 300), at: new Date().toISOString() };
+    t.failures += 1;
+    if (role === 'primary') this._consecutiveFailures += 1;
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -89,8 +109,9 @@ class BackupManager {
    * Deduped, falsy-filtered. The configured key stays first so the common
    * case (key matches) succeeds on the first try with no extra work.
    */
-  _candidateKeys() {
-    const keys = [this.encryptionKey, ...this.fallbackEncryptionKeys];
+  _candidateKeys(passphrase) {
+    // 2.0.2: a user passphrase (a file exported with "protect with a passphrase") is tried FIRST when one is given.
+    const keys = [...(passphrase ? [passphrase] : []), this.encryptionKey, ...this.fallbackEncryptionKeys];
     if (this.dataDir) {
       try {
         const LicenseGuard = require('./license-guard');
@@ -118,10 +139,83 @@ class BackupManager {
 
     this._running = true;
     const startTime = Date.now();
+    let stage = 'dump';
+    let tempPath = null;
 
     try {
       this.onProgress('start', 'بدء النسخ الاحتياطي...');
+      const built = await this._produce();
+      if (!built) { this._lastSkipped = new Date(); return null; }   // aborted: no company data in the dump — an empty dump never replaces a good backup
+      const { tcdbBuffer, dumpData, compressed } = built;
 
+      // Step 5: Atomic write (write to temp then rename)
+      stage = 'write';
+      tempPath = this.backupPath + '.tmp';
+      fs.writeFileSync(tempPath, tcdbBuffer);
+      fs.renameSync(tempPath, this.backupPath);
+      tempPath = null;
+
+      const duration = Date.now() - startTime;
+      this._lastBackupTime = new Date();
+      this._backupCount++;
+      this._markOk('primary', this._lastBackupTime);
+
+      const stats = {
+        size: tcdbBuffer.length,
+        originalSize: dumpData.length,
+        compressedSize: compressed.length,
+        duration,
+        timestamp: this._lastBackupTime.toISOString(),
+        backupNumber: this._backupCount,
+      };
+
+      this.onProgress('done', `✅ تم النسخ الاحتياطي (${(stats.size / 1024 / 1024).toFixed(1)} MB) في ${(duration / 1000).toFixed(1)}s`);
+      console.log(`[BackupManager] Backup #${this._backupCount} complete: ${(stats.size / 1024).toFixed(0)} KB in ${duration}ms`);
+
+      // ─── Copy to secondary backup location (the program's own second copy) ───
+      // 2.0.2: written through a temp name + rename (a half-written copy never replaces a good one), and its own success/failure is kept
+      // so the user can see that THIS target is in step (or why it is not) without the primary's result hiding it.
+      if (this.secondaryBackupPath) {
+        let secTemp = null;
+        try {
+          const secDir = path.dirname(this.secondaryBackupPath);
+          if (!fs.existsSync(secDir)) fs.mkdirSync(secDir, { recursive: true });
+          secTemp = this.secondaryBackupPath + '.tmp';
+          fs.copyFileSync(this.backupPath, secTemp);
+          fs.renameSync(secTemp, this.secondaryBackupPath);
+          secTemp = null;
+          this._markOk('copy');
+        } catch (e) {
+          if (secTemp) { try { fs.unlinkSync(secTemp); } catch { /* gone */ } }
+          this._markFail('copy', e);
+          console.warn(`[BackupManager] Secondary copy failed: ${e.message}`);
+        }
+      }
+
+      // ─── Daily snapshot rotation (last 5 days per company) ───
+      this._rotateDailySnapshot();
+
+      return stats;
+    } catch (error) {
+      if (tempPath) { try { fs.unlinkSync(tempPath); } catch { /* gone */ } }   // (a disk-full run must not leave a half file beside the company file)
+      this._markFail('primary', error, stage);
+      this.onProgress('error', `❌ فشل النسخ الاحتياطي: ${error.message}`);
+      this.onError(error);
+      return null;
+    } finally {
+      this._running = false;
+    }
+  }
+
+  /** "Sync now": one backup run right away (the same code the 60-second timer runs). Resolves the stats, or null when nothing was written. */
+  syncNow() { return this.backup(); }
+
+  /**
+   * Steps 1-4 of a backup: pg_dump → verify → gzip → encrypt → the .tcdb bytes. Shared by the live sync (backup()) and the one-off
+   * export (exportTo()): the file format and every safety check are the same. `keyOverride` = a user passphrase for an export;
+   * undefined = the configured (unified / license) key. Returns null when the dump has no company data (nothing is written).
+   */
+  async _produce(keyOverride) {
       // Step 1: Run pg_dump to get SQL dump
       this.onProgress('dump', 'تصدير قاعدة البيانات...');
       const dumpData = await this._pgDump();
@@ -167,55 +261,50 @@ class BackupManager {
 
       // Step 3: Encrypt
       this.onProgress('encrypt', 'تشفير البيانات...');
-      const encrypted = this._encrypt(compressed);
+      const encrypted = this._encrypt(compressed, keyOverride);
 
       // Step 4: Build .tcdb file with header + encrypted payload
       this.onProgress('write', 'كتابة الملف...');
       const tcdbBuffer = this._buildTcdbFile(encrypted, dumpData.length, compressed.length);
+      return { tcdbBuffer, dumpData, compressed };
+  }
 
-      // Step 5: Atomic write (write to temp then rename)
-      const tempPath = this.backupPath + '.tmp';
-      fs.writeFileSync(tempPath, tcdbBuffer);
-      fs.renameSync(tempPath, this.backupPath);
-
-      const duration = Date.now() - startTime;
-      this._lastBackupTime = new Date();
-      this._backupCount++;
-
-      const stats = {
-        size: tcdbBuffer.length,
-        originalSize: dumpData.length,
-        compressedSize: compressed.length,
-        duration,
-        timestamp: this._lastBackupTime.toISOString(),
-        backupNumber: this._backupCount,
-      };
-
-      this.onProgress('done', `✅ تم النسخ الاحتياطي (${(stats.size / 1024 / 1024).toFixed(1)} MB) في ${(duration / 1000).toFixed(1)}s`);
-      console.log(`[BackupManager] Backup #${this._backupCount} complete: ${(stats.size / 1024).toFixed(0)} KB in ${duration}ms`);
-
-      // ─── Copy to secondary backup location ───
-      if (this.secondaryBackupPath) {
-        try {
-          const secDir = path.dirname(this.secondaryBackupPath);
-          if (!fs.existsSync(secDir)) fs.mkdirSync(secDir, { recursive: true });
-          fs.copyFileSync(this.backupPath, this.secondaryBackupPath);
-        } catch (e) {
-          console.warn(`[BackupManager] Secondary copy failed: ${e.message}`);
-        }
-      }
-
-      // ─── Daily snapshot rotation (last 5 days per company) ───
-      this._rotateDailySnapshot();
-
-      return stats;
-    } catch (error) {
-      this.onProgress('error', `❌ فشل النسخ الاحتياطي: ${error.message}`);
-      this.onError(error);
-      return null;
-    } finally {
-      this._running = false;
+  /**
+   * 2.0.2 — a ONE-OFF export of the whole company database to `filePath` (the "سحب نسخة احتياطية" action of the desktop page).
+   * The same pipeline and the same file format as the live company file (pg_dump → gzip → AES-256-GCM → TCDB v2), so the restore
+   * wizard opens it unchanged. Differences from backup(): it never touches the live file's bookkeeping, makes no daily snapshot
+   * and no secondary copy, and an EXISTING file is never replaced unless the caller says so (the OS save dialog already asked).
+   *   passphrase — optional: the file is then encrypted with it INSTEAD of the unified key, so it opens only with that phrase.
+   * @returns {Promise<{path:string,size:number,encrypted:boolean,originalSize:number,compressedSize:number,duration:number,timestamp:string}>}
+   */
+  async exportTo(filePath, { passphrase = '', overwrite = false } = {}) {
+    if (!filePath) throw Object.assign(new Error('no export path'), { code: 'NO_PATH' });
+    const target = path.resolve(filePath);
+    if (!overwrite && fs.existsSync(target)) {
+      throw Object.assign(new Error(`الملف موجود مسبقاً ولن يُستبدل | A file with this name already exists: ${target}`), { code: 'EXPORT_EXISTS' });
     }
+    const startTime = Date.now();
+    this.onProgress('start', 'بدء سحب النسخة...');
+    const key = passphrase ? String(passphrase) : undefined;
+    const built = await this._produce(key);
+    if (!built) {
+      throw Object.assign(new Error('لا توجد بيانات شركة في القاعدة — لم يُكتب أي ملف | There is no company data in the database - nothing was written'), { code: 'EXPORT_EMPTY' });
+    }
+    const { tcdbBuffer, dumpData, compressed } = built;
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const tempPath = `${target}.${process.pid}.tmp`;
+    try {
+      fs.writeFileSync(tempPath, tcdbBuffer, { mode: 0o600 });
+      // an atomic move: a half-written export never appears under the final name. Without overwrite the target is re-checked at the last moment.
+      if (!overwrite && fs.existsSync(target)) throw Object.assign(new Error(`الملف موجود مسبقاً ولن يُستبدل | A file with this name already exists: ${target}`), { code: 'EXPORT_EXISTS' });
+      fs.renameSync(tempPath, target);
+    } catch (e) {
+      try { fs.unlinkSync(tempPath); } catch { /* already gone */ }
+      throw e;
+    }
+    const duration = Date.now() - startTime;
+    this.onProgress('done', `✅ تم سحب النسخة (${(tcdbBuffer.length / 1024 / 1024).toFixed(1)} MB)`);
+    return { path: target, size: tcdbBuffer.length, encrypted: !!key, originalSize: dumpData.length, compressedSize: compressed.length, duration, timestamp: new Date().toISOString() };
   }
 
   /**
@@ -333,9 +422,9 @@ class BackupManager {
    * Encrypt data with AES-256-GCM
    * @returns {{ salt, iv, authTag, ciphertext }}
    */
-  _encrypt(data) {
+  _encrypt(data, keyOverride) {
     const salt = crypto.randomBytes(SALT_LENGTH);
-    const key = this._deriveKey(salt);
+    const key = this._deriveKey(salt, keyOverride);
     const iv = crypto.randomBytes(IV_LENGTH);
 
     const cipher = crypto.createCipheriv(ENCRYPTION_ALGORITHM, key, iv);
@@ -348,8 +437,8 @@ class BackupManager {
   /**
    * Decrypt data
    */
-  _decrypt(salt, iv, authTag, ciphertext) {
-    const candidates = this._candidateKeys();
+  _decrypt(salt, iv, authTag, ciphertext, passphrase) {
+    const candidates = this._candidateKeys(passphrase);
     let lastErr;
     for (const candidate of candidates) {
       try {
@@ -363,6 +452,56 @@ class BackupManager {
       }
     }
     throw lastErr || new Error('فشل فك التشفير — لا مفتاح مطابق');
+  }
+
+  /**
+   * Decrypt a parsed container with every candidate key (and the user's passphrase, tried first, when one is given). A wrong key and a
+   * damaged file both fail GCM authentication; the SHA-256 field tells them apart:
+   *   checksum matches the payload but no key opens it  → the file is intact, it needs (another) passphrase
+   *   checksum does not match                            → the file was altered or damaged
+   * Throws a coded Error: TCDB_PASSPHRASE_REQUIRED | TCDB_BAD_PASSPHRASE | TCDB_CORRUPT (the windows/pages translate by code).
+   * @returns {{ data: Buffer, usedPassphrase: boolean }}
+   */
+  _decryptParsed(parsed, passphrase) {
+    try {
+      const data = this._decrypt(parsed.salt, parsed.iv, parsed.authTag, parsed.ciphertext, passphrase);
+      // which key opened it: the passphrase, or one of the install's own? (one more derive of one key - cheap next to the dump)
+      const usedPassphrase = !!passphrase && BackupManager._opensWith(parsed, this._deriveKey(parsed.salt, passphrase));
+      return { data, usedPassphrase };
+    } catch (e) {
+      const actual = crypto.createHash('sha256').update(parsed.ciphertext).digest();
+      const intact = actual.equals(parsed.checksum.subarray(0, 32));
+      if (!intact) {
+        throw Object.assign(new Error('الملف تالف أو عُدِّل بعد حفظه | The file is damaged or was modified after it was saved'), { code: 'TCDB_CORRUPT' });
+      }
+      if (passphrase) {
+        throw Object.assign(new Error('عبارة المرور غير صحيحة | The passphrase is not correct'), { code: 'TCDB_BAD_PASSPHRASE' });
+      }
+      throw Object.assign(new Error('هذا الملف محمي بعبارة مرور — أدخلها لفتحه | This file is protected by a passphrase - enter it to open the file'), { code: 'TCDB_PASSPHRASE_REQUIRED' });
+    }
+  }
+
+  /** Does `key` (an already derived 32-byte key) authenticate this container's payload? */
+  static _opensWith(parsed, key) {
+    try {
+      const d = crypto.createDecipheriv(ENCRYPTION_ALGORITHM, key, parsed.iv);
+      d.setAuthTag(parsed.authTag);
+      d.update(parsed.ciphertext);
+      d.final();
+      return true;
+    } catch { return false; }
+  }
+
+  /**
+   * Can this container be opened with what we have (+ the optional passphrase)? Decrypts only (no gunzip, nothing executed, nothing written).
+   * Used BEFORE a file is copied/restored so a protected file asks for its phrase first. Throws the coded errors of _decryptParsed().
+   * @param {Buffer} buffer the whole .tcdb
+   * @returns {{ usedPassphrase: boolean, timestamp: number, version: number }}
+   */
+  probeAccess(buffer, { passphrase = '' } = {}) {
+    const parsed = this._parseTcdbFile(buffer);
+    const { usedPassphrase } = this._decryptParsed(parsed, passphrase);
+    return { usedPassphrase, timestamp: parsed.timestamp, version: parsed.version };
   }
 
   // ═══════════════════════════════════════════════════════════════
@@ -445,13 +584,13 @@ class BackupManager {
   }
 
   /** Read + decrypt + decompress just far enough to learn which PostgreSQL wrote the file (nothing is executed). */
-  async peekDumpMajor(filePath) {
+  async peekDumpMajor(filePath, { passphrase = '' } = {}) {
     const parsed = this._parseTcdbFile(fs.readFileSync(filePath));
-    const sql = await this._decompress(this._decrypt(parsed.salt, parsed.iv, parsed.authTag, parsed.ciphertext));
+    const sql = await this._decompress(this._decryptParsed(parsed, passphrase).data);
     return BackupManager.dumpedFromMajor(sql.subarray(0, 4000).toString('utf8'));
   }
 
-  async restore(filePath) {
+  async restore(filePath, { passphrase = '' } = {}) {
     const tcdbPath = filePath || this.backupPath;
     if (!fs.existsSync(tcdbPath)) {
       throw new Error(`ملف النسخة الاحتياطية غير موجود: ${tcdbPath}`);
@@ -479,7 +618,8 @@ class BackupManager {
 
       // Step 3: Decrypt
       this.onProgress('decrypt', 'فك تشفير البيانات...');
-      const compressed = this._decrypt(parsed.salt, parsed.iv, parsed.authTag, parsed.ciphertext);
+      // (a file exported with "protect with a passphrase" opens with it; without it the coded TCDB_PASSPHRASE_REQUIRED goes up and nothing is touched)
+      const compressed = this._decryptParsed(parsed, passphrase).data;
 
       // Step 4: Decompress
       this.onProgress('decompress', 'فك ضغط البيانات...');
@@ -860,6 +1000,7 @@ class BackupManager {
    * Get current status
    */
   getStatus() {
+    const p = this._status.primary;
     return {
       syncing: !!this._timer,
       running: this._running,
@@ -869,7 +1010,43 @@ class BackupManager {
       cloudUploadCount: this._cloudUploadCount || 0,
       intervalMs: this.intervalMs,
       backupPath: this.backupPath,
+      // 2.0.2 (additive): the whole picture for the user - overall state, the last error, and each target on its own
+      state: this._running ? 'syncing' : (p.error ? 'error' : (this._lastBackupTime ? 'ok' : 'pending')),
+      consecutiveFailures: this._consecutiveFailures,
+      lastError: p.error,
+      lastSkipped: this._lastSkipped,
+      targets: this.getTargets(),
     };
+  }
+
+  /**
+   * Every file this manager keeps in step: the company file and (when configured) the program's own second copy. Per target: the path,
+   * 'ok' | 'syncing' | 'error' | 'pending', the last successful sync, the error with its reason, whether the file is on disk, and whether
+   * its folder is one a cloud service syncs (the file may then be an online-only stub on this computer).
+   */
+  getTargets() {
+    const make = (role, filePath) => {
+      const t = this._status[role];
+      let exists = false; let size = 0; let mtime = null; let onThisComputer = true;
+      try {
+        const st = fs.statSync(filePath);
+        exists = st.isFile(); size = st.size; mtime = st.mtime.toISOString();
+        if (companyFile.looksLikeCloudPlaceholder(st)) onThisComputer = false;
+      } catch { exists = false; }
+      const dir = path.dirname(filePath);
+      let cloudFolder = null;
+      try { cloudFolder = companyFile.detectCloudFolder(dir); } catch { cloudFolder = null; }
+      return {
+        role, path: filePath, name: path.basename(filePath), dir,
+        state: this._running ? 'syncing' : (t.error ? 'error' : (t.lastSuccess ? 'ok' : 'pending')),
+        lastSuccess: t.lastSuccess ? new Date(t.lastSuccess).toISOString() : null,
+        error: t.error, failures: t.failures, exists, size, mtime, onThisComputer, cloudFolder,
+      };
+    };
+    const out = [];
+    if (this.backupPath) out.push(make('primary', this.backupPath));
+    if (this.secondaryBackupPath) out.push(make('copy', this.secondaryBackupPath));
+    return out;
   }
 
   // ═══════════════════════════════════════════════════════════════

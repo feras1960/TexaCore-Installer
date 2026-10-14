@@ -71,6 +71,8 @@ contextBridge.exposeInMainWorld('texacore', {
   // Backup
   restoreBackup: (filePath) => ipcRenderer.invoke('backup-restore', filePath),
   backupStatus: () => ipcRenderer.invoke('backup-status'),
+  backupNow: () => ipcRenderer.invoke('backup-now'),
+  revealBackup: (filePath) => ipcRenderer.invoke('reveal-backup', filePath),
   onBackupProgress: (cb) => ipcRenderer.on('backup-progress', (_, d) => cb(d)),
 
   // RSF Import/Export (Al-Rasheed)

@@ -106,6 +106,7 @@ async function refreshStatus() {
     // is up). While the cloud box is shown and the link is still the bare fallback
     // (no ?c=), re-resolve it each poll until the short code lands, then stop.
     refreshEmployeesBox(state);
+    refreshBackupsBox();
     const empEl = document.getElementById('employee-url');
     if (state.config && state.config.subdomain && empEl && !String(empEl.dataset.url || '').includes('?c=')) {
       setEmployeeLink(state.config.subdomain);
@@ -732,6 +733,120 @@ async function refreshEmployeesBox(state) {
     a.textContent = url || '—'; a.dataset.url = url;
   } catch { /* services may be down */ } finally { _empRefreshing = false; }
 }
+// ─── Backups box (2.0.2) ─────────────────────────────────────
+// Every file the program keeps in step (the company file, and for a Rashid company the program's own second copy): where it is, when it was
+// last in step ("last sync 3 minutes ago"), whether it is OK / syncing / failing - and WHY (folder missing, no permission, disk full, a cloud
+// folder that is not downloaded) - plus "sync now" and "show in Finder". Text only goes in through textContent (a path is data, never markup).
+let _bkRefreshing = false;
+let _bkBusy = false;
+function bkAgo(iso) {
+  if (!iso) return t('bk.never');
+  const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 60) return t('bk.justNow');
+  if (secs < 3600) return t('bk.minutesAgo').replace('{n}', String(Math.floor(secs / 60)));
+  if (secs < 86400) return t('bk.hoursAgo').replace('{n}', String(Math.floor(secs / 3600)));
+  return t('bk.daysAgo').replace('{n}', String(Math.floor(secs / 86400)));
+}
+function bkRevealLabel() { return /^mac/i.test(navigator.platform || '') ? t('bk.showMac') : /^win/i.test(navigator.platform || '') ? t('bk.showWin') : t('bk.showOther'); }
+function bkProviderName(p) { return ({ icloud: 'iCloud', onedrive: 'OneDrive', dropbox: 'Dropbox', gdrive: 'Google Drive' })[p] || t('bk.cloudService'); }
+function bkCloudKey(dir) { return 'texacore.bk.cloudWarned:' + dir; }
+async function refreshBackupsBox() {
+  const box = document.getElementById('backups-box');
+  if (!box || _bkRefreshing) return;
+  _bkRefreshing = true;
+  try {
+    const st = await window.texacore.backupStatus();
+    const targets = (st && st.targets) || [];
+    if (!targets.length) { box.style.display = 'none'; return; }
+    box.style.display = 'block';
+    const rows = document.getElementById('bk-rows');
+    rows.textContent = '';
+    for (const tg of targets) {
+      const row = document.createElement('div');
+      row.style.cssText = 'background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px 12px;';
+      row.dataset.role = tg.role; row.dataset.state = tg.state;
+      const head = document.createElement('div');
+      head.style.cssText = 'font-size:12px; font-weight:700; margin-bottom:4px;';
+      head.textContent = tg.role === 'copy' ? t('bk.roleCopy') : t('bk.rolePrimary');
+      const pathEl = document.createElement('div');
+      pathEl.style.cssText = 'font-family:monospace; font-size:11px; color:var(--text-muted); word-break:break-all; direction:ltr; text-align:left;';
+      pathEl.textContent = tg.path; pathEl.title = tg.path;
+      const line = document.createElement('div');
+      line.style.cssText = 'font-size:12px; margin-top:6px; display:flex; gap:6px; align-items:flex-start;';
+      const ico = document.createElement('span');
+      const ok = tg.state === 'ok' || tg.state === 'pending';
+      const color = tg.state === 'error' ? '#b91c1c' : tg.state === 'syncing' ? 'var(--accent)' : tg.state === 'ok' ? '#16a34a' : 'var(--text-muted)';
+      ico.style.color = color;
+      ico.appendChild(iconEl(tg.state === 'error' ? 'triangle-alert' : tg.state === 'syncing' ? 'loader' : 'check', 14));
+      const txt = document.createElement('span');
+      txt.style.cssText = 'flex:1; min-width:0; word-break:break-word; color:' + color + ';';
+      if (tg.state === 'error') {
+        const reason = t('bk.r.' + ((tg.error && tg.error.reason) || 'unknown'));
+        txt.textContent = t('bk.failed').replace('{reason}', reason) + (tg.lastSuccess ? ' · ' + t('bk.last').replace('{ago}', bkAgo(tg.lastSuccess)) : '');
+      } else if (tg.state === 'syncing') {
+        txt.textContent = t('bk.syncing');
+      } else if (tg.state === 'pending') {
+        txt.textContent = t('bk.pending');
+      } else {
+        txt.textContent = t('bk.last').replace('{ago}', bkAgo(tg.lastSuccess));
+      }
+      void ok;
+      line.appendChild(ico); line.appendChild(txt);
+      const actions = document.createElement('div');
+      actions.style.cssText = 'margin-top:6px;';
+      const show = document.createElement('button');
+      show.type = 'button'; show.className = 'btn';
+      show.style.cssText = 'font-size:11px; padding:4px 10px;';
+      show.textContent = bkRevealLabel(); show.disabled = !tg.exists;
+      show.addEventListener('click', () => { window.texacore.revealBackup(tg.path); });
+      actions.appendChild(show);
+      row.appendChild(head); row.appendChild(pathEl); row.appendChild(line);
+      if (tg.exists && tg.onThisComputer === false) {
+        const off = document.createElement('div');
+        off.style.cssText = 'font-size:11px; margin-top:4px; color:#92400e;';
+        off.textContent = t('bk.notOnComputer');
+        row.appendChild(off);
+      }
+      row.appendChild(actions);
+      rows.appendChild(row);
+    }
+    // a visible warning once it keeps failing (or any target is failing)
+    const warn = document.getElementById('bk-warn');
+    const failing = targets.filter((x) => x.state === 'error');
+    if (failing.length && ((st.consecutiveFailures || 0) >= 2 || failing.some((x) => x.role === 'copy'))) {
+      const first = failing[0];
+      warn.textContent = t('bk.warnRepeated').replace('{reason}', t('bk.r.' + ((first.error && first.error.reason) || 'unknown')));
+      warn.style.display = 'block';
+    } else { warn.style.display = 'none'; }
+    // a cloud-synced folder: say so ONCE per folder (dismissed → remembered)
+    const cloudEl = document.getElementById('bk-cloud');
+    const cloudT = targets.find((x) => x.cloudFolder && !localStorage.getItem(bkCloudKey(x.dir)));
+    if (cloudT) {
+      cloudEl.textContent = '';
+      const msg = document.createElement('span');
+      msg.textContent = (cloudT.cloudFolder.provider === 'icloud' ? t('bk.cloudICloud') : t('bk.cloudOther').replace('{p}', bkProviderName(cloudT.cloudFolder.provider))) + ' ';
+      const ok = document.createElement('button');
+      ok.type = 'button'; ok.className = 'btn'; ok.style.cssText = 'font-size:11px; padding:3px 10px; margin-inline-start:6px;';
+      ok.textContent = t('bk.understood');
+      ok.addEventListener('click', () => { try { localStorage.setItem(bkCloudKey(cloudT.dir), '1'); } catch { /* storage blocked */ } cloudEl.style.display = 'none'; });
+      cloudEl.appendChild(msg); cloudEl.appendChild(ok);
+      cloudEl.style.display = 'block';
+    } else { cloudEl.style.display = 'none'; }
+    const btn = document.getElementById('btn-bk-now');
+    if (btn && !_bkBusy) btn.disabled = !!st.running;
+  } catch { /* services may be down */ } finally { _bkRefreshing = false; }
+}
+async function syncBackupsNow() {
+  if (_bkBusy) return;
+  _bkBusy = true;
+  const btn = document.getElementById('btn-bk-now');
+  if (btn) { btn.disabled = true; btn.textContent = t('bk.syncing'); }
+  try { await window.texacore.backupNow(); } catch { /* the box shows the error from the status */ }
+  _bkBusy = false;
+  if (btn) { btn.disabled = false; btn.textContent = t('bk.syncNow'); }
+  await refreshBackupsBox();
+}
+
 async function loadEmployeeRoles() {
   const sel = document.getElementById('emp-role');
   const cid = document.getElementById('emp-company').value;

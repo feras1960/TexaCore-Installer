@@ -221,6 +221,20 @@
         <input type="number" id="input-port" value="80" class="input input-small" dir="ltr" min="1" max="65535">
       </div>
 
+      <!-- Backups (2.0.2): every company file this program keeps in step - its path, when it was last in step, its state, a visible error -->
+      <div class="cloud-box" id="backups-box" style="display:none; margin-bottom:16px;">
+        <div class="cloud-header">
+          <div>
+            <h3><svg class="icon icon-20 icon-lead" aria-hidden="true" focusable="false"><use href="#i-database"></use></svg><span data-i18n="bk.title">النسخ الاحتياطي</span></h3>
+            <p data-i18n="bk.subtitle">ملف الشركة (.tcdb) يُحدَّث تلقائياً كل دقيقة؛ هنا ترى كل مكان محفوظ فيه ومتى آخر مزامنة.</p>
+          </div>
+        </div>
+        <div id="bk-warn" role="alert" style="display:none; margin-top:12px; padding:10px 12px; border-radius:var(--radius-sm); font-size:12px; line-height:1.6; background:rgba(220,38,38,.10); border:1px solid rgba(220,38,38,.35); color:#b91c1c;"></div>
+        <div id="bk-rows" style="margin-top:12px; display:flex; flex-direction:column; gap:8px;"></div>
+        <div id="bk-cloud" style="display:none; margin-top:10px; padding:10px 12px; border-radius:var(--radius-sm); font-size:12px; line-height:1.6; background:rgba(217,119,6,.10); border:1px solid rgba(217,119,6,.35); color:#92400e;"></div>
+        <button class="btn btn-primary" id="btn-bk-now" style="margin-top:10px; width:100%; height:40px; font-size:13px;" onclick="syncBackupsNow()" data-i18n="bk.syncNow">مزامنة الآن</button>
+      </div>
+
       <!-- Employees: the LAN link + add an employee on this machine (local admin only; the one-time password is shown once) -->
       <div class="cloud-box" id="employees-box" style="display:none; margin-bottom:16px;">
         <div class="cloud-header">
