@@ -30,6 +30,8 @@ const LICENSE = arg('license', 'free');
 const ERP = arg('erp', process.env.TEXACORE_ERP_DIR || '');
 const RSF = arg('rsf', '');
 const KEEP = process.argv.includes('--keep');
+// security review F1: the folder the upload-restore writes to IS the folder the "company folder" export writes to (the reviewer's scenario: a passphrase-protected export saved in the company folder, then opened)
+const TCDB_IN_COMPANY_FOLDER = process.argv.includes('--tcdb-in-company-folder');
 const APP = arg('app', '');   // path to a PACKAGED …/TexaCore ERP.app (the real build) instead of Electron dev mode on this checkout
 if (!arg('workdir')) { console.error('--workdir <dir> is required'); process.exit(2); }
 
@@ -66,7 +68,7 @@ async function main() {
   console.log(`launch-check: license=${LICENSE} workdir=${WORK}`);
   const appBinary = APP ? path.join(path.resolve(APP), 'Contents', 'MacOS', path.basename(path.resolve(APP), '.app')) : '';
   if (APP && !fs.existsSync(appBinary)) { console.error(`no executable at ${appBinary}`); process.exit(2); }
-  const { child, ready } = startApp({ userData, license: LICENSE, logFile, appBinary, extraEnv: { TEXACORE_UI_SMOKE: '1' } });
+  const { child, ready } = startApp({ userData, license: LICENSE, logFile, appBinary, extraEnv: { TEXACORE_UI_SMOKE: '1', ...(TCDB_IN_COMPANY_FOLDER ? { TEXACORE_TCDB_DIR: path.join(WORK, 'rashid-folder') } : {}) } });
   let secrets = null;
   try {
     await R.check('1.1 first run: initdb → baseline → services up', async () => {
@@ -952,7 +954,7 @@ async function main() {
         if (bytes.equals(plain)) throw new Error('the protected export equals the plain one');
         const protectedSha = sha(bytes);
         counts0 = await rowCounts();
-        const restoreDir = path.join(WORK, 'restore-tcdb');
+        const restoreDir = TCDB_IN_COMPANY_FOLDER ? rashidDir : path.join(WORK, 'restore-tcdb');
         const filesBefore = fs.existsSync(restoreDir) ? fs.readdirSync(restoreDir).sort().join('|') : '';
         const post = async (fields) => { const m = multipart(bytes, 'TexaCore-PROTECTED.tcdb', fields); return rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m.ct }, body: m.body }); };
         const none = await post({});
@@ -971,6 +973,29 @@ async function main() {
         if (still.status !== 422) throw new Error('the export lost its protection');
         return `refused twice with no write; opened with the phrase; rows ${JSON.stringify(after)}`;
       });
+
+      if (TCDB_IN_COMPANY_FOLDER) {
+        await R.check('7.7c (review F1) the protected export lives in the SAME folder the restore writes to: the restore lands under a NEW free name; after sync ticks the export on disk is byte-identical and STILL asks for its phrase', async () => {
+          if (!protectedExport) throw new Error('7.7 did not run');
+          const protDir = path.dirname(protectedExport);
+          if (protDir !== rashidDir) throw new Error(`the export is in ${protDir}, not in the folder the restore writes to (${rashidDir}) - the scenario is not set up`);
+          const protectedSha = sha(fs.readFileSync(protectedExport));
+          const free = path.join(protDir, 'TexaCore-PROTECTED (2).tcdb');
+          if (!fs.existsSync(free)) throw new Error(`the restore did not land under the free name: ${fs.readdirSync(protDir).filter((f) => /PROTECTED/.test(f)).join(', ')}`);
+          for (let i = 0; i < 3; i++) { await api('POST', '/api/backup', {}); await new Promise((r) => setTimeout(r, 700)); }   // sync ticks (the restore re-armed the timer on its target)
+          const onDisk = fs.readFileSync(protectedExport);
+          if (sha(onDisk) !== protectedSha) throw new Error('the protected export was REWRITTEN after the restore (a sync tick wrote the install-key dump over it)');
+          const m = multipart(onDisk, 'TexaCore-PROTECTED.tcdb', {});
+          const again = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m.ct }, body: m.body });
+          if (again.status !== 422 || again.json.code !== 'TCDB_PASSPHRASE_REQUIRED') throw new Error(`the export on disk lost its protection: ${again.status} ${again.buf.toString().slice(0, 150)}`);
+          const st = await status();
+          if (st.backupPath !== free) throw new Error(`the live target is ${st.backupPath}, expected ${free}`);
+          const live = fs.readFileSync(free);
+          if (live.subarray(0, 4).toString('latin1') !== 'TCDB' || sha(live) === protectedSha) throw new Error('the live file is not a fresh install-key dump');
+          if (fs.readdirSync(protDir).some((f) => /^\.restore-.*\.tmp$/.test(f))) throw new Error('a temp file was left behind');
+          return `restore -> "${path.basename(free)}" (live target); "${path.basename(protectedExport)}" untouched after sync ticks and still asks for its phrase`;
+        });
+      }
 
       await R.check('7.7b opening another .tcdb never writes this company\'s data over the PREVIOUS company\'s program copy; the previous manager stops', async () => {
         await dialog({ open: rsfFile });
