@@ -14,6 +14,8 @@
 //     (the installer script's relaunch) is denied — the swap, ad-hoc signing and cleanup run for real, the relaunch is then done by this script with the isolated environment.
 //   hop a      1.8.0 (built from c05be42; only its admin port moved into the test block) → the release in --rel
 //   hop tamper 1.8.0, the release's zip is served with one flipped byte → refused
+//   NOTE      these hops run the CLIENT you hand them (--old180 / --client200): they test THAT client's updater. The resumable download (Range, retries, pause, restart) of 2.0.2+ is checked by
+//             test/update-resume.test.js (npm test) and, on the real app, by scripts/e2e/ota-resume-check.js; once a 2.0.2 build exists, run hop b with it as --client200 to prove the install flow on it.
 //   hop b      2.0.0 (the client app) → "2.0.1-test" (the same app re-versioned, re-signed, re-zipped by this script), including the ERP page's own update pill
 // ════════════════════════════════════════════════════════════════
 const fs = require('fs');

@@ -78,7 +78,7 @@
       </div>
     </div>
 
-    <!-- OTA Update Widget (hidden until an update is downloading/ready) -->
+    <!-- OTA Update Widget (hidden until an update is downloading/ready): progress bar, Pause / Resume, Retry now, the countdown to the next try and the reason of the last interruption -->
     <div class="update-widget" id="update-widget" role="status" aria-live="polite" style="display:none;">
       <div class="update-widget-row">
         <span class="update-icon" id="update-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-download"></use></svg></span>
@@ -89,6 +89,13 @@
       </div>
       <div class="update-progress" id="update-progress-wrap">
         <div class="update-progress-bar" id="update-progress-bar"></div>
+      </div>
+      <div class="update-detail-row" id="update-detail-row" style="display:none;">
+        <span class="update-detail" id="update-detail"></span>
+        <span class="update-actions">
+          <button type="button" class="btn-update-ctl" id="update-pause-btn" style="display:none;"></button>
+          <button type="button" class="btn-update-ctl" id="update-retry-btn" style="display:none;"></button>
+        </span>
       </div>
     </div>
 

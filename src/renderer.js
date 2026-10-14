@@ -1031,75 +1031,184 @@ document.addEventListener('keydown', (e) => {
 });
 
 // ─── OTA Update Widget ───────────────────────────────────────
-// Driven by main-process events (update-available / update-progress /
-// update-downloaded). Hidden by default; collapses via «لاحقاً» (the update
-// still installs on quit — autoInstallOnAppQuit semantics on both platforms).
+// Shows the automatic update from "found" to "ready", driven by the main process: 'update-status' carries the detailed download status
+// (phase: downloading · paused · waiting-retry · verifying · staging · failed-verify · ready, bytes, speed, the countdown to the next try, the last
+// error), and the older 'update-available' / 'update-progress' / 'update-downloaded' / 'update-not-available' events still work (Windows' own
+// electron-updater download). The download itself survives drops, restarts and sleep — this widget only shows it and has three controls:
+// Pause / Resume, «Retry now», and (when ready) «Restart now» / «Later» (the update still installs on quit).
 (function initUpdateWidget() {
   const widget = document.getElementById('update-widget');
   if (!widget || !window.texacore?.onUpdateAvailable) return;
 
-  const iconEl = document.getElementById('update-icon');
-  const textEl = document.getElementById('update-text');
-  const mbEl = document.getElementById('update-mb');
-  const barWrap = document.getElementById('update-progress-wrap');
-  const barEl = document.getElementById('update-progress-bar');
-  const restartBtn = document.getElementById('update-restart-btn');
-  const laterBtn = document.getElementById('update-later-btn');
+  const el = (id) => document.getElementById(id);
+  const iconEl = el('update-icon');
+  const textEl = el('update-text');
+  const mbEl = el('update-mb');
+  const barWrap = el('update-progress-wrap');
+  const barEl = el('update-progress-bar');
+  const restartBtn = el('update-restart-btn');
+  const laterBtn = el('update-later-btn');
+  const detailRow = el('update-detail-row');
+  const detailEl = el('update-detail');
+  const pauseBtn = el('update-pause-btn');
+  const retryBtn = el('update-retry-btn');
 
-  let updVersion = '';
-  let updState = 'idle'; // idle | downloading | ready
+  const MB = 1048576;
+  let snap = { phase: 'idle' };
   let dismissed = false;
+  let ticker = null;
+
+  const iso = (x) => '⁦' + x + '⁩';                      // numbers and units keep their own direction inside an Arabic sentence
+  const fill = (key, vars) => Object.keys(vars).reduce((acc, k) => acc.split('{' + k + '}').join(vars[k]), t(key));
+  const fmtSize = (b) => {
+    const n = Number(b) || 0;
+    return n >= 1024 * MB ? `${(n / 1024 / MB).toFixed(2)} ${t('update.unitGB')}` : `${(n / MB).toFixed(1)} ${t('update.unitMB')}`;
+  };
+  const pad2 = (n) => String(n).padStart(2, '0');
+  const fmtDur = (sec) => {
+    sec = Math.max(0, Math.round(sec));
+    const h = Math.floor(sec / 3600), m = Math.floor((sec % 3600) / 60), s = sec % 60;
+    return h ? `${h}:${pad2(m)}:${pad2(s)}` : `${m}:${pad2(s)}`;
+  };
+  const fmtWait = (sec) => (sec < 60 ? `${sec} ${t('update.secShort')}` : fmtDur(sec));
+
+  function setCtl(btn, show, icon, label) {
+    btn.style.display = show ? 'inline-flex' : 'none';
+    if (show) setWithIcon(btn, icon, label, 16);
+  }
 
   function render() {
-    if (updState === 'idle' || dismissed) { widget.style.display = 'none'; widget.classList.remove('ready'); return; }
-    widget.style.display = 'block';
-    widget.classList.toggle('ready', updState === 'ready');
-    if (updState === 'downloading') {
-      setIconOnly(iconEl, 'download', 20);
-      textEl.textContent = t('update.downloading').replace('{v}', updVersion);
-      barWrap.style.display = 'block';
-      restartBtn.style.display = 'none';
-      laterBtn.style.display = 'none';
-    } else { // ready
-      setIconOnly(iconEl, 'circle-check', 20);
-      textEl.textContent = t('update.ready').replace('{v}', updVersion);
-      mbEl.textContent = '';
-      barWrap.style.display = 'none';
-      restartBtn.textContent = t('update.restartNow');
-      restartBtn.style.display = 'inline-flex';
-      laterBtn.textContent = t('update.later');
-      laterBtn.style.display = 'inline-flex';
+    const phase = snap.phase || 'idle';
+    if (phase === 'idle' || phase === 'checking' || (phase === 'ready' && dismissed)) {
+      widget.style.display = 'none'; widget.className = 'update-widget';
+      if (ticker) { clearInterval(ticker); ticker = null; }
+      return;
     }
+    const v = snap.version || '';
+    const done = Number(snap.bytesDone) || 0;
+    const total = Number(snap.bytesTotal) || 0;
+    const pct = phase === 'ready' ? 100 : (typeof snap.percent === 'number' ? snap.percent : (total ? Math.floor((done / total) * 100) : 0));
+    const secs = snap.nextRetryAt ? Math.max(0, Math.ceil((snap.nextRetryAt - Date.now()) / 1000)) : 0;
+    const keeps = total > 0 && done > 0 ? fill('update.keeps', { done: iso(fmtSize(done)), total: iso(fmtSize(total)) }) : '';
+    const reasonKey = snap.errorCode ? 'update.reason.' + snap.errorCode : '';
+    const reason = reasonKey && t(reasonKey) !== reasonKey ? t(reasonKey) : '';
+    const rawErr = snap.lastError ? ' ' + iso('(' + snap.lastError + ')') : '';
+
+    let cls = '', ico = 'download', spin = false, text = '', detail = '';
+    let showBar = true, showPause = false, showRetry = false, paused = false, ready = false;
+    switch (phase) {
+      case 'downloading': {
+        text = fill('update.downloading', { v });
+        const bits = [];
+        if (snap.speedBps > 0) bits.push(iso(`${(snap.speedBps / MB).toFixed(1)} ${t('update.unitMBs')}`));
+        if (typeof snap.etaSec === 'number') bits.push(fill('update.remaining', { t: iso(fmtDur(snap.etaSec)) }));
+        detail = bits.join(' · ');
+        showPause = true;
+        break;
+      }
+      case 'paused':
+        cls = 'paused'; ico = 'pause'; paused = true; showPause = true;
+        text = fill('update.paused', { v });
+        detail = t('update.pausedNote');
+        break;
+      case 'waiting-retry':
+        cls = 'warn'; showPause = true; showRetry = true;
+        if (snap.errorCode === 'no-space') {
+          ico = 'hard-drive';
+          text = fill('update.noSpace', { v });
+          detail = fill('update.noSpaceNote', { need: iso(fmtSize(snap.needBytes)), free: iso(fmtSize(snap.freeBytes)) });
+        } else {
+          const off = snap.errorCode === 'offline' || snap.online === false;
+          ico = off ? 'wifi-off' : 'clock';
+          text = off ? t('update.offline') : (secs > 0 ? fill('update.waiting', { s: iso(fmtWait(secs)) }) : t('update.waitingNow'));
+          detail = [reason + rawErr, keeps].filter(Boolean).join(' — ');
+        }
+        break;
+      case 'verifying':
+        ico = 'shield-check'; text = fill('update.verifying', { v }); break;
+      case 'staging':
+        ico = 'loader'; spin = true; text = fill('update.staging', { v }); break;
+      case 'failed-verify':
+        cls = 'warn'; ico = 'triangle-alert'; showRetry = true;
+        text = fill('update.failedVerify', { v });
+        detail = [t('update.reason.verify'), secs > 0 ? fill('update.waiting', { s: iso(fmtWait(secs)) }) : ''].filter(Boolean).join(' — ');
+        break;
+      case 'ready':
+        cls = 'ready'; ico = 'circle-check'; ready = true; showBar = false;
+        text = fill('update.ready', { v });
+        break;
+      default:
+        text = fill('update.downloading', { v }); break;
+    }
+
+    widget.style.display = 'block';
+    widget.className = 'update-widget' + (cls ? ' ' + cls : '');
+    setIconOnly(iconEl, ico, 20);
+    if (spin && iconEl.firstChild && iconEl.firstChild.classList) iconEl.firstChild.classList.add('spin');
+    textEl.textContent = text;
+    mbEl.textContent = !ready && total > 0 ? `${pct}% — ${fmtSize(done)} / ${fmtSize(total)}` : '';
+    barWrap.style.display = showBar ? 'block' : 'none';
+    barEl.style.width = (showBar ? pct : 0) + '%';
+    detailEl.textContent = detail;
+    detailRow.style.display = !ready && (detail || showPause || showRetry) ? 'flex' : 'none';
+    setCtl(pauseBtn, showPause, paused ? 'play' : 'pause', t(paused ? 'update.resume' : 'update.pause'));
+    setCtl(retryBtn, showRetry, 'rotate-cw', t('update.retryNow'));
+    restartBtn.style.display = ready ? 'inline-flex' : 'none';
+    laterBtn.style.display = ready ? 'inline-flex' : 'none';
+    if (ready) { restartBtn.textContent = t('update.restartNow'); laterBtn.textContent = t('update.later'); }
+
+    // the countdown ticks once a second while a retry is scheduled
+    const counting = (phase === 'waiting-retry' || phase === 'failed-verify') && !!snap.nextRetryAt;
+    if (counting && !ticker) ticker = setInterval(render, 1000);
+    else if (!counting && ticker) { clearInterval(ticker); ticker = null; }
+  }
+
+  function apply(next) {
+    if (!next || typeof next !== 'object') return;
+    if (snap.phase === 'ready' && next.phase === 'ready' && snap.version !== next.version) dismissed = false;
+    if (next.phase !== 'ready') dismissed = false;
+    snap = next;
+    render();
   }
 
   document.addEventListener('i18n-applied', render);   // switching the language re-words the banner at once
 
+  window.texacore.onUpdateStatus?.((s) => apply(s));
+
+  // the original events (Windows' electron-updater download, and the "found" notice) map onto the same picture
   window.texacore.onUpdateAvailable((info) => {
-    updVersion = info?.version || '';
-    updState = 'downloading';
-    dismissed = false;
-    if (barEl) barEl.style.width = '0%';
-    render();
+    if (snap.phase === 'ready') return;
+    apply({ phase: 'downloading', version: info?.version || '', bytesDone: 0, bytesTotal: 0, percent: 0 });
   });
 
   window.texacore.onUpdateProgress((p) => {
-    updState = 'downloading';
-    if (barEl && typeof p?.percent === 'number') barEl.style.width = p.percent + '%';
-    if (mbEl && p?.transferred && p?.total) mbEl.textContent = `${p.percent}% — ${p.transferred}/${p.total} MB`;
-    render();
+    if (snap.phase === 'ready') return;
+    apply({ ...snap, phase: 'downloading', version: snap.version || '', percent: typeof p?.percent === 'number' ? p.percent : snap.percent,
+      bytesDone: p?.transferred ? parseFloat(p.transferred) * MB : snap.bytesDone, bytesTotal: p?.total ? parseFloat(p.total) * MB : snap.bytesTotal });
   });
 
   window.texacore.onUpdateDownloaded(() => {
-    updState = 'ready';
-    render();
+    apply({ ...snap, phase: 'ready' });
   });
 
-  // a download that was refused or cut (nothing staged) — or no update at all: the "downloading…" notice must not stay
+  // a download that was refused (nothing staged) — or no update at all: the "downloading…" notice must not stay
   window.texacore.onUpdateNotAvailable?.(() => {
-    if (updState === 'ready') return;                 // an already staged update is not withdrawn by a later failed attempt
-    updState = 'idle';
-    render();
+    if (snap.phase === 'ready') return;                 // an already staged update is not withdrawn by a later failed attempt
+    apply({ phase: 'idle' });
   });
+
+  // the window may open (or reload) while a download is paused or waiting: no event is coming, so ask
+  window.texacore.getUpdateStatus?.().then((st) => { if (st && st.phase && st.phase !== 'idle') apply(st); }).catch(() => {});
+
+  const control = (btn, action) => {
+    btn.disabled = true;
+    Promise.resolve(window.texacore.updateControl(action))
+      .then((r) => { if (r && r.status && r.status.phase) apply({ ...snap, ...r.status }); })
+      .catch(() => {})
+      .then(() => { btn.disabled = false; });
+  };
+  pauseBtn?.addEventListener('click', () => control(pauseBtn, snap.phase === 'paused' ? 'resume' : 'pause'));
+  retryBtn?.addEventListener('click', () => control(retryBtn, 'retry'));
 
   restartBtn?.addEventListener('click', () => {
     restartBtn.disabled = true;

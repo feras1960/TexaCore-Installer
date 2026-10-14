@@ -16,6 +16,8 @@
 //       are refused with their own message, a good password is accepted and the SERVER then verifies it (a free licence has no default password)
 //   U9  the licence panel, every kind of status line and the subdomain checker draw SVG icons; the whole page has no emoji and every icon points at a defined symbol
 //   U11 licence row: FREE says «never expires» (no date, no 0 days); a trial shows its real end date and the days left
+//   U12 the update progress widget (resumable download): every state — downloading with MB / speed / time left, waiting to retry (countdown + reason + what is kept), offline, paused (Resume), no disk space,
+//       verifying, staging, failed-verify, ready — in Arabic RTL and English LTR (+ Russian / Ukrainian checked for overflow): right text, right icon, Pause / Resume and «Retry now» exactly where they belong, no overflow
 //   U10 starting again: the start button's busy icon, then the running state
 //   U5  the one-time upgrade notice (the run starts over a 1.x data folder): shown with the old folder and the old company file, in Arabic RTL and English LTR; «فتح المجلد» asks the OS to open exactly that folder;
 //       the «فتح» button beside a 1.x company file is refused with the translated message; «إغلاق» dismisses it for good (still gone after a reload and after the files are re-read)
@@ -72,6 +74,27 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         inputCoversSwitch: (() => { const r = i.getBoundingClientRect(); return Math.abs(r.width - s.width) < 1 && Math.abs(r.height - s.height) < 1; })(),
         pointerOnSwitch: getComputedStyle(sw).cursor }; })()`;
     const near = (a, b) => Math.abs(a - b) < 0.6;
+
+    // U12 helpers: push a synthetic updater status through the REAL path (shared status → IPC → the window) and read what the widget shows
+    const emitUpd = async (payload, channel = 'update-status') => { const r = await request('POST', `http://127.0.0.1:${PORTS.admin}/api/ui-update-emit`, { headers: H, body: { channel, payload } }); if (!r.json || !r.json.ok) throw new Error(`ui-update-emit ${r.text.slice(0, 160)}`); return r.json; };
+    const WIDGET_STATE = `(() => { const g = (id) => document.getElementById(id); const w = g('update-widget');
+      const vis = (el) => !!el && getComputedStyle(el).display !== 'none' && el.getClientRects().length > 0;
+      const href = (el) => { const u = el && el.querySelector('use'); return u ? u.getAttribute('href') : ''; };
+      return { shown: vis(w), cls: w.className, text: g('update-text').textContent, mb: g('update-mb').textContent, detail: g('update-detail').textContent, bar: g('update-progress-bar').style.width, barVisible: vis(g('update-progress-wrap')),
+        pause: vis(g('update-pause-btn')) ? g('update-pause-btn').textContent.trim() : null, pauseIcon: href(g('update-pause-btn')), retry: vis(g('update-retry-btn')) ? g('update-retry-btn').textContent.trim() : null, restart: vis(g('update-restart-btn')), later: vis(g('update-later-btn')),
+        icon: href(g('update-icon')), spin: !!g('update-icon').querySelector('.spin'), overflowX: w.scrollWidth > w.clientWidth + 1, dir: document.documentElement.dir, lang: document.documentElement.lang, width: Math.round(w.getBoundingClientRect().width) }; })()`;
+    const base = (extra) => ({ version: '2.0.2', paused: false, bytesTotal: 305 * 1048576, bytesDone: 128.4 * 1048576, percent: 42, speedBps: 1.2 * 1048576, etaSec: 147, nextRetryAt: null, lastError: null, errorCode: null, needBytes: null, freeBytes: null, online: true, ...extra });
+    const UPD_STATES = [
+      { name: 'downloading', snap: () => base({ phase: 'downloading' }), want: (w, tr) => w.cls === 'update-widget' && w.icon === '#i-download' && w.bar === '42%' && w.barVisible && w.pause === tr.pause && w.pauseIcon === '#i-pause' && w.retry === null && /1\.2/.test(w.detail) && /2:27/.test(w.detail) && /128\.4/.test(w.mb) && /42%/.test(w.mb) },
+      { name: 'waiting-retry', snap: () => base({ phase: 'waiting-retry', bytesDone: 275.3 * 1048576, percent: 90, speedBps: 0, etaSec: null, errorCode: 'network', lastError: 'aborted', nextRetryAt: Date.now() + 42000 }), want: (w, tr) => w.cls.includes('warn') && w.icon === '#i-clock' && /4[12]/.test(w.text) && w.pause === tr.pause && w.retry === tr.retry && /aborted/.test(w.detail) && /275\.3/.test(w.detail) && w.bar === '90%' },
+      { name: 'offline', snap: () => base({ phase: 'waiting-retry', bytesDone: 275.3 * 1048576, percent: 90, speedBps: 0, etaSec: null, errorCode: 'offline', lastError: 'getaddrinfo ENOTFOUND github.com', nextRetryAt: Date.now() + 120000, online: false }), want: (w, tr) => w.cls.includes('warn') && w.icon === '#i-wifi-off' && w.text === tr.offline && w.retry === tr.retry },
+      { name: 'paused', snap: () => base({ phase: 'paused', paused: true, speedBps: 0, etaSec: null }), want: (w, tr) => w.cls.includes('paused') && w.icon === '#i-pause' && w.pause === tr.resume && w.pauseIcon === '#i-play' && w.retry === null && /128\.4/.test(w.mb) && w.detail === tr.pausedNote },
+      { name: 'no-space', snap: () => base({ phase: 'waiting-retry', speedBps: 0, etaSec: null, errorCode: 'no-space', lastError: 'not enough free disk space', needBytes: 915 * 1048576, freeBytes: 400 * 1048576, nextRetryAt: Date.now() + 60000 }), want: (w, tr) => w.cls.includes('warn') && w.icon === '#i-hard-drive' && /915\.0/.test(w.detail) && /400\.0/.test(w.detail) && w.retry === tr.retry },
+      { name: 'verifying', snap: () => base({ phase: 'verifying', bytesDone: 305 * 1048576, percent: 100, speedBps: 0, etaSec: null }), want: (w) => w.icon === '#i-shield-check' && w.pause === null && w.retry === null && w.bar === '100%' },
+      { name: 'staging', snap: () => base({ phase: 'staging', bytesDone: 305 * 1048576, percent: 100, speedBps: 0, etaSec: null }), want: (w) => w.icon === '#i-loader' && w.spin && w.pause === null && w.retry === null },
+      { name: 'failed-verify', snap: () => base({ phase: 'failed-verify', bytesDone: 0, percent: 0, speedBps: 0, etaSec: null, errorCode: 'verify', lastError: 'sha512 mismatch', nextRetryAt: Date.now() + 3600000 }), want: (w, tr) => w.cls.includes('warn') && w.icon === '#i-triangle-alert' && w.retry === tr.retry && w.pause === null },
+      { name: 'ready', snap: () => base({ phase: 'ready', percent: 100, speedBps: 0, etaSec: null }), want: (w) => w.cls.includes('ready') && w.icon === '#i-circle-check' && w.restart && w.later && !w.barVisible && w.pause === null && w.retry === null },
+    ];
 
     for (const lang of ['ar', 'en']) {
       await js(`(() => { const s = document.getElementById('lang-select'); s.value = '${lang}'; onLangChange(); document.getElementById('input-cloud').blur(); window.scrollTo(0, 0); })()`);
@@ -303,7 +326,49 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         await js(`updateControlPanel(currentState); delete window.refreshStatus`);
         return `FREE: "${free.text}" ; TRIAL (tier ${trial.tier}): "${trial.text}"`;
       });
+      await R.check(`U12 [${lang}] the update widget shows every state of the resumable download with the right text, icon and controls — and does not overflow`, async () => {
+        await js(`window.scrollTo(0, 0); document.getElementById('panel-license').style.display = 'none'; document.getElementById('panel-control').style.display = 'block'`);
+        const tr = await js(`({ pause: t('update.pause'), resume: t('update.resume'), retry: t('update.retryNow'), offline: t('update.offline'), pausedNote: t('update.pausedNote') })`);
+        const seen = [];
+        for (const st of UPD_STATES) {
+          await emitUpd(st.snap()); await sleep(250);
+          const w = await js(WIDGET_STATE);
+          if (!w.shown) throw new Error(`${st.name}: the widget is not shown (${JSON.stringify(w)})`);
+          if (w.overflowX) throw new Error(`${st.name}: the widget overflows horizontally (${JSON.stringify(w)})`);
+          if (w.dir !== (lang === 'ar' ? 'rtl' : 'ltr') || w.lang !== lang) throw new Error(`${st.name}: direction ${w.dir}/${w.lang}`);
+          if (!st.want(w, tr)) throw new Error(`${st.name}: unexpected widget ${JSON.stringify(w)} (labels ${JSON.stringify(tr)})`);
+          await js(`document.getElementById('update-widget').scrollIntoView({ block: 'center' })`);
+          await ev({ shot: `ui-${lang}-update-${st.name}.png`, wait: 150 });
+          seen.push(`${st.name}: "${w.text}"${w.pause ? ` [${w.pause}]` : ''}${w.retry ? ` [${w.retry}]` : ''}`);
+        }
+        await emitUpd({ phase: 'idle' }); await sleep(200);   // (a staged update is never withdrawn by update-not-available — only an explicit idle status clears the ready banner)
+        const gone = await js(`getComputedStyle(document.getElementById('update-widget')).display === 'none'`);
+        if (!gone) throw new Error('the widget stays after the update is withdrawn');
+        evidence[`update-widget-${lang}`] = seen;
+        return seen.join(' | ').slice(0, 900);
+      });
+
     }
+
+    await R.check('U12 [ru, uk] the longest update states do not overflow the widget (shots taken)', async () => {
+      const out = [];
+      for (const lang of ['ru', 'uk']) {
+        await js(`(() => { const s = document.getElementById('lang-select'); s.value = '${lang}'; onLangChange(); window.scrollTo(0, 0); document.getElementById('panel-license').style.display = 'none'; document.getElementById('panel-control').style.display = 'block'; })()`);
+        await sleep(400);
+        for (const st of UPD_STATES.filter((x) => ['waiting-retry', 'paused', 'no-space', 'failed-verify'].includes(x.name))) {
+          await emitUpd(st.snap()); await sleep(250);
+          const w = await js(WIDGET_STATE);
+          if (!w.shown || w.overflowX) throw new Error(`${lang}/${st.name}: ${JSON.stringify(w)}`);
+          if (!/[А-Яа-яІіЇїЄє]/.test(w.text)) throw new Error(`${lang}/${st.name}: not translated: "${w.text}"`);
+          await js(`document.getElementById('update-widget').scrollIntoView({ block: 'center' })`);
+          await ev({ shot: `ui-${lang}-update-${st.name}.png`, wait: 100 });
+          out.push(`${lang}/${st.name} ${w.width}px`);
+        }
+      }
+      await emitUpd({ phase: 'idle' });
+      await js(`(() => { const s = document.getElementById('lang-select'); s.value = 'en'; onLangChange(); })()`);
+      return out.join(', ');
+    });
 
     await R.check('U6 «إغلاق» dismisses the notice for good: gone at once, still gone after a reload, and the notice file says so', async () => {
       await js(`document.getElementById('upgrade-dismiss').click()`); await sleep(800);
