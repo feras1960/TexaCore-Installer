@@ -216,7 +216,7 @@ const killHard = async (child) => {
       if (mock.state.requests.length !== reqBeforeKill) throw new Error(`${mock.state.requests.length - reqBeforeKill} request(s) after the restart while paused`);
       if (!/paused|متوقف|приостановлена|призупинено/i.test(w.text) || !w.pause) throw new Error(`widget ${JSON.stringify(w)}`);
       const log = hbLog(userData);
-      if (!/keeping the pending download of v2\.0\.2-test/.test(log)) throw new Error('cleanupIfStale did not report keeping the partial');
+      if (!new RegExp(`keeping the pending download of v${VERSION.replace(/[.+-]/g, '\\$&')}`).test(log)) throw new Error('cleanupIfStale did not report keeping the partial');
       evidence.r3 = { status: s, widget: w };
       return `status ${s.phase} (paused=${s.paused}, ${s.bytesDone}/${s.bytesTotal} B), widget "${w.text}" [${w.pause}], app log "keeping the pending download…", 0 requests since the kill`;
     });
@@ -250,7 +250,7 @@ const killHard = async (child) => {
 
     await R.check('R5 the staged app is byte-identical to the release (three pieces joined with no gap and no duplicate); the sha512 line is logged; the archive and sidecar are cleaned up; the ERP page\'s status keeps its original shape', async () => {
       const log = hbLog(userData);
-      if (!/sha512 verified/.test(log) || !/staged v2\.0\.2-test/.test(log)) throw new Error('log lines missing');
+      if (!/sha512 verified/.test(log) || !new RegExp(`staged v${VERSION.replace(/[.+-]/g, '\\$&')}`).test(log)) throw new Error('log lines missing');
       const st = JSON.parse(fs.readFileSync(path.join(upd, 'staged.json'), 'utf8'));
       const payload = path.join(st.appPath, 'Contents', 'Resources', 'payload.bin');
       if (sha512b64(payload) !== rel.payloadSha) throw new Error('the staged payload differs from the release');
