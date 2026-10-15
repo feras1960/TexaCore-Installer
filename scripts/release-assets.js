@@ -5,7 +5,8 @@
 // checks it, and prints. (Earlier releases were assembled by hand and shipped without the .blockmap files, so electron-updater on Windows could never use a
 // differential download, and a later release could not diff against them.)
 //
-//   node scripts/release-assets.js [--dist dist] [--version <x.y.z>] [--mac-tag v<x.y.z>] [--win-tag v<x.y.z>] [--json] [--blockmaps-only]
+//   node scripts/release-assets.js [--dist dist] [--version <x.y.z>] [--mac-tag v<x.y.z>] [--win-tag v<x.y.z>] [--hold-win-feed] [--json] [--blockmaps-only]
+//   --hold-win-feed   do not upload latest.yml (the Windows feed): the exe and its blockmap go up, but no Windows client is offered the version automatically (an option: from 2.0.3 the Windows auto-update is ENABLED, latest.yml goes up with latest-mac.yml)
 //   Both platforms go into ONE release, v<x.y.z> (2.0.3 on): all binaries and blockmaps first, then the two feeds (latest-mac.yml, latest.yml) last. --mac-tag / --win-tag only exist for
 //   the older layout (Windows in its own v<x.y.z>-windows-test pre-release): given different tags, each platform is uploaded to its own release.
 //   --blockmaps-only  for a release that is ALREADY live without its blockmaps (2.0.1): only the blockmaps are uploaded — but first prove that dist/ holds the very files that were published
@@ -48,7 +49,7 @@ function readYml(file, problems, label) {
 }
 
 /** Plan and verify the upload set of one version. Pure over the files in `dist`. */
-function planRelease({ dist, version, platforms = ['win', 'mac'], blockmapsOnly = false, macTag = '', winTag = '' }) {
+function planRelease({ dist, version, platforms = ['win', 'mac'], blockmapsOnly = false, macTag = '', winTag = '', holdWinFeed = false }) {
   const problems = [];
   const files = [];       // { name, role: 'binary' | 'blockmap' | 'feed', platform, size, sha256 }
   const add = (name, role, platform) => {
@@ -102,8 +103,9 @@ function planRelease({ dist, version, platforms = ['win', 'mac'], blockmapsOnly 
     g.platforms.push(platform); g.files.push(...mine);
     groups.set(tags[platform], g);
   }
+  const held = holdWinFeed ? files.filter((f) => f.platform === 'win' && f.role === 'feed').map((f) => f.name) : [];
   for (const [tag, g] of groups) {
-    const feed = g.files.filter((f) => f.role === 'feed').map((f) => f.name);
+    const feed = g.files.filter((f) => f.role === 'feed' && !held.includes(f.name)).map((f) => f.name);
     const rest = g.files.filter((f) => f.role !== 'feed' && (!blockmapsOnly || f.role === 'blockmap')).map((f) => f.name);
     const label = g.platforms.join(' + ');
     if (blockmapsOnly) {
@@ -116,12 +118,13 @@ function planRelease({ dist, version, platforms = ['win', 'mac'], blockmapsOnly 
     } else {
       commands.push(`# ${label}: binaries + blockmaps into ${tag} (the release must already exist; --clobber replaces a file of the same name), then the feed${feed.length > 1 ? 's' : ''}`);
       commands.push(`gh release upload ${tag} --repo ${REPO} --clobber ${rest.map(q).join(' ')}`);
-      commands.push(`gh release upload ${tag} --repo ${REPO} --clobber ${feed.map(q).join(' ')}`);
+      if (feed.length) commands.push(`gh release upload ${tag} --repo ${REPO} --clobber ${feed.map(q).join(' ')}`);
+      if (held.length) commands.push(`# HELD, not uploaded: ${held.join(', ')} (the Windows feed - upload it only when the Windows auto-update has been proven on a real PC)`);
       upload.push(...rest, ...feed);
     }
     commands.push(`gh release view ${tag} --repo ${REPO} --json assets --jq '.assets[] | [.name, .size, .digest] | @tsv'     # compare with the sha256 list above`);
   }
-  return { version, files, tags, upload, problems, commands };
+  return { version, files, tags, upload, held, problems, commands };
 }
 
 module.exports = { planRelease, readBlockmap, REPO };
@@ -131,7 +134,7 @@ if (require.main === module) {
   const ROOT = path.join(__dirname, '..');
   const dist = path.resolve(ROOT, arg('dist', 'dist'));
   const version = arg('version', require('../package.json').version);
-  const plan = planRelease({ dist, version, blockmapsOnly: process.argv.includes('--blockmaps-only'), macTag: arg('mac-tag'), winTag: arg('win-tag') });
+  const plan = planRelease({ dist, version, blockmapsOnly: process.argv.includes('--blockmaps-only'), macTag: arg('mac-tag'), winTag: arg('win-tag'), holdWinFeed: process.argv.includes('--hold-win-feed') });
   if (process.argv.includes('--json')) { console.log(JSON.stringify(plan, null, 2)); process.exit(plan.problems.length ? 1 : 0); }
   console.log(`release-assets v${version}  (${dist})\n`);
   for (const f of plan.files) console.log(`  ${f.role.padEnd(8)} ${f.platform}  ${f.name}  ${(f.size >= 1048576 ? (f.size / 1048576).toFixed(1) + ' MB' : Math.ceil(f.size / 1024) + ' KB')}  sha256 ${f.sha256.slice(0, 16)}…`);

@@ -95,6 +95,18 @@ test('the older layout is still expressible: --win-tag v<x>-windows-test sends e
   assert.match(text, /gh release upload v9\.9\.9 --repo feras1960\/TexaCore-Installer --clobber .*zip\.blockmap/);
 });
 
+test('--hold-win-feed: the exe and its blockmap go up, latest.yml (the Windows feed) is listed as HELD and never uploaded; the mac feed still goes last', () => {
+  const { d } = dist();
+  const p = planRelease({ dist: d, version: '9.9.9', holdWinFeed: true });
+  assert.deepEqual(p.problems, []);
+  assert.deepEqual(p.held, ['latest.yml']);
+  assert.ok(!p.upload.includes('latest.yml') && p.upload.includes('TexaCore-ERP-Setup-9.9.9.exe') && p.upload.includes('TexaCore-ERP-Setup-9.9.9.exe.blockmap'));
+  assert.equal(p.upload[p.upload.length - 1], 'latest-mac.yml');
+  const text = p.commands.join('\n');
+  assert.ok(!/gh release upload [^\n]*latest\.yml/.test(text.replace(/latest-mac\.yml/g, '')), 'no upload command names latest.yml');
+  assert.match(text, /# HELD, not uploaded: latest\.yml/);
+});
+
 test('readBlockmap reads electron-builder\'s gzip JSON and totals the block sizes', () => {
   const d = mkdtemp('bm-'); const buf = Buffer.alloc(2500, 3);
   fs.writeFileSync(path.join(d, 'x.blockmap'), blockmapOf(buf));

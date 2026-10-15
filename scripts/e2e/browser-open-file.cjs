@@ -47,7 +47,7 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
     const isTcdb = /\.tcdb$/i.test(FILE);
     const noteSel = isTcdb ? '[data-testid="live-company-file-note"]' : '[data-testid="rsf-company-file-target"], [data-testid="rsf-company-file-fallback"]';
     const t0 = Date.now();
-    while (Date.now() - t0 < 90000) {
+    while (Date.now() - t0 < 240000) {   // (a restore of a 6 MB company file takes 25-60 s, longer on a busy machine)
       if (await page.locator('[data-testid="tcdb-passphrase-prompt"]').count()) {
         out.prompt = true;
         if (!PHRASE) break;

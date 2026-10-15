@@ -1186,9 +1186,14 @@ async function main() {
         if (!changed) throw new Error('the chosen file was never rewritten by the sync');
         const left = walk(dir);
         if (left.join('|') !== 'Chooser Mine.tcdb') throw new Error(`files in the folder: ${left.join(', ')} (a "(2)" copy or a restore log beside the user's file)`);
+        // review rv203: the restore's temporary SQL (the whole DECRYPTED database) and the daily snapshots never go beside the user's own file
+        if (left.some((f) => /\.(restore|truncate|auth)\.sql$/i.test(f) || f === 'snapshots')) throw new Error(`temporary SQL / snapshots beside the user's file: ${left.join(', ')}`);
+        const tmpLeft = fs.readdirSync(os.tmpdir()).filter((f) => new RegExp(`^texacore-(restore|truncate|auth)-${child.pid}-[0-9a-f]+\\.sql$`).test(f));
+        if (tmpLeft.length) throw new Error(`temporary SQL left in the temp folder: ${tmpLeft.join(', ')}`);
+        const snapDir = path.join(copyDir, 'snapshots'); const snaps = fs.existsSync(snapDir) ? fs.readdirSync(snapDir).length : 0;
         const copiesAfter = walk(copyDir).filter((f) => /^Chooser Mine\.opened-\d{4}-\d{2}-\d{2}\.tcdb$/.test(f));
         if (copiesAfter.length !== copiesBefore.length + 1 || sha(fs.readFileSync(path.join(copyDir, copiesAfter.filter((f) => !copiesBefore.includes(f))[0]))) !== sha0) throw new Error('the safety copy of the opened file is missing or differs');
-        return `page sent {name,size,lastModified,sha256} only; located ${path.basename(res.located.filePath)} in locate-a; open-picked-tcdb 200; the SAME file rewritten (mtime +${Math.round(st1.mtimeMs - st0.mtimeMs)} ms); folder = [${left.join(', ')}]; note "${res.note.text.slice(0, 60)}…"; status line(s) seen: ${JSON.stringify(res.statusTexts)}`;
+        return `page sent {name,size,lastModified,sha256} only; located ${path.basename(res.located.filePath)} in locate-a; open-picked-tcdb 200; the SAME file rewritten (mtime +${Math.round(st1.mtimeMs - st0.mtimeMs)} ms); folder = [${left.join(', ')}] (no restore/truncate/auth .sql, no snapshots folder; no temp SQL left in the temp folder; ${snaps} snapshot(s) in the program's backups folder); note "${res.note.text.slice(0, 60)}…"; status line(s) seen: ${JSON.stringify(res.statusTexts)}`;
       });
 
       await R.check('7.10b (2.0.3 browser chooser) a PROTECTED export chosen in the browser: the page asks for the phrase, nothing is overwritten - the company file is "<name> (2).tcdb" BESIDE it, the export stays byte-identical (and protected), the note says so', async () => {
@@ -1323,6 +1328,44 @@ async function main() {
         const fine = await locateApi(good);   // well formed, nobody holds it
         if (fine.status !== 200 || fine.json.code !== 'NOT_FOUND') throw new Error(`a well-formed unknown file → ${fine.status} ${fine.text.slice(0, 120)}`);
         return `${bad.length} malformed bodies → 400 BAD_REQUEST, non-JSON 400, array 400; a well-formed unknown file → 200 NOT_FOUND`;
+      });
+
+      await R.check('7.10h (review rv203) a FAILED open never writes into the picked file: the restore is forced to fail (another session holds a lock the pre-restore truncate needs, 20 s x 4 tries) - the picked file stays byte-identical with nothing beside it, the PREVIOUS company file is the live target again and still syncing, the rows are unchanged; a second open meanwhile is refused 409 RESTORE_BUSY', async () => {
+        const dir = path.join(LA, 'failopen'); fs.mkdirSync(dir, { recursive: true });
+        const picked = await exportTo(path.join(dir, 'Fail Open.tcdb'));
+        const pickedSha = fileSha(picked); const pickedMtime = fs.statSync(picked).mtimeMs;
+        const st0 = await status(); const prev = st0.backupPath;
+        if (!prev || path.resolve(prev) === path.resolve(picked) || !st0.syncing) throw new Error(`no previous syncing company file to fall back to: ${JSON.stringify({ prev, syncing: st0.syncing })}`);
+        const prevMtime0 = fs.statSync(prev).mtimeMs; const c0 = await counts4();
+        const loc = (await locateApi(bodyOf(picked))).json;
+        if (!loc.success || !loc.ref) throw new Error(`locate → ${JSON.stringify(loc).slice(0, 160)}`);
+        const locker = new Client(pgOptions());
+        await locker.connect();
+        let first; let second;
+        try {
+          await locker.query('BEGIN');
+          await locker.query('LOCK TABLE public.companies IN ACCESS SHARE MODE');   // the restore's TRUNCATE (ACCESS EXCLUSIVE) now waits for this
+          const firstP = request('POST', `${ADMIN}/api/open-picked-tcdb`, { headers: H, body: { ref: loc.ref }, timeout: 300000 });
+          await new Promise((r) => setTimeout(r, 4000));
+          second = await request('POST', `${ADMIN}/api/open-picked-tcdb`, { headers: H, body: { ref: loc.ref }, timeout: 60000 });
+          first = await firstP;
+        } finally { try { await locker.query('ROLLBACK'); } catch { /* connection gone */ } await locker.end().catch(() => {}); }
+        if (second.status !== 409 || second.json.code !== 'RESTORE_BUSY') throw new Error(`a second open while one runs → ${second.status} ${second.text.slice(0, 160)}`);
+        if (first.status === 200) throw new Error('the forced failure did not happen (the open succeeded)');
+        if (!/truncate failed|lock timeout|deadlock/i.test(first.text)) throw new Error(`unexpected failure: ${first.status} ${first.text.slice(0, 240)}`);
+        if (fileSha(picked) !== pickedSha || fs.statSync(picked).mtimeMs !== pickedMtime) throw new Error('the picked file was written to');
+        if (walk(dir).join('|') !== 'Fail Open.tcdb') throw new Error(`files beside the picked file: ${walk(dir).join(', ')}`);
+        const tmpLeft = fs.readdirSync(os.tmpdir()).filter((f) => new RegExp(`^texacore-(restore|truncate|auth)-${child.pid}-[0-9a-f]+\\.sql$`).test(f));
+        if (tmpLeft.length) throw new Error(`temporary SQL left in the temp folder: ${tmpLeft.join(', ')}`);
+        const st1 = await status();
+        if (path.resolve(st1.backupPath || '') !== path.resolve(prev)) throw new Error(`the live target is ${st1.backupPath}, expected the previous company file ${prev}`);
+        await waitFor(async () => { await api('POST', '/api/backup', {}); return fs.statSync(prev).mtimeMs > prevMtime0; }, 'the previous company file syncing again');
+        if (!(await status()).syncing) throw new Error('the timer is not running again');
+        if (fileSha(picked) !== pickedSha) throw new Error('the picked file changed while the previous file synced');
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the failed open changed the rows');
+        const ok = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref });
+        if (ok.status !== 200 || !ok.json.success) throw new Error(`after the lock is gone the same file opens: ${ok.status} ${ok.text.slice(0, 200)}`);
+        return `open failed (${first.status}: ${first.text.slice(0, 90)}…); second open 409 RESTORE_BUSY; picked file byte-identical, nothing beside it, no temp SQL; live target back to ${path.basename(prev)} and syncing (mtime +${Math.round(fs.statSync(prev).mtimeMs - prevMtime0)} ms); rows unchanged; the same file then opens fine`;
       });
     }
   } catch (e) {
