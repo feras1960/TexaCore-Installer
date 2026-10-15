@@ -1772,20 +1772,56 @@ const E2E_DIALOG = { open: null, save: null, reveal: [] };   // isolated test ru
 let exportInFlight = false;
 const MIN_PASSPHRASE_LEN = 6;
 
-/** The native open/save dialog behind a hidden always-on-top parent (so it appears even though the app window is hidden). The same code /api/open-tcdb always had. */
+/**
+ * The native open/save dialog, IN FRONT of the browser that asked for it.
+ * The request comes from a page in the user's browser, so the browser is the active app and this app is usually in the background with
+ * its window closed to the tray (on macOS: no Dock icon). 2.0.2 attached the panel to a HIDDEN parent and never activated the app, so the
+ * panel opened behind the browser and the page sat at «جار فتح الملف…» until the user found it (owner's report, 2026-10-15).
+ * Now: (1) the app becomes the active app, (2) the panel hangs from a small transparent host window that sits above every other app's
+ * windows, on the screen the pointer is on and on the current Space (a full-screen browser included) — so it is visible even if macOS
+ * refuses the activation, (3) when the panel closes and this app had no window open, the app hides itself so the browser is active again.
+ */
+function dialogHostBounds(screenApi) {
+  const W = 1, H = 1;
+  try {
+    const d = screenApi.getDisplayNearestPoint(screenApi.getCursorScreenPoint());
+    const a = d.workArea;   // the panel hangs from the host's top edge: centre it horizontally, a little below the menu bar / top of the work area
+    return { x: Math.round(a.x + a.width / 2), y: Math.round(a.y + Math.min(120, a.height / 6)), width: W, height: H };
+  } catch {
+    return { width: W, height: H };
+  }
+}
+
 async function showNativeDialog(kind, options) {
   // A headless harness run NEVER opens a real window: the test answers it (POST /api/e2e-dialog); no answer = the user closed it.
   if (HARNESS_OK && process.env.TEXACORE_HEADLESS === '1') {
     const answer = E2E_DIALOG[kind];
     return kind === 'save' ? { canceled: !answer, filePath: answer || undefined, harness: true } : { canceled: !answer, filePaths: answer ? [answer] : [], harness: true };
   }
-  const { dialog: dlg, BrowserWindow: BW } = require('electron');
-  const dialogParent = new BW({ width: 0, height: 0, show: false, alwaysOnTop: true, skipTaskbar: true });
-  dialogParent.setAlwaysOnTop(true, 'screen-saver');
+  const { dialog: dlg, BrowserWindow: BW, screen: screenApi } = require('electron');
+  const isMac = process.platform === 'darwin';
+  const appWindowOpen = !!(mainWindow && !mainWindow.isDestroyed() && mainWindow.isVisible() && !mainWindow.isMinimized());
+  const host = new BW({
+    ...dialogHostBounds(screenApi),
+    show: false, frame: false, transparent: true, hasShadow: false, resizable: false, movable: false,
+    minimizable: false, maximizable: false, fullscreenable: false, skipTaskbar: true, alwaysOnTop: true,
+    title: 'TexaCore', backgroundColor: '#00000000',
+  });
   try {
-    return kind === 'save' ? await dlg.showSaveDialog(dialogParent, options) : await dlg.showOpenDialog(dialogParent, options);
+    host.setAlwaysOnTop(true, 'screen-saver');
+    if (isMac) {
+      try { host.setVisibleOnAllWorkspaces(true, { visibleOnFullScreen: true }); } catch { /* older macOS */ }
+      try { app.focus({ steal: true }); } catch { /* activation refused: the host's level still keeps the panel above the browser */ }
+      host.showInactive();
+    } else {
+      host.show();
+    }
+    try { host.focus(); } catch { /* best effort */ }
+    return kind === 'save' ? await dlg.showSaveDialog(host, options) : await dlg.showOpenDialog(host, options);
   } finally {
-    dialogParent.destroy();
+    try { host.destroy(); } catch { /* already gone */ }
+    // Give the screen back to the browser: with no TexaCore window open there is nothing of ours to look at.
+    if (isMac && !appWindowOpen) { try { app.hide(); } catch { /* best effort */ } }
   }
 }
 
@@ -2760,7 +2796,7 @@ const httpServer = http.createServer(async (req, res) => {
   // Opens native file dialog → gets full path (even USB) → restores → syncs to same file
   } else if (req.method === 'GET' && req.url === '/api/open-tcdb') {
     try {
-      // (the dialog itself is the shared showNativeDialog() above: a hidden always-on-top parent so it appears on top without showing the main window)
+      // (the dialog itself is the shared showNativeDialog() above: it activates the app and hangs from an always-on-top host window, so it opens IN FRONT of the browser without showing the main window)
       const result = await showNativeDialog('open', {
         title: 'فتح ملف بيانات TexaCore',
         filters: [
