@@ -37,6 +37,17 @@ const ICLOUD_DRIVE_REL = ['Library', 'Mobile Documents', 'com~apple~CloudDocs'];
 
 const badRequest = (msg) => Object.assign(new Error(msg), { code: 'BAD_REQUEST' });
 const nfc = (s) => String(s).normalize('NFC');
+/** `promise`, or `fallback` after `ms` - a stalled network volume (a hung stat / readdir) must never hold the answer back; the stalled call is simply abandoned. */
+function withTimeout(promise, ms, fallback) {
+  let timer = null;
+  return Promise.race([
+    Promise.resolve(promise).catch(() => fallback),
+    new Promise((resolve) => { timer = setTimeout(() => resolve(fallback), ms); }),
+  ]).finally(() => clearTimeout(timer));
+}
+const LSTAT_TIMEOUT_MS = 2000;
+const DIR_TIMEOUT_MS = 1000;      // one folder that does not answer (a dead network volume) is skipped after this long
+const MAX_STALLED_DIRS = 3;       // ... and the walk stops after this many: each abandoned call still occupies one of the few file-system threads
 
 /**
  * The request body → { name, ext, size, sha256, lastModified } or a BAD_REQUEST error.
@@ -151,37 +162,40 @@ function mdfindCandidates(name, { home = os.homedir(), execFile = childProcess.e
  * Breadth-first walk of `roots` for regular files named `name`. Bounded by time (`deadline`), depth and the number of folders; never follows a symbolic
  * link (so there are no loops) and visits every real folder once. Unreadable folders are skipped.
  */
-async function walkForFile(roots, name, { deadline, now = Date.now, maxDepth = WALK_MAX_DEPTH, maxDirs = WALK_MAX_DIRS, platform = process.platform, fsp = fs.promises } = {}) {
+async function walkForFile(roots, name, { deadline, now = Date.now, maxDepth = WALK_MAX_DEPTH, maxDirs = WALK_MAX_DIRS, platform = process.platform, fsp = fs.promises, state = null, dirTimeoutMs = DIR_TIMEOUT_MS } = {}) {
   const want = nfc(name);
+  let stalled = 0;
   const queue = roots.map((dir) => ({ dir, depth: 0 }));
   const seen = new Set();
-  const found = [];
-  let visited = 0;
-  let timedOut = false;
+  const res = state || { found: [], visited: 0, timedOut: false };   // (the caller may hold `state` to keep what was found if this walk is abandoned on a stalled volume)
   for (let qi = 0; qi < queue.length; qi++) {
-    if (now() > deadline) { timedOut = true; break; }
-    if (visited >= maxDirs) break;
+    if (now() > deadline) { res.timedOut = true; break; }
+    if (res.visited >= maxDirs) break;
     const { dir, depth } = queue[qi];
-    let key;
-    try {
-      const st = await fsp.stat(dir, { bigint: true });
-      if (!st.isDirectory()) continue;
-      key = st.ino && st.ino !== 0n ? `${st.dev}:${st.ino}` : `p:${(await fsp.realpath(dir)).toLowerCase()}`;
-    } catch { continue; }
-    if (seen.has(key)) continue;
-    seen.add(key);
-    visited++;
-    let entries;
-    try { entries = await fsp.readdir(dir, { withFileTypes: true }); } catch { continue; }
+    // one folder = one stat + one readdir, under their own clock: a folder that never answers is skipped, not waited for
+    const listing = await withTimeout((async () => {
+      try {
+        const st = await fsp.stat(dir, { bigint: true });
+        if (!st.isDirectory()) return { skip: true };
+        const key = st.ino && st.ino !== 0n ? `${st.dev}:${st.ino}` : `p:${(await fsp.realpath(dir)).toLowerCase()}`;
+        if (seen.has(key)) return { skip: true };
+        seen.add(key);
+        return { entries: await fsp.readdir(dir, { withFileTypes: true }) };
+      } catch { return { skip: true }; }   // unreadable (permissions, vanished): skipped, not a stall
+    })(), dirTimeoutMs, { stalled: true });
+    if (listing.stalled) { if (++stalled >= MAX_STALLED_DIRS) { res.timedOut = true; break; } continue; }
+    if (listing.skip || !listing.entries) continue;
+    res.visited++;
+    const entries = listing.entries;
     for (const ent of entries) {
       if (ent.isDirectory()) {
         if (depth < maxDepth && !skipDirName(ent.name, platform)) queue.push({ dir: path.join(dir, ent.name), depth: depth + 1 });
       } else if (ent.isFile() && nfc(ent.name) === want) {
-        found.push(path.join(dir, ent.name));
+        res.found.push(path.join(dir, ent.name));
       }
     }
   }
-  return { found, visited, timedOut };
+  return res;
 }
 
 /** SHA-256 of a whole file, streamed, abandoned when no bytes arrive for `idleMs` (a cloud placeholder that is not local) or when it is longer than `expectedSize`. */
@@ -232,9 +246,12 @@ async function locatePickedFile(q, deps = {}) {
   const t0 = now();
   const stats = { roots: roots.length, spotlight: 0, walkDirs: 0, walkTimedOut: false, candidates: 0, hashed: 0, matches: 0 };
 
-  const [fromSpotlight, walked] = await Promise.all([
+  const walkBudget = deps.walkBudgetMs || WALK_BUDGET_MS;
+  const walked = { found: [], visited: 0, timedOut: false };
+  const [fromSpotlight] = await Promise.all([
     deps.useMdfind === false ? [] : mdfindCandidates(q.name, { home, platform, execFile: deps.execFile, timeoutMs: deps.mdfindTimeoutMs }),
-    walkForFile(roots, q.name, { deadline: t0 + (deps.walkBudgetMs || WALK_BUDGET_MS), now, platform, fsp, maxDepth: deps.maxDepth, maxDirs: deps.maxDirs }),
+    // the walk checks its clock between folders; a single stalled stat/readdir (a dead network volume) is abandoned after the budget + 1 s with whatever was found so far
+    withTimeout(walkForFile(roots, q.name, { deadline: t0 + walkBudget, now, platform, fsp, maxDepth: deps.maxDepth, maxDirs: deps.maxDirs, state: walked, dirTimeoutMs: deps.dirTimeoutMs }), walkBudget + 1000, null).then((r) => { if (r === null) walked.timedOut = true; }),
   ]);
   stats.spotlight = fromSpotlight.length;
   stats.walkDirs = walked.visited;
@@ -243,9 +260,8 @@ async function locatePickedFile(q, deps = {}) {
   // exact size, a regular file (never a link), not an evicted cloud placeholder (reading one would start a download); one entry per real file
   const byFile = new Map();
   for (const p of [...fromSpotlight, ...walked.found]) {
-    let st;
-    try { st = await fsp.lstat(p, { bigint: false }); } catch { continue; }
-    if (!st.isFile() || st.size !== q.size) continue;
+    const st = await withTimeout(fsp.lstat(p), deps.lstatTimeoutMs || LSTAT_TIMEOUT_MS, null);
+    if (!st || !st.isFile() || st.size !== q.size) continue;
     if (companyFile.looksLikeCloudPlaceholder(st, platform)) continue;
     const key = st.ino ? `${st.dev}:${st.ino}` : `p:${p.toLowerCase()}`;
     if (!byFile.has(key)) byFile.set(key, { filePath: p, mtimeMs: st.mtimeMs });
@@ -277,6 +293,6 @@ async function locatePickedFile(q, deps = {}) {
 }
 
 module.exports = {
-  validateLocateBody, locateRoots, skipDirName, searchPathAllowed, mdfindArgs, mdfindCandidates, walkForFile, sha256FileIdle, locatePickedFile,
+  validateLocateBody, locateRoots, withTimeout, skipDirName, searchPathAllowed, mdfindArgs, mdfindCandidates, walkForFile, sha256FileIdle, locatePickedFile,
   MAX_FILE_BYTES, WALK_BUDGET_MS, MDFIND_TIMEOUT_MS, WALK_MAX_DEPTH,
 };

@@ -11,6 +11,7 @@ const { mkdtemp, sha } = require('./helpers');
 
 const HEX = 'a'.repeat(64);
 const ok = (over = {}) => ({ name: 'Mine.tcdb', size: 1234, sha256: HEX, lastModified: 1760000000000, ...over });
+const query = (buf, over = {}) => ({ name: 'Mine.tcdb', ext: 'tcdb', size: buf.length, sha256: sha(buf), lastModified: null, ...over });
 const put = (dir, rel, content) => { const f = path.join(dir, rel); fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, content); return f; };
 
 test('validateLocateBody: a plain .rsf / .tcdb name, a positive size up to 1 GiB, 64 hex characters; anything else is BAD_REQUEST', () => {
@@ -113,6 +114,38 @@ test('walkForFile: breadth-first, depth <= 6, no hidden / node_modules, links ne
   assert.equal(c.visited, 1);
 });
 
+test('a stalled volume cannot hold the answer back: a stat/readdir that never returns is abandoned after the budget (+1 s) and what was found so far is used; a stalled lstat just drops that candidate', async () => {
+  const root = mkdtemp();
+  const buf = Buffer.from('company file bytes 0123456789');
+  const good = put(root, 'ok/Mine.tcdb', buf);
+  const hung = path.join(root, 'hung');
+  fs.mkdirSync(hung);
+  // the real fs except that `hung` never answers (a dead network mount)
+  const fsp = { ...fs.promises, stat: (p, o) => (p === hung ? new Promise(() => {}) : fs.promises.stat(p, o)), lstat: (p, o) => (/stalled/.test(p) ? new Promise(() => {}) : fs.promises.lstat(p, o)) };
+  put(root, 'ok/stalled/Mine.tcdb', buf);
+  const t0 = Date.now();
+  const r = await lf.locatePickedFile(query(buf), { roots: [root], useMdfind: false, platform: 'linux', fsp, walkBudgetMs: 150, lstatTimeoutMs: 100, dirTimeoutMs: 50 });
+  assert.ok(Date.now() - t0 < 4000, `answered in ${Date.now() - t0} ms`);
+  assert.equal(r.found, true);
+  assert.equal(r.filePath, good, 'the file the walk reached before the stall');
+  assert.equal(await lf.withTimeout(new Promise(() => {}), 20, 'late'), 'late');
+  assert.equal(await lf.withTimeout(Promise.reject(new Error('x')), 20, 'failed'), 'failed');
+  assert.equal(await lf.withTimeout(Promise.resolve(7), 20, 'late'), 7);
+});
+
+test('walkForFile: an unreadable folder is skipped without counting as a stall (three stalls end the walk, any number of unreadable folders do not)', async () => {
+  const root = mkdtemp();
+  const f = put(root, 'z/Mine.tcdb', 'x');
+  for (let i = 0; i < 5; i++) fs.mkdirSync(path.join(root, `a${i}`));
+  const fsp = { ...fs.promises, readdir: (p, o) => (/[\\/]a\d$/.test(p) ? Promise.reject(Object.assign(new Error('EACCES'), { code: 'EACCES' })) : fs.promises.readdir(p, o)) };
+  const r = await lf.walkForFile([root], 'Mine.tcdb', { deadline: Date.now() + 10000, fsp });
+  assert.deepEqual(r.found, [f]);
+  const hang = { ...fs.promises, stat: (p, o) => (/[\\/]a\d$/.test(p) ? new Promise(() => {}) : fs.promises.stat(p, o)) };
+  const h = await lf.walkForFile([root], 'Mine.tcdb', { deadline: Date.now() + 10000, fsp: hang, dirTimeoutMs: 30 });
+  assert.equal(h.timedOut, true, 'three stalled folders end the walk');
+  assert.deepEqual(h.found, [], 'z/ was queued after the stalled a0..a4');
+});
+
 test('sha256FileIdle: the digest of the whole content; a stalled read and a file that grows past its size are abandoned', async () => {
   const dir = mkdtemp();
   const f = put(dir, 'x.tcdb', Buffer.from('hello world'));
@@ -126,7 +159,6 @@ test('sha256FileIdle: the digest of the whole content; a stalled read and a file
 });
 
 // ── locatePickedFile ──
-const query = (buf, over = {}) => ({ name: 'Mine.tcdb', ext: 'tcdb', size: buf.length, sha256: sha(buf), lastModified: null, ...over });
 const locate = (q, roots, extra = {}) => lf.locatePickedFile(q, { roots, useMdfind: false, platform: 'linux', ...extra });
 
 test('locatePickedFile: one file with the same name, size and content is found; its path is the answer', async () => {
