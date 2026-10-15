@@ -36,8 +36,15 @@ test('a complete, consistent dist: 7 files, binaries and blockmaps first, the fe
   for (const n of ['TexaCore-ERP-9.9.9-arm64.zip', 'TexaCore-ERP-9.9.9-arm64.dmg', 'TexaCore-ERP-9.9.9-arm64.zip.blockmap']) assert.ok(at(n) >= 0 && at(n) < at('latest-mac.yml'), `${n} goes up before latest-mac.yml`);
   for (const n of ['TexaCore-ERP-Setup-9.9.9.exe', 'TexaCore-ERP-Setup-9.9.9.exe.blockmap']) assert.ok(at(n) >= 0 && at(n) < at('latest.yml'), `${n} goes up before latest.yml`);
   assert.ok(!p.upload.some((n) => n.endsWith('.dmg.blockmap')), 'the dmg blockmap is not part of the set (nothing reads it)');
-  assert.match(p.commands.join('\n'), /gh release upload v9\.9\.9-windows-test --repo feras1960\/TexaCore-Installer --clobber .*\.exe\.blockmap/);
-  assert.match(p.commands.join('\n'), /gh release upload v9\.9\.9 --repo feras1960\/TexaCore-Installer --clobber .*zip\.blockmap/);
+  // ONE release (2.0.3 on): both platforms' binaries and blockmaps in the first command, both feeds in the second, nothing for another tag
+  const cmds = p.commands.filter((c) => c.startsWith('gh release upload'));
+  assert.equal(cmds.length, 2);
+  assert.ok(cmds.every((c) => c.startsWith('gh release upload v9.9.9 --repo feras1960/TexaCore-Installer --clobber ')));
+  assert.match(cmds[0], /zip\.blockmap.*|\.exe\.blockmap/);
+  assert.ok(cmds[0].includes('Setup-9.9.9.exe.blockmap') && cmds[0].includes('arm64.zip.blockmap') && cmds[0].includes('arm64.dmg') && !cmds[0].includes('latest'));
+  assert.ok(cmds[1].includes('latest-mac.yml') && cmds[1].includes('latest.yml') && !/\.(exe|zip|dmg|blockmap)"/.test(cmds[1]), 'the feeds go up LAST, together, after everything they name');
+  assert.ok(!p.commands.join('\n').includes('windows-test'));
+  assert.deepEqual(p.upload.slice(-2).sort(), ['latest-mac.yml', 'latest.yml']);
   assert.ok(p.files.every((f) => /^[0-9a-f]{64}$/.test(f.sha256)));
 });
 
@@ -75,9 +82,17 @@ test('--blockmaps-only (a release already live without them): only the blockmaps
   assert.deepEqual(p.upload.sort(), ['TexaCore-ERP-9.9.9-arm64.zip.blockmap', 'TexaCore-ERP-Setup-9.9.9.exe.blockmap']);
   const text = p.commands.join('\n');
   assert.match(text, /gh release upload v9\.9\.9 --repo feras1960\/TexaCore-Installer "[^"]*arm64\.zip\.blockmap"/);
-  assert.match(text, /gh release upload v9\.9\.9-windows-test --repo feras1960\/TexaCore-Installer "[^"]*Setup-9\.9\.9\.exe\.blockmap"/, 'Windows lives in its own (pre-)release');
+  assert.match(text, /gh release upload v9\.9\.9 --repo feras1960\/TexaCore-Installer "[^"]*arm64\.zip\.blockmap" "[^"]*Setup-9\.9\.9\.exe\.blockmap"/, 'Windows is in the same release, one command');
   assert.match(text, /select\(\.name=="TexaCore-ERP-9\.9\.9-arm64\.zip"\) \| \.digest.*= "sha256:[0-9a-f]{64}"/, 'proves the published file is the one in dist/');
   assert.ok(!/--clobber/.test(text));
+});
+
+test('the older layout is still expressible: --win-tag v<x>-windows-test sends each platform to its own release', () => {
+  const { d } = dist();
+  const p = planRelease({ dist: d, version: '9.9.9', winTag: 'v9.9.9-windows-test' });
+  const text = p.commands.join('\n');
+  assert.match(text, /gh release upload v9\.9\.9-windows-test --repo feras1960\/TexaCore-Installer --clobber .*\.exe\.blockmap/);
+  assert.match(text, /gh release upload v9\.9\.9 --repo feras1960\/TexaCore-Installer --clobber .*zip\.blockmap/);
 });
 
 test('readBlockmap reads electron-builder\'s gzip JSON and totals the block sizes', () => {

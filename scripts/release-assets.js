@@ -5,7 +5,9 @@
 // checks it, and prints. (Earlier releases were assembled by hand and shipped without the .blockmap files, so electron-updater on Windows could never use a
 // differential download, and a later release could not diff against them.)
 //
-//   node scripts/release-assets.js [--dist dist] [--version <x.y.z>] [--mac-tag v<x.y.z>] [--win-tag v<x.y.z>-windows-test] [--json] [--blockmaps-only]
+//   node scripts/release-assets.js [--dist dist] [--version <x.y.z>] [--mac-tag v<x.y.z>] [--win-tag v<x.y.z>] [--json] [--blockmaps-only]
+//   Both platforms go into ONE release, v<x.y.z> (2.0.3 on): all binaries and blockmaps first, then the two feeds (latest-mac.yml, latest.yml) last. --mac-tag / --win-tag only exist for
+//   the older layout (Windows in its own v<x.y.z>-windows-test pre-release): given different tags, each platform is uploaded to its own release.
 //   --blockmaps-only  for a release that is ALREADY live without its blockmaps (2.0.1): only the blockmaps are uploaded — but first prove that dist/ holds the very files that were published
 //
 //   Windows   latest.yml · TexaCore-ERP-Setup-<v>.exe · TexaCore-ERP-Setup-<v>.exe.blockmap
@@ -85,31 +87,39 @@ function planRelease({ dist, version, platforms = ['win', 'mac'], blockmapsOnly 
     add(zip, 'binary', 'mac'); add(dmg, 'binary', 'mac'); checkListed(y, zip, 'mac'); checkListed(y, dmg, 'mac'); checkBlockmap(zip, 'mac');
     add('latest-mac.yml', 'feed', 'mac');
   }
-  // GitHub holds the two platforms in DIFFERENT releases: macOS in v<version> (the "Latest" release — the Mac self-updater reads releases/latest/download/latest-mac.yml), Windows in a
-  // separate pre-release (v<version>-windows-test). Upload each group to its own tag; within a group the feed goes LAST (a client reads the yml, then fetches what it names).
-  const tags = { mac: macTag || `v${version}`, win: winTag || `v${version}-windows-test` };
+  // 2.0.3 on: ONE release v<version> carries both platforms (macOS: the Mac self-updater reads releases/latest/download/latest-mac.yml; Windows: electron-updater reads latest.yml
+  // of the latest normal release). Whatever the tags, the files of a tag go up as ONE group - every binary and blockmap first, EVERY feed last (a client reads a feed, then fetches what it names).
+  // (Releases up to 2.0.2 kept Windows in a separate pre-release v<version>-windows-test: pass --win-tag for that.)
+  const tags = { mac: macTag || `v${version}`, win: winTag || `v${version}` };
   const q = (n) => `"${path.join(dist, n)}"`;
   const commands = [];
   const upload = [];
+  const groups = new Map();                       // tag -> { platforms: [], files: [] }
   for (const platform of ['mac', 'win']) {
     const mine = files.filter((f) => f.platform === platform);
     if (!mine.length) continue;
-    const feed = mine.filter((f) => f.role === 'feed').map((f) => f.name);
-    const rest = mine.filter((f) => f.role !== 'feed' && (!blockmapsOnly || f.role === 'blockmap')).map((f) => f.name);
+    const g = groups.get(tags[platform]) || { platforms: [], files: [] };
+    g.platforms.push(platform); g.files.push(...mine);
+    groups.set(tags[platform], g);
+  }
+  for (const [tag, g] of groups) {
+    const feed = g.files.filter((f) => f.role === 'feed').map((f) => f.name);
+    const rest = g.files.filter((f) => f.role !== 'feed' && (!blockmapsOnly || f.role === 'blockmap')).map((f) => f.name);
+    const label = g.platforms.join(' + ');
     if (blockmapsOnly) {
-      commands.push(`# ${platform}: release ${tags[platform]} is already live — add ONLY the blockmap(s), and only if dist/ holds the very files that were published (GitHub keeps each asset's sha256):`);
-      for (const f of mine.filter((x) => x.role === 'binary' && rest.includes(`${x.name}.blockmap`))) {
-        commands.push(`test "$(gh release view ${tags[platform]} --repo ${REPO} --json assets --jq '.assets[] | select(.name=="${f.name}") | .digest')" = "sha256:${f.sha256}" && echo "${f.name}: identical to the published file"`);
+      commands.push(`# ${label}: release ${tag} is already live — add ONLY the blockmap(s), and only if dist/ holds the very files that were published (GitHub keeps each asset's sha256):`);
+      for (const f of g.files.filter((x) => x.role === 'binary' && rest.includes(`${x.name}.blockmap`))) {
+        commands.push(`test "$(gh release view ${tag} --repo ${REPO} --json assets --jq '.assets[] | select(.name=="${f.name}") | .digest')" = "sha256:${f.sha256}" && echo "${f.name}: identical to the published file"`);
       }
-      commands.push(`gh release upload ${tags[platform]} --repo ${REPO} ${rest.map(q).join(' ')}`);
+      commands.push(`gh release upload ${tag} --repo ${REPO} ${rest.map(q).join(' ')}`);
       upload.push(...rest);
     } else {
-      commands.push(`# ${platform}: binaries + blockmaps into ${tags[platform]} (the release must already exist; --clobber replaces a file of the same name), then the feed`);
-      commands.push(`gh release upload ${tags[platform]} --repo ${REPO} --clobber ${rest.map(q).join(' ')}`);
-      commands.push(`gh release upload ${tags[platform]} --repo ${REPO} --clobber ${feed.map(q).join(' ')}`);
+      commands.push(`# ${label}: binaries + blockmaps into ${tag} (the release must already exist; --clobber replaces a file of the same name), then the feed${feed.length > 1 ? 's' : ''}`);
+      commands.push(`gh release upload ${tag} --repo ${REPO} --clobber ${rest.map(q).join(' ')}`);
+      commands.push(`gh release upload ${tag} --repo ${REPO} --clobber ${feed.map(q).join(' ')}`);
       upload.push(...rest, ...feed);
     }
-    commands.push(`gh release view ${tags[platform]} --repo ${REPO} --json assets --jq '.assets[] | [.name, .size, .digest] | @tsv'     # compare with the sha256 list above`);
+    commands.push(`gh release view ${tag} --repo ${REPO} --json assets --jq '.assets[] | [.name, .size, .digest] | @tsv'     # compare with the sha256 list above`);
   }
   return { version, files, tags, upload, problems, commands };
 }

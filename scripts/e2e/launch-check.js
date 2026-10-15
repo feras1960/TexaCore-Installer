@@ -1277,8 +1277,9 @@ async function main() {
         if (!r2.located || r2.located.success !== false || r2.located.code !== 'NOT_FOUND') throw new Error(`tcdb located → ${JSON.stringify(r2.located)}`);
         const routes = r2.routes.map((r) => `${r.route}:${r.status}`);
         if (!routes.includes('restore-tcdb:200') || routes.some((r) => r.startsWith('open-picked-tcdb'))) throw new Error(`fallback routes ${routes.join(', ')}`);
-        const copy = path.join(WORK, 'restore-tcdb', 'Outside.tcdb');
-        if (!fs.existsSync(copy)) throw new Error(`no fallback copy at ${copy}: ${walk(path.join(WORK, 'restore-tcdb')).join(', ')}`);
+        const fallbackDir = TCDB_IN_COMPANY_FOLDER ? rashidDir : path.join(WORK, 'restore-tcdb');   // where the upload fallback writes in this run (TEXACORE_TCDB_DIR)
+        const copy = path.join(fallbackDir, 'Outside.tcdb');
+        if (!fs.existsSync(copy)) throw new Error(`no fallback copy at ${copy}: ${walk(fallbackDir).join(', ')}`);
         if (!r2.note || r2.note.testId !== 'live-company-file-note' || !NOTE_NOT_LOCATED_TCDB.test(r2.note.text) || !r2.note.text.includes(copy)) throw new Error(`tcdb note → ${JSON.stringify(r2.note)}`);
         if (fileSha(outTcdb) !== outSha) throw new Error('the file outside was modified');
         if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the fallback restore changed the rows');

@@ -153,6 +153,8 @@ in `test/license-signature.test.js`. Flip the flag only after the cloud signs ev
 `latest.yml` / `latest-mac.yml` carry the version from package.json.
 **Always upload the `.blockmap` files** (`TexaCore-ERP-Setup-<v>.exe.blockmap`, `TexaCore-ERP-<v>-arm64.zip.blockmap`): electron-updater's differential download on Windows needs the blockmap of the NEW version and of the INSTALLED one;
 2.0.0 and 2.0.1 shipped without them. `node scripts/release-assets.js` lists and verifies the complete set (and `--blockmaps-only` adds just the blockmaps to a release that is already live, after proving the published binary is the one in dist/).
-GitHub layout today: macOS is the **Latest** release `v<version>` (`latest-mac.yml`, zip, dmg — the Mac self-updater reads `releases/latest/download/latest-mac.yml`); Windows is a separate **pre-release** `v<version>-windows-test` that holds only the exe
-(no `latest.yml`, so electron-updater finds nothing to update to). That strategy is unchanged here. After the files are live, insert the `licensing.app_versions` row for 2.0.0
+GitHub layout (2.0.3 on): ONE normal release `v<version>` titled "TexaCore ERP <version>" carries BOTH platforms - `TexaCore-ERP-<v>-arm64.dmg`, `.zip`, `.zip.blockmap`, `TexaCore-ERP-Setup-<v>.exe`, `.exe.blockmap`, and the two
+feeds `latest-mac.yml` and `latest.yml` uploaded LAST. The Mac self-updater reads `releases/latest/download/latest-mac.yml`; Windows (`src/win-updater.js`, electron-updater, `allowPrerelease` false) reads `latest.yml` of the latest NORMAL release,
+so Windows clients on 2.0.x see the update through it. Windows is labelled "Beta" only in the release notes (one Arabic notes file with a macOS and a Windows section). Releases up to 2.0.2 kept Windows in a separate pre-release
+`v<version>-windows-test` (no `latest.yml`); older releases are never touched. After the upload run `verify_download_links.sh <version>` (public API, read-only) once the owner has published. After the files are live, insert the `licensing.app_versions` row for 2.0.0
 (not before — clients would be told to fetch a file that does not exist).
