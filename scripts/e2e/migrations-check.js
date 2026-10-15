@@ -27,6 +27,10 @@
 //       OFF leaves the default 'quantity' and the server's own repair `UPDATE fabric_materials SET tracking_mode = NULL WHERE material_type = 'fabric'` (as the app does) works and makes them roll
 //   B5  RESTORE of a .tcdb written by the previous build (no tracking_mode column) into the upgraded install: the cards come back 'quantity' and the restore path repairs them by itself (fabric -> roll)
 //   D   fingerprints: for every function the shipped migrations created or replaced, md5(prosrc) (and owner-side grants / SECURITY DEFINER) on this database equals production's post-image
+//   C1-C4 (with --old-mig-app, the previous build that already carries the first N migrations): C1 it provisions an install and applies its N itself; C2 the new build starts on that data and applies ONLY the rest
+//       (the first N rows keep their ids and timestamps, the data is intact, the company's admin still works); C3 a second start applies 0; C4 that upgraded install == the fresh install (functions, triggers, policies, grants)
+//   E   (with --old-mig-app and --prod-steps) STEP BY STEP: on a 2.0.2-shaped install the files that came after its set are applied ONE AT A TIME (the way production received them) and after each one
+//       every function / trigger / policy / table line the step changed is compared with production's own md5 list taken right after that step
 // ════════════════════════════════════════════════════════════════
 const fs = require('fs');
 const path = require('path');
@@ -40,6 +44,10 @@ function arg(name, def = '') { const i = process.argv.indexOf(`--${name}`); retu
 const WORK = path.resolve(arg('workdir', ''));
 const APP = arg('app', '') ? path.resolve(arg('app')) : '';
 const OLD_APP = arg('old-app', '') ? path.resolve(arg('old-app')) : '';
+// a previous build that ALREADY carries the first N migrations (2.0.2 carries 13 of the 16): the upgrade path 13 -> 16 (C1-C4) and the step-by-step proof against production's per-step images (E)
+const OLD_MIG_APP = arg('old-mig-app', '') ? path.resolve(arg('old-mig-app')) : '';
+// production's md5 lists after each of the migrations that came AFTER the old build's set, as `name=file` pairs separated by commas, in apply order (E)
+const PROD_STEPS = arg('prod-steps', '');
 const PROD_FP = arg('prod-fp', '') ? path.resolve(arg('prod-fp')) : '';
 const WRITE_INV = arg('write-inventory', '');
 if (!arg('workdir')) { console.error('--workdir <dir> is required'); process.exit(2); }
@@ -112,6 +120,35 @@ async function fingerprint() {
   return lines.sort();
 }
 const fnMap = (lines) => new Map(lines.filter((l) => l.startsWith('F|')).map((l) => { const [, sig, md5, secdef, acl] = l.split('|'); return [sig, { md5, secdef, acl: acl || '', line: l }]; }));
+
+const { spawn } = require('child_process');
+const psqlOf = (app) => path.join(resOf(app), 'bin', 'pg', 'bin', 'psql');
+/** One file the way the runner applies it: psql over stdin, ON_ERROR_STOP=1 (the file's own BEGIN … COMMIT is one transaction). Resolves { code, err } — never logs the SQL. */
+function applyFile(app, secrets, buf) {
+  return new Promise((resolve, reject) => {
+    const p = spawn(psqlOf(app), ['-X', '-w', '-p', String(PORTS.pg), '-h', '127.0.0.1', '-U', 'postgres', '-d', 'postgres', '-v', 'ON_ERROR_STOP=1', '-f', '-'], { env: { ...process.env, PGPASSWORD: secrets.dbPassword } });
+    let err = '';
+    p.stdout.on('data', () => {}); p.stderr.on('data', (d) => { err += d.toString(); });
+    p.stdin.on('error', () => {}); p.on('error', reject);
+    p.on('close', (code) => resolve({ code, err: err.split('\n').filter((l) => /ERROR|FATAL/.test(l)).slice(0, 3).join(' | ') }));
+    p.stdin.end(buf);
+  });
+}
+/** Every line of `lines` (a fingerprint) that is not byte-identical in `prevSet` = what a step changed (new or different). */
+const changedLines = (lines, prevSet) => lines.filter((l) => !prevSet.has(l));
+/** Compare the F-lines a step touched with production's list taken right after it: md5(prosrc), SECURITY DEFINER flag and grants. */
+function compareFns(touchedSigs, local, prod) {
+  const bad = []; let same = 0;
+  for (const s of touchedSigs) {
+    const p = prod.get(s); const l = local.get(s);
+    if (!p) { bad.push(`${s}: not in production's image`); continue; }
+    if (!l) { bad.push(`${s}: missing here`); continue; }
+    if (p.md5 !== l.md5) bad.push(`${s}: md5 ${l.md5.slice(0, 8)} here, ${p.md5.slice(0, 8)} in production`);
+    else if (p.secdef !== l.secdef || p.acl !== l.acl) bad.push(`${s}: same body, but secdef/grants differ (here ${l.secdef} ${l.acl.slice(0, 60)} / production ${p.secdef} ${p.acl.slice(0, 60)})`);
+    else same++;
+  }
+  return { bad, same };
+}
 
 /** Start an app on `userData` and wait until it is ready; returns { child, secrets, logFile }. */
 async function boot(userData, app, tag) {
@@ -388,8 +425,119 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
     });
   }
 
+  // ═════════ C: an UPGRADE from a build that already carries the first N migrations (2.0.2 -> 2.0.3: 13 applied, 3 to come) ═════════
+  let cPostFp = null;
+  if (OLD_MIG_APP) {
+    const C = path.join(WORK, 'upgrade-mig');
+    let o = null; let oc = null; let cardOld = null; let counts0 = null; let rows0 = null; let nPrev = 0; let n1 = null;
+    const countsOf = async () => (await pg(`SELECT (SELECT count(*)::int FROM public.companies) c, (SELECT count(*)::int FROM public.tenants) t, (SELECT count(*)::int FROM auth.users) u, (SELECT count(*)::int FROM public.chart_of_accounts) a, (SELECT count(*)::int FROM public.fabric_materials) m`)).rows[0];
+    try {
+      o = await boot(C, OLD_MIG_APP, 'oldmig');
+      await R.check('C1 UPGRADE from the previous build that already has its set: it provisions an install and applies ITS migrations itself (a strict prefix of this build\'s list); a company and one material card with a typed code', async () => {
+        const rows = await appliedRows(); nPrev = rows.length;
+        const got = rows.map((r) => r.name);
+        if (!nPrev || nPrev >= NAMES.length) throw new Error(`the old build applied ${nPrev}, this build ships ${NAMES.length}`);
+        if (JSON.stringify(got) !== JSON.stringify(NAMES.slice(0, nPrev))) throw new Error(`the old build's set is not a prefix of this build's list: ${got.join(',')}`);
+        oc = await createCompany(o.secrets, 'c');
+        cardOld = (await pg(`INSERT INTO public.fabric_materials (tenant_id, company_id, code, name_ar) VALUES ($1,$2,'OLD-1','بطاقة قديمة') RETURNING id`, [oc.tenantId, oc.companyId])).rows[0];
+        counts0 = await countsOf(); rows0 = (await appliedRows()).map((r) => `${r.id}:${r.applied_at.toISOString()}`);
+        const v = JSON.parse(fs.readFileSync(path.join(C, 'texacore-data', 'bootstrap.json'), 'utf8'));
+        return `${nPrev} applied by the old build (${got.map((n) => n.replace(/^20270210/, '').split('_')[0]).join(' ')}); company ${oc.companyId.slice(0, 8)}…, card OLD-1, counts ${JSON.stringify(counts0)}; marker baseline ${String(v.baselineSha256).slice(0, 12)}…`;
+      });
+    } finally { if (o) await stopApp(o.child, C); }
+    let cu = null;
+    try {
+      cu = await boot(C, APP, 'newmig1');
+      await R.check('C2 the NEW build starts on that data: ONLY the missing migrations apply (the first rows keep their ids and timestamps), the data is intact, the company\'s admin logs in and reads the old card, a new card gets its code', async () => {
+        const rows = await appliedRows();
+        const got = rows.map((r) => r.name);
+        if (JSON.stringify(got) !== JSON.stringify(NAMES)) throw new Error(`applied ${got.length}: ${got.join(', ')}`);
+        const now = rows.map((r) => `${r.id}:${r.applied_at.toISOString()}`);
+        if (JSON.stringify(now.slice(0, nPrev)) !== JSON.stringify(rows0)) throw new Error('the rows the old build wrote changed (ids / timestamps)');
+        const counts1 = await countsOf();
+        if (JSON.stringify(counts1) !== JSON.stringify(counts0)) throw new Error(`data changed: ${JSON.stringify(counts0)} -> ${JSON.stringify(counts1)}`);
+        const log = mlog(C);
+        const ok = (log.match(/✅ \(\d+\/\d+\)/g) || []).length;
+        if (ok !== NAMES.length || /❌|🛑/.test(log)) throw new Error(`migrations.log: ${ok} ✅ lines (expected ${NAMES.length} = ${nPrev} by the old build + ${NAMES.length - nPrev} by this one), errors ${/❌|🛑/.test(log)}`);
+        const login = await request('POST', `${API}/auth/v1/token?grant_type=password`, { headers: { apikey: cu.secrets.anonKey }, body: { email: 'owner-c@mig.test', password: 'MigPass#2026' } });
+        if (login.status !== 200) throw new Error(`the old admin cannot log in: ${login.status} ${login.text.slice(0, 160)}`);
+        const auth = { apikey: cu.secrets.anonKey, Authorization: `Bearer ${login.json.access_token}`, Prefer: 'return=representation' };
+        const rest = await request('GET', `${API}/rest/v1/fabric_materials?select=code&id=eq.${cardOld.id}`, { headers: auth });
+        if (rest.status !== 200 || !rest.json.length || rest.json[0].code !== 'OLD-1') throw new Error(`REST read of the old card → ${rest.status} ${rest.text.slice(0, 160)}`);
+        const r1 = await request('POST', `${API}/rest/v1/fabric_materials`, { headers: auth, body: { tenant_id: oc.tenantId, company_id: oc.companyId, code: null, name_ar: 'بطاقة جديدة' } });
+        if (r1.status !== 201 || r1.json[0].code !== 'M-000001') throw new Error(`new card on the upgraded install → ${r1.status} ${r1.text.slice(0, 200)}`);
+        n1 = now;
+        cPostFp = await fingerprint();
+        return `${NAMES.length - nPrev} applied on start (${NAMES.slice(nPrev).map((n) => n.replace(/^2027021/, '').split('_')[0]).join(' ')}), the ${nPrev} older rows untouched; counts ${JSON.stringify(counts1)} unchanged; OLD-1 readable by its admin; new card ${r1.json[0].code}; migrations.log ${ok} ✅`;
+      });
+    } finally { if (cu) await stopApp(cu.child, C); }
+    let c2 = null;
+    try {
+      c2 = await boot(C, APP, 'newmig2');
+      await R.check('C3 a SECOND start of the new build applies 0: the table, its ids and timestamps are unchanged', async () => {
+        const now = (await appliedRows()).map((r) => `${r.id}:${r.applied_at.toISOString()}`);
+        if (JSON.stringify(now) !== JSON.stringify(n1)) throw new Error('the migration table changed on the second start');
+        const log = mlog(C);
+        if (!/All migrations already applied/.test(log)) throw new Error(`no "already applied" line in migrations.log:\n${log.slice(-500)}`);
+        const okLines = (log.match(/✅ \(\d+\/\d+\)/g) || []).length;
+        if (okLines !== NAMES.length) throw new Error(`${okLines} ✅ lines in total (expected ${NAMES.length}: the second start must add none)`);
+        return `${now.length} rows, same ids and timestamps; "All migrations already applied", still ${okLines} ✅`;
+      });
+    } finally { if (c2) await stopApp(c2.child, C); }
+    await R.check('C4 the install upgraded from the previous build (set of ' + nPrev + ') and the fresh install have the SAME functions, triggers, policies and table grants (upgrade path == fresh path)', async () => {
+      if (!cPostFp || !freshFp) throw new Error('no fingerprint to compare');
+      const sx = new Set(cPostFp); const sy = new Set(freshFp);
+      const d = [...cPostFp.filter((l) => !sy.has(l)).map((l) => `only upgraded: ${l}`), ...freshFp.filter((l) => !sx.has(l)).map((l) => `only fresh: ${l}`)];
+      if (d.length) throw new Error(`${d.length} difference(s), first: ${d.slice(0, 4).join(' | ')}`);
+      return `${cPostFp.length} fingerprint lines identical (F ${cPostFp.filter((l) => l.startsWith('F|')).length}, G ${cPostFp.filter((l) => l.startsWith('G|')).length}, P ${cPostFp.filter((l) => l.startsWith('P|')).length}, T ${cPostFp.filter((l) => l.startsWith('T|')).length})`;
+    });
+  }
+
+  // ═════════ E: STEP BY STEP against production's own image after each step ═════════
+  if (OLD_MIG_APP && PROD_STEPS) {
+    const E = path.join(WORK, 'steps');
+    let e = null;
+    try {
+      e = await boot(E, OLD_MIG_APP, 'steps');
+      await R.check('E step by step: the files that came after the old build\'s set are applied ONE AT A TIME (psql over stdin, ON_ERROR_STOP, the way production got them); after each, the whole fingerprint (functions md5 + SECURITY DEFINER + grants, triggers, policies, table grants + RLS) differs from production\'s own list taken right after that step by NOTHING MORE than it differed before the step (the baseline\'s redacted / local-extra differences)', async () => {
+        const n = (await appliedRows()).length;
+        const rest = NAMES.slice(n);
+        const fpFiles = PROD_STEPS.split(',').map((s) => path.resolve(s.trim())).filter(Boolean);
+        if (fpFiles.length !== rest.length + 1) throw new Error(`--prod-steps needs ${rest.length + 1} files (the image after the old build's set, then one per remaining migration: ${rest.join(', ')}); got ${fpFiles.length}`);
+        const prodOf = (f) => new Set(fs.readFileSync(f, 'utf8').split('\n').filter(Boolean));
+        const sets = (loc, prod) => { const ls = new Set(loc); return { localOnly: loc.filter((l) => !prod.has(l)), prodOnly: [...prod].filter((l) => !ls.has(l)) }; };
+        let loc = await fingerprint();
+        const base = sets(loc, prodOf(fpFiles[0]));
+        const baseLocal = new Set(base.localOnly); const baseProd = new Set(base.prodOnly);
+        const rows = [`start (${n} applied): ${base.localOnly.length} local-only / ${base.prodOnly.length} production-only lines (baseline differences, accepted as the start point)`];
+        const problems = [];
+        for (let i = 0; i < rest.length; i++) {
+          const m = manifest.migrations.find((x) => x.name === rest[i]);
+          const before = new Set(loc);
+          const r = await applyFile(OLD_MIG_APP, e.secrets, fs.readFileSync(path.join(GEN, m.file)));
+          if (r.code !== 0) throw new Error(`${m.name}: psql exit ${r.code} — ${r.err}`);
+          loc = await fingerprint();
+          const ch = changedLines(loc, before);
+          const prod = prodOf(fpFiles[i + 1]);
+          const s = sets(loc, prod);
+          const newLocal = s.localOnly.filter((l) => !baseLocal.has(l));
+          const newProd = s.prodOnly.filter((l) => !baseProd.has(l));
+          const fCh = ch.filter((l) => l.startsWith('F|')).length;
+          const fOk = ch.filter((l) => l.startsWith('F|') && prod.has(l)).length;
+          rows.push(`${m.name.replace(/^2027021/, '')}: changed ${ch.length} lines (F ${fCh}, G ${ch.filter((l) => l.startsWith('G|')).length}, P ${ch.filter((l) => l.startsWith('P|')).length}, T ${ch.filter((l) => l.startsWith('T|')).length}); functions identical to production (md5+secdef+grants): ${fOk}/${fCh}; new differences: ${newLocal.length} local-only / ${newProd.length} production-only`);
+          for (const l of newLocal.slice(0, 6)) problems.push(`${m.name}: here but not in production: ${l.slice(0, 150)}`);
+          for (const l of newProd.slice(0, 6)) problems.push(`${m.name}: in production but not here: ${l.slice(0, 150)}`);
+        }
+        ev.steps = rows;
+        fs.writeFileSync(path.join(WORK, 'steps-report.json'), JSON.stringify({ rows, problems }, null, 2));
+        if (problems.length) throw new Error(`${problems.length} difference(s) from production after a step:\n  ${problems.slice(0, 12).join('\n  ')}`);
+        return rows.join(' || ');
+      });
+    } finally { if (e) await stopApp(e.child, E); }
+  }
+
   // ═════════ D: fingerprints against production's post-image ═════════
-  const post = postFp || freshFp;
+  const post = postFp || cPostFp || freshFp;
   if (PROD_FP && post) {
     await R.check('D fingerprints: every function the shipped migrations created or replaced has, on this database, the md5(prosrc) (and SECURITY DEFINER flag, and grants) of production\'s post-image', async () => {
       const prod = fnMap(fs.readFileSync(PROD_FP, 'utf8').split('\n').filter(Boolean));
