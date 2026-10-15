@@ -18,6 +18,7 @@ const netGuard = require('./net-guard');
 const cloudClient = require('./cloud-client');
 const BackupManager = require('./backup-manager');
 const companyFile = require('./company-file');
+const locateFile = require('./locate-file');
 const { RsfReader, detectFileType } = require('./rsf-reader');
 const { RsfExporter, RsfSyncManager } = require('./rsf-exporter');
 const { PORTS, harnessAllowed } = require('./ports');
@@ -1872,8 +1873,23 @@ const sameFile = (a, b) => {
 /** What a coded file/key error becomes on the wire: a status + the code the page translates (the text is bilingual for logs). */
 function fileErrorStatus(code) {
   return ({ PICK_EXPIRED: 404, FILE_NOT_FOUND: 404, FILE_NOT_LOCAL: 504, FILE_TOO_LARGE: 413, EXPORT_EXISTS: 409, EXPORT_IS_LIVE_FILE: 409,
-    EXPORT_BUSY: 409, TCDB_PASSPHRASE_REQUIRED: 422, TCDB_BAD_PASSPHRASE: 422, TCDB_CORRUPT: 422, LEGACY_TCDB: 422, PASSPHRASE_TOO_SHORT: 400, BAD_REQUEST: 400, SERVICES_DOWN: 503, EXPORT_EMPTY: 409, NO_PERMISSION: 403 })[code] || 500;
+    EXPORT_BUSY: 409, TCDB_PASSPHRASE_REQUIRED: 422, TCDB_BAD_PASSPHRASE: 422, TCDB_CORRUPT: 422, LEGACY_TCDB: 422, PASSPHRASE_TOO_SHORT: 400, BAD_REQUEST: 400, SERVICES_DOWN: 503, EXPORT_EMPTY: 409, NO_PERMISSION: 403, LOCATE_BUSY: 429, BAD_JSON: 400, BODY_TOO_LARGE: 413 })[code] || 500;
 }
+
+/** Keep a picked / located company file under an opaque reference and describe it to the page (the answer of POST /api/pick-company-file and /api/locate-picked-file). */
+function registerPickedFile(filePath, ext) {
+  let st = null;
+  try { st = fs.statSync(filePath); } catch { /* an evicted iCloud file may have no stat - the read reports it */ }
+  const ref = pickedFiles.register({ filePath, type: ext, name: path.basename(filePath), size: st ? st.size : 0 });
+  // (filePath/dir are for DISPLAY — "the company file will be saved beside it"; the ref is what the page sends back)
+  return {
+    success: true, type: ext, ref, name: path.basename(filePath), filePath, dir: path.dirname(filePath), size: st ? st.size : 0,
+    cloudOnly: !!(st && companyFile.looksLikeCloudPlaceholder(st)),
+    cloudFolder: companyFile.detectCloudFolder(path.dirname(filePath)),   // iCloud / OneDrive / … folder: the page warns once
+    companyFilePath: ext === 'rsf' ? companyFile.rsfCompanyFilePlan(filePath).tcdbPath : null,
+  };
+}
+let locateInFlight = false;
 
 /**
  * The company-file routes of the admin API. Called after the server's guards (loopback-only, cross-origin refusal for the destructive set,
@@ -1992,18 +2008,45 @@ async function handleCompanyFileRoutes(req, res) {
         const filePath = path.resolve(r.filePaths[0]);
         const ext = path.extname(filePath).toLowerCase().slice(1);
         if (ext !== 'rsf' && ext !== 'tcdb') { sendJson(res, 400, { success: false, code: 'BAD_REQUEST', error: 'Unsupported file type' }); return true; }
-        let st = null;
-        try { st = fs.statSync(filePath); } catch { /* an evicted iCloud file may have no stat - the read reports it */ }
-        const ref = pickedFiles.register({ filePath, type: ext, name: path.basename(filePath), size: st ? st.size : 0 });
         fileLog('[Pick] picked', ext, filePath);
-        // (filePath/dir are for DISPLAY — "the company file will be saved beside it"; the ref is what the page sends back)
-        sendJson(res, 200, {
-          success: true, type: ext, ref, name: path.basename(filePath), filePath, dir: path.dirname(filePath), size: st ? st.size : 0,
-          cloudOnly: !!(st && companyFile.looksLikeCloudPlaceholder(st)),
-          cloudFolder: companyFile.detectCloudFolder(path.dirname(filePath)),   // iCloud / OneDrive / … folder: the page warns once
-          companyFilePath: ext === 'rsf' ? companyFile.rsfCompanyFilePlan(filePath).tcdbPath : null,
-        });
+        sendJson(res, 200, registerPickedFile(filePath, ext));
         return true;
+      }
+
+      // ── POST /api/locate-picked-file {name, size, lastModified, sha256}: 2.0.3 — the page picked the file in the BROWSER's own chooser (always in front, any mode),
+      //    so it holds the bytes but not the place. Find the real file on this computer by exact name + exact size + the SHA-256 of the whole content, register it exactly
+      //    like a native pick (so «company file beside the Rashid file» and «open the .tcdb IN PLACE» keep working), or answer NOT_FOUND (HTTP 200) so the page falls back.
+      //    A path is revealed ONLY for a file whose full content hashes equal to the caller's digest - the caller already has those bytes. ──
+      case 'POST /api/locate-picked-file': {
+        const q = locateFile.validateLocateBody(await readJsonBody(req));
+        if (locateInFlight) throw Object.assign(new Error('A search for a picked file is already running'), { code: 'LOCATE_BUSY' });
+        locateInFlight = true;
+        try {
+          const override = (HARNESS_OK && process.env.TEXACORE_E2E_LOCATE_ROOTS)
+            ? process.env.TEXACORE_E2E_LOCATE_ROOTS.split(path.delimiter).filter(Boolean) : null;   // isolated test runs never scan the real profile
+          let companyDirs = [];
+          try {
+            for (const co of (loadConfig().companies || [])) {
+              if (co && co.tcdbPath) companyDirs.push(path.dirname(co.tcdbPath));
+              if (co && co.storagePath) companyDirs.push(co.storagePath);
+            }
+          } catch { companyDirs = []; }
+          const userDirs = [];
+          for (const n of ['desktop', 'documents', 'downloads']) { try { userDirs.push(app.getPath(n)); } catch { /* not available on this platform */ } }
+          const roots = locateFile.locateRoots({ override, companyDirs, defaultDir: companyFile.defaultCompanyDir(), extraRoots: userDirs });
+          const r = await locateFile.locatePickedFile(q, { roots, useMdfind: !override });
+          // (counts only - never the candidate list)
+          fileLog('[Pick] locate', q.ext, `roots=${r.stats.roots} spotlight=${r.stats.spotlight} dirs=${r.stats.walkDirs}${r.stats.walkTimedOut ? ' (time budget)' : ''} candidates=${r.stats.candidates} hashed=${r.stats.hashed} matches=${r.stats.matches}`);
+          if (!r.found) {
+            sendJson(res, 200, r.reason === 'ambiguous' ? { success: false, code: 'NOT_FOUND', reason: 'ambiguous' } : { success: false, code: 'NOT_FOUND' });
+            return true;
+          }
+          fileLog('[Pick] located', q.ext, r.filePath);
+          sendJson(res, 200, registerPickedFile(r.filePath, q.ext));
+          return true;
+        } finally {
+          locateInFlight = false;
+        }
       }
 
       // ── POST /api/open-picked-tcdb {ref, passphrase?}: open the company file the user picked in the native window and keep working IN it ──
@@ -2064,6 +2107,7 @@ const DESTRUCTIVE_API = new Set([
   // 2.0.2: write files / open native dialogs / read a file the user picked — the same same-machine-origin rule as the rest
   '/api/export-backup', '/api/reveal-in-folder', '/api/pick-company-file', '/api/pick-save-location', '/api/picked-file', '/api/e2e-dialog',
   '/api/open-picked-tcdb',   // 2.0.3: restores the picked company file and keeps syncing into it
+  '/api/locate-picked-file', // 2.0.3: finds the file the page picked in the browser's own chooser (name + size + SHA-256) and registers it like a native pick
 ]);
 // 2.0.0: every admin-API call except /api/ping must carry this install's secret (secrets.json → /config.js, same-origin only;
 // the Electron window gets it over IPC). It keeps other local programs and foreign web pages — which CORS "*" and a loopback
