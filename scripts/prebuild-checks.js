@@ -7,7 +7,7 @@
 //
 //   node scripts/prebuild-checks.js [--platform mac|win|all]    (REQUIRE_LOCAL_FONTS=1 is implied)
 //
-// Checks: baseline files vs BASELINE_PIN.json · the web bundle exists, carries package.json's version and local fonts ·
+// Checks: baseline files vs BASELINE_PIN.json · the incremental migrations (./migrations, fetched by sync-migrations) vs baseline/MIGRATIONS_PIN.json · the web bundle exists, carries package.json's version and local fonts ·
 // the bundled PostgreSQL is 17.x for each target platform · the pinned cloudflared (mac) is present, signed and runs · no secret-looking env file is about to be packaged.
 // ════════════════════════════════════════════════════════════════
 const fs = require('fs');
@@ -23,6 +23,33 @@ function checkBaseline(problems) {
   let pin = null;
   try { pin = JSON.parse(fs.readFileSync(path.join(dir, 'BASELINE_PIN.json'), 'utf8')); } catch { /* reported below */ }
   for (const p of verifyDir(dir, pin)) problems.push(`baseline: ${p} — run: node scripts/sync-baseline.js --erp <ERP checkout>`);
+}
+
+function checkMigrations(problems) {
+  // 2.0.2+: the incremental set production received after the baseline cut. The PIN (baseline/MIGRATIONS_PIN.json: names, order, sha256 - no SQL) is committed; the SQL itself is
+  // fetched from the private ERP repo at build time into ./migrations (git-ignored) by scripts/sync-migrations.js and packed into the encrypted container by pack-baseline.
+  // Tied to the pinned baseline: a re-cut that is not followed by a regenerated pin fails here.
+  const MM = require('./lib/migrations-manifest');
+  const bdir = path.join(ROOT, 'baseline');
+  const fix = 'run: node scripts/sync-migrations.js --erp <ERP checkout>';
+  let pin = null;
+  try { pin = MM.loadMigrationsPin(bdir); } catch (e) { problems.push(`migrations: baseline/${MM.PIN_FILE} is unreadable (${e.message})`); return; }
+  if (!pin) { problems.push(`migrations: baseline/${MM.PIN_FILE} is missing - a build must say which incremental migrations it ships (an empty list is fine after a baseline re-cut)`); return; }
+  const basePin = JSON.parse(fs.readFileSync(path.join(bdir, 'BASELINE_PIN.json'), 'utf8')).files['production_baseline.sql'].sha256;
+  const pp = MM.checkPin(pin, basePin);
+  for (const p of pp) problems.push(`migrations: ${p}`);
+  if (pp.length) return;
+  const dir = path.join(ROOT, 'migrations');
+  if (!pin.migrations.length) { if (fs.existsSync(dir) && fs.readdirSync(dir).length) problems.push('migrations: ./migrations holds files but the pin lists none - remove ./migrations'); return; }
+  const inv = MM.checkInventory(bdir, pin);
+  for (const p of inv.problems) problems.push(`migrations: ${p}`);
+  if (!fs.existsSync(dir)) { problems.push(`migrations: ./migrations is missing (build output) - ${fix}`); return; }
+  const r = MM.checkManifest(dir, basePin);
+  for (const p of r.problems) problems.push(`migrations: ${p} - ${fix}`);
+  if (r.manifest) {
+    for (const p of MM.checkAgainstPin(r.manifest, pin)) problems.push(`migrations: ${p} - ${fix}`);
+    if (inv.inventory && JSON.stringify(r.manifest.inventoryAfter) !== JSON.stringify(inv.inventory)) problems.push(`migrations: migrations.json inventoryAfter differs from baseline/${MM.INVENTORY_FILE} - ${fix}`);
+  }
 }
 
 function checkFrontend(problems) {
@@ -78,6 +105,7 @@ function checkNoSecrets(problems) {
 function run(platforms) {
   const problems = [];
   checkBaseline(problems);
+  checkMigrations(problems);
   checkFrontend(problems);
   for (const p of platforms) checkPg(p, problems);
   checkNoSecrets(problems);

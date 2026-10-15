@@ -8,6 +8,7 @@ Supersedes `LOCAL_RELEASE_RUNBOOK.md` (1.x: replayed ~1,300 migrations onto the 
 |---|---|---|
 | production schema baseline (`production_baseline.sql`, inventory, storage stubs) | ERP repo `supabase/baseline/` → `scripts/sync-baseline.js` | **only `baseline/BASELINE_PIN.json`** (sha256 + ERP commit). The SQL is private; never commit it. |
 | web bundle (`frontend/`) | ERP `vite build --mode selfhosted` → `scripts/sync-frontend.js` | no (git-ignored) |
+| incremental migrations (2.0.2+: what production received after the baseline cut) | ERP `supabase/migrations/` at `origin/main` → `scripts/sync-migrations.js` → `./migrations/` (build output) → `scripts/pack-baseline.js` → `baseline/migrations.bin` | **only `baseline/MIGRATIONS_PIN.json`** (names, order, sha256, sizes — no SQL). `migrations/` is git-ignored; the SQL and the manifest are never committed to this PUBLIC repo. |
 | PostgreSQL 17.6 (`bin/*/pg`) | mac: `scripts/prepare-pg-mac.sh` (universal EDB tree → arm64) · win: `scripts/prepare-pg-win.js <EDB zip>` | no (git-ignored) |
 | GoTrue / PostgREST / cloudflared binaries | `bin/*/gotrue|postgrest|cloudflared` | yes (as in 1.x) |
 | fonts | `@fontsource/*` devDependencies → `scripts/localize-fonts.js` | no |
@@ -21,13 +22,14 @@ ERP=/path/to/TexaCore2026            # checkout of the release commit
 # 2. installer
 npm ci --prefer-offline
 node scripts/sync-baseline.js --erp $ERP          # copies + VERIFIES against baseline/BASELINE_PIN.json (fails on any difference)
+node scripts/sync-migrations.js --erp $ERP        # 2.0.2+: fetches the pinned incremental migrations from ERP origin/main into ./migrations (git-ignored), every sha256 must equal baseline/MIGRATIONS_PIN.json
 REQUIRE_LOCAL_FONTS=1 node scripts/sync-frontend.js --erp $ERP   # copies dist, localises fonts, runs the ERP's check-dist-version.mjs
 bash scripts/prepare-pg-mac.sh                    # PG 17.6 arm64, relocatable, ad-hoc signed
 CSC_IDENTITY_AUTO_DISCOVERY=false npm run build:mac   # prebuild-checks → electron-builder → afterPack gate
 ```
 
 `afterPack` (scripts/lib/verify-packed.js) FAILS the build if any pinned baseline file is missing from the app or differs from the pin, if the
-packaged web bundle is not this version, if fonts/binaries/bootstrap SQL are missing, or if a 1.x migrations manifest rides along.
+packaged web bundle is not this version, if fonts/binaries/bootstrap SQL are missing, if the migrations container is not exactly `baseline/MIGRATIONS_PIN.json`, or if ANY plaintext SQL rides along (a `resources/migrations` folder, a `.sql` file, DDL text in any file — there is no exception list).
 
 ### Build notes learned on 2026-10-13
 - **One baseline pack per release.** `npm run build:mac` and `npm run build:win` each run `pack-baseline` (fresh key + container). Build both platforms from the same pack — `npm run build:all` (or `publish`), or run the second build without
@@ -72,7 +74,7 @@ would otherwise have talked to an installed app's database** — and the run was
 
 1. ERP: `scripts/schema/build-baseline.sh` (see `supabase/baseline/BASELINE.md`), copy the stub file as it says, commit.
    Optionally export the global reference catalogs from production into `supabase/baseline/reference_data.sql` (loaded before the installer's defaults).
-2. Here: `node scripts/sync-baseline.js --erp $ERP --update-pin` → commit **only** `baseline/BASELINE_PIN.json`.
+2. Here: `node scripts/sync-baseline.js --erp $ERP --update-pin` → commit **only** `baseline/BASELINE_PIN.json`. Then re-pin the incremental migrations: `node scripts/sync-migrations.js --erp $ERP --update-pin --names ""` (the re-cut folded them in) or with the names of the ones production applied after the new cut, in production's order; measure their inventory delta (`scripts/e2e/migrations-check.js --write-inventory <file>`) and install it with `node scripts/sync-migrations.js --inventory <file>` (private, git-ignored) → commit **only** `baseline/MIGRATIONS_PIN.json`.
 3. Rebuild (above) and run the launch check.
 
 ## Launch check (REQUIRED before publishing — 1.9.0 failed because the build was never launched)
@@ -94,6 +96,7 @@ node scripts/check-rpc-coverage.js --erp $ERP                                   
 ```
 
 ### Hardening of the shipped package (what an analyst finds)
+* **The incremental migrations (2.0.2+)** are a SECOND container of the same format, sealed with the same per-build key (`resources/baseline/migrations.bin` + `MIGRATIONS_PACKED.json`: `migrations.json` + every `.sql`); `src/migrations-store.js` decrypts them in memory on start, the runner feeds psql over stdin (big files included: no temp file) and the package has no plaintext migration of any kind.
 * **Baseline + installer SQL** are ONE AES-256-GCM container (`resources/baseline/baseline.bin`, gzip first) made by `scripts/pack-baseline.js` before every build; the key is a
   per-build module (`src/baseline-key.generated.js`, random fragments, git-ignored) that afterPack obfuscates with the rest. At first run the container is decrypted in memory and
   fed to psql over stdin — never written to disk, never logged. The afterPack gate opens the container with the PACKAGED key module, checks every pinned file, and scans the whole

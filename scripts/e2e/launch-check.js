@@ -20,7 +20,7 @@ const net = require('net');
 const crypto = require('crypto');
 const path = require('path');
 const { Client } = require('pg');
-const { ROOT, PORTS, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions } = require('./lib');
+const { ROOT, PORTS, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions, expectedInventory } = require('./lib');
 const bootstrap = require('../../src/bootstrap');
 const secretsMod = require('../../src/secrets');
 
@@ -94,14 +94,14 @@ async function main() {
       if (r.tz !== 'UTC' || r.e !== 'UTF8') throw new Error(`tz ${r.tz} enc ${r.e}`);
       return `${r.v} provider=${r.p} locale=${r.l} tz=${r.tz} ${r.e}`;
     });
-    await R.check('1.4 every production function body equals the baseline inventory (only the 4 redacted-secret ones differ)', async () => {
-      const inv = JSON.parse(fs.readFileSync(path.join(ROOT, 'baseline', 'production_baseline.inventory.json'), 'utf8'));
+    await R.check('1.4 every production function body equals the baseline inventory + the incremental migrations\' measured functions (only the 4 redacted-secret ones differ)', async () => {
+      const { inv } = expectedInventory();
       const rows = (await pg(`SELECT n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')' AS sig, md5(p.prosrc) AS md5
                                 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
                                WHERE n.nspname IN ('public','licensing','newpost','tomgenerators') AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid=p.oid AND d.deptype='e')`)).rows;
       const c = bootstrap.compareFunctionInventory(inv.functions_md5, rows);
       if (!c.ok) throw new Error(`missing ${c.missing.length} extra ${c.extra.length} differ ${c.mismatched.length}: ${[...c.missing, ...c.extra, ...c.mismatched].slice(0, 3).join(' | ')}`);
-      return `${c.expected} functions compared (none patched: the baseline carries production's own enforce_plan_limit, 20270210h)`;
+      return `${c.expected} functions compared (baseline + the incremental migrations; none patched by hand: the baseline carries production's own enforce_plan_limit, 20270210h)`;
     });
     await R.check('1.4b database authentication: scram-sha-256 for EVERYONE — no password / wrong password / another role\'s password are refused; pg_hba has no trust; roles hold SCRAM hashes', async () => {
       const attempt = async (opts) => {
@@ -177,12 +177,12 @@ async function main() {
       return `installed: ${have.map((x) => x.extname).join(', ')}; platform-only, skipped: ${skipped.join(', ')} (net.http_* stubbed)`;
     });
     await R.check('1.6 production grants/RLS intact: no GRANT-to-anon added, no table lost RLS', async () => {
-      const inv = JSON.parse(fs.readFileSync(path.join(ROOT, 'baseline', 'production_baseline.inventory.json'), 'utf8'));
+      const { inv, rlsDelta } = expectedInventory();     // the baseline's + the migrations' own bookkeeping table (RLS, no policy)
       const rls = (await pg(`SELECT count(*)::int n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname IN ('public','licensing','newpost','tomgenerators') AND c.relkind IN ('r','p') AND c.relrowsecurity`)).rows[0].n;
-      if (rls !== Number(inv.main.rls_enabled) + bootstrap.LOCAL_EXTRAS.rlsTables) throw new Error(`RLS tables ${rls}, expected ${Number(inv.main.rls_enabled) + bootstrap.LOCAL_EXTRAS.rlsTables}`);
+      if (rls !== Number(inv.main.rls_enabled) + bootstrap.LOCAL_EXTRAS.rlsTables + rlsDelta) throw new Error(`RLS tables ${rls}, expected ${Number(inv.main.rls_enabled) + bootstrap.LOCAL_EXTRAS.rlsTables + rlsDelta}`);
       const noRls = (await pg(`SELECT c.relname FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace WHERE n.nspname='public' AND c.relkind IN ('r','p') AND NOT c.relrowsecurity AND has_table_privilege('anon', c.oid, 'SELECT,INSERT,UPDATE,DELETE') ORDER BY 1`)).rows.map((r) => r.relname);
       if (noRls.length) throw new Error(`anon can reach tables without RLS: ${noRls.join(', ')}`);
-      return `${rls} RLS tables = inventory (+1 local gate); anon reaches no table without RLS`;
+      return `${rls} RLS tables = inventory (+1 local gate${rlsDelta ? `, +${rlsDelta} migration bookkeeping table` : ''}); anon reaches no table without RLS`;
     });
 
     if (ERP) {

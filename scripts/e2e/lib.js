@@ -106,4 +106,16 @@ async function stopApp(child, userData) {
   }
 }
 
-module.exports = { ROOT, PORTS, PORT_BASE, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions };
+/**
+ * The inventory a fully provisioned 2.0.2+ install is expected to match: the baseline's (baseline/production_baseline.inventory.json) with the delta of the generated
+ * migrations/migrations.json (build output of scripts/sync-migrations.js) applied (the incremental migrations the runner applies on start). { inv, rlsDelta }.
+ */
+function expectedInventory() {
+  const bootstrap = require('../../src/bootstrap');
+  const inv = JSON.parse(fs.readFileSync(path.join(ROOT, 'baseline', 'production_baseline.inventory.json'), 'utf8'));
+  let manifest = null;
+  try { manifest = JSON.parse(fs.readFileSync(path.join(ROOT, 'migrations', 'migrations.json'), 'utf8')); } catch { /* none shipped */ }
+  return bootstrap.applyMigrationInventory(inv, manifest);
+}
+
+module.exports = { expectedInventory, ROOT, PORTS, PORT_BASE, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions };

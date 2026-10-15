@@ -16,7 +16,7 @@ const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
 const { Client } = require('pg');
-const { ROOT, PORTS, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions } = require('./lib');
+const { ROOT, PORTS, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions, expectedInventory } = require('./lib');
 const bootstrap = require('../../src/bootstrap');
 
 const arg = (n, d = '') => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
@@ -111,7 +111,7 @@ const pg = async (sql, params = []) => { const c = new Client(pgOptions()); awai
     });
 
     await R.check('L4 the 2.0 hardening is intact after the refused attempt: function bodies equal the baseline, 0 anon-readable tables without row security', async () => {
-      const inv = JSON.parse(fs.readFileSync(path.join(ROOT, 'baseline', 'production_baseline.inventory.json'), 'utf8'));
+      const { inv } = expectedInventory();     // baseline + the incremental migrations' measured delta
       const fnRows = (await pg(`SELECT n.nspname||'.'||p.proname||'('||pg_get_function_identity_arguments(p.oid)||')' AS sig, md5(p.prosrc) AS md5 FROM pg_proc p JOIN pg_namespace n ON n.oid=p.pronamespace
                                WHERE n.nspname IN ('public','licensing','newpost','tomgenerators') AND NOT EXISTS (SELECT 1 FROM pg_depend d WHERE d.objid=p.oid AND d.deptype='e')`)).rows;
       const fn = bootstrap.compareFunctionInventory(inv.functions_md5, fnRows);

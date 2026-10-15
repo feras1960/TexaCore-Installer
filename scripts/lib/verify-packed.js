@@ -6,18 +6,48 @@
 //     AS PACKAGED opens it and every file listed in BASELINE_PIN.json inside has the pinned size + sha256
 //     (1.9.0's first trial died because the pin was not packaged; a build that cannot bootstrap must not be produced)
 //   * the pin that was packaged is byte-identical to the repo's pin
-//   * NO plaintext database DDL anywhere in the package (outside PostgreSQL's own share files): no production_baseline.*, no src/bootstrap/*.sql,
-//     no "CREATE TABLE public." / "CREATE FUNCTION public." … in any file
+//   * NO plaintext database DDL anywhere in the package (outside PostgreSQL's own share files) - NO exception list: no production_baseline.*, no src/bootstrap/*.sql,
+//     no *.sql file at all, no table / function / trigger / policy DDL of the production schema in any file
 //   * the web bundle is there and carries package.json's version; local fonts are there
 //   * the bundled PostgreSQL / GoTrue / PostgREST binaries are there
-//   * no 1.x migrations manifest rides along
+//   * the incremental migrations (2.0.2+) ship ONLY inside the encrypted container baseline/migrations.bin (same TXB1 format, same key): no <resources>/migrations folder (a 1.x manifest
+//     must never ride along), and the container opened with the packaged key module is exactly baseline/MIGRATIONS_PIN.json: baselineSha256 = the baseline pin, the pinned names / order /
+//     sha256 / sizes, the manifest, the measured inventory delta, nothing else
 // Pure functions of the filesystem → unit-testable with a fake tree.
 // ════════════════════════════════════════════════════════════════
 const fs = require('fs');
 const path = require('path');
 const crypto = require('crypto');
+const MM = require('./migrations-manifest');
 
 const sha256File = (f) => crypto.createHash('sha256').update(fs.readFileSync(f)).digest('hex');
+
+/**
+ * The packaged migrations container opened with the key module AS PACKAGED (obfuscated or not).
+ * @returns {{ problems: string[], manifest: object|null, files: Map<string, Buffer>, meta: object|null }}
+ */
+function readPackedMigrations({ resourcesDir, appCodeDir }) {
+  const out = { problems: [], manifest: null, files: new Map(), meta: null };
+  const bdir = path.join(resourcesDir, 'baseline');
+  const blobF = path.join(bdir, 'migrations.bin');
+  const metaF = path.join(bdir, 'MIGRATIONS_PACKED.json');
+  for (const f of [blobF, metaF]) if (!fs.existsSync(f)) out.problems.push(`baseline/${path.basename(f)} was NOT packaged (written by scripts/pack-baseline.js)`);
+  if (out.problems.length) return out;
+  const keyFile = path.join(appCodeDir, 'src', 'baseline-key.generated.js');
+  if (!fs.existsSync(keyFile)) { out.problems.push('src/baseline-key.generated.js is missing from the app code (the migrations container could not be opened)'); return out; }
+  try {
+    out.meta = JSON.parse(fs.readFileSync(metaF, 'utf8'));
+    const blob = fs.readFileSync(blobF);
+    if (blob.length !== out.meta.blobBytes || crypto.createHash('sha256').update(blob).digest('hex') !== out.meta.blobSha256) { out.problems.push('baseline/migrations.bin: size/sha256 differ from MIGRATIONS_PACKED.json'); return out; }
+    const { unpack } = require('../../src/baseline-pack');
+    delete require.cache[require.resolve(keyFile)];
+    out.files = unpack(blob, require(keyFile)());
+    const mj = out.files.get('migrations.json');
+    if (!mj) out.problems.push('the migrations container carries no migrations.json');
+    else out.manifest = JSON.parse(mj.toString('utf8'));
+  } catch (e) { out.problems.push(`the packaged key module cannot open the migrations container: ${e.message}`); }
+  return out;
+}
 
 /**
  * @param {object} o
@@ -70,7 +100,33 @@ function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform, scanRoot, 
   // no plaintext SQL anywhere: neither the baseline files nor the installer-owned SQL, nor any DDL text in code or data files
   const bootDir = path.join(appCodeDir, 'src', 'bootstrap');
   if (fs.existsSync(bootDir) && fs.readdirSync(bootDir).some((f) => f.endsWith('.sql'))) problems.push('plain SQL files are in the app code (src/bootstrap/*.sql) — they belong in the encrypted container');
-  if (fs.existsSync(bdir) && fs.readdirSync(bdir).some((f) => /\.(sql|json)$/.test(f) && !['BASELINE_PIN.json', 'PACKED.json'].includes(f))) problems.push('plain baseline files are in the package (baseline/)');
+  if (fs.existsSync(bdir) && fs.readdirSync(bdir).some((f) => /\.(sql|json)$/.test(f) && !['BASELINE_PIN.json', 'PACKED.json', 'MIGRATIONS_PACKED.json'].includes(f))) problems.push('plain baseline files are in the package (baseline/)');
+  // the incremental migrations (2.0.2+): ONLY inside the encrypted container, exactly the pin. There is no plaintext exception of any kind.
+  if (fs.existsSync(path.join(resourcesDir, 'migrations'))) problems.push('a plaintext migrations folder is in the package (resources/migrations) - migrations ship only inside the encrypted container (baseline/migrations.bin); a 1.x migrations manifest must never ride along');
+  let mpin = null;
+  try { mpin = MM.loadMigrationsPin(path.join(repoRoot, 'baseline')); } catch (e) { problems.push(`repo baseline/${MM.PIN_FILE} is unreadable: ${e.message}`); }
+  const hasMigBlob = fs.existsSync(path.join(bdir, 'migrations.bin')) || fs.existsSync(path.join(bdir, 'MIGRATIONS_PACKED.json'));
+  if (mpin && mpin.migrations && mpin.migrations.length) {
+    let baseSha = null;
+    try { baseSha = JSON.parse(fs.readFileSync(fs.existsSync(packedPinPath) ? packedPinPath : repoPinPath, 'utf8')).files['production_baseline.sql'].sha256; } catch { /* reported above */ }
+    for (const m of MM.checkPin(mpin, baseSha)) problems.push(`migrations pin: ${m}`);
+    const pm = readPackedMigrations({ resourcesDir, appCodeDir });
+    for (const m of pm.problems) problems.push(`migrations: ${m}`);
+    if (!pm.problems.length) {
+      const wantNames = new Set(['migrations.json', ...mpin.migrations.map((m) => m.file)]);
+      for (const n of pm.files.keys()) if (!wantNames.has(n)) problems.push(`migrations: the container carries ${n}, which the pin does not list`);
+      for (const m of mpin.migrations) {
+        const d = pm.files.get(m.file);
+        if (!d) problems.push(`migrations: the container lacks ${m.file}`);
+        else if (d.length !== m.bytes || crypto.createHash('sha256').update(d).digest('hex') !== m.sha256) problems.push(`migrations: ${m.file} in the container differs from the pin`);
+      }
+      for (const m of MM.checkAgainstPin(pm.manifest, mpin)) problems.push(`migrations: ${m}`);
+      if (baseSha && pm.manifest && pm.manifest.baselineSha256 !== baseSha) problems.push('migrations: the container\'s manifest is not for the packaged baseline');
+      // the measured inventory delta inside the manifest is the private input the pin names
+      const inv = MM.checkInventory(path.join(repoRoot, 'baseline'), mpin);
+      if (inv.inventory && JSON.stringify(pm.manifest && pm.manifest.inventoryAfter) !== JSON.stringify(inv.inventory)) problems.push('migrations: the container\'s inventoryAfter is not baseline/migrations.inventory.json');
+    }
+  } else if (hasMigBlob) problems.push('migrations: a migrations container is packaged but baseline/MIGRATIONS_PIN.json lists no migrations');
   problems.push(...scanForPlaintextSql(scanRoot || resourcesDir, resourcesDir));
 
   // ── the main-process code is hardened, and made from exactly these sources ──
@@ -139,11 +195,6 @@ function verifyPacked({ resourcesDir, appCodeDir, repoRoot, platform, scanRoot, 
     problems.push('bin/cloudflared/cloudflared.exe is missing — Cloud Access would be dead');
   }
 
-  // ── nothing from 1.x that would replay old migrations ──
-  const mig = path.join(resourcesDir, 'migrations', 'migrations.json');
-  if (fs.existsSync(mig)) {
-    try { if (!JSON.parse(fs.readFileSync(mig, 'utf8')).baselineSha256) problems.push('a 1.x migrations/migrations.json was packaged (no baselineSha256) — it must not ship'); } catch { problems.push('migrations/migrations.json is unreadable'); }
-  }
   return problems;
 }
 
@@ -162,6 +213,7 @@ function scanForPlaintextSql(root, resourcesDir) {
       if (e.isSymbolicLink()) continue;
       if (e.isDirectory()) { if ((f + path.sep).startsWith(pgDir)) continue; walk(f); continue; }
       if (/^production_baseline\./.test(e.name)) { problems.push(`plain baseline file in the package: ${path.relative(root, f)}`); continue; }
+      if (/\.sql$/i.test(e.name)) { problems.push(`a plain .sql file in the package: ${path.relative(root, f)}`); continue; }
       const st = fs.statSync(f);
       if (st.size === 0 || st.size > 400e6) continue;
       const buf = fs.readFileSync(f);
@@ -173,4 +225,4 @@ function scanForPlaintextSql(root, resourcesDir) {
   return problems;
 }
 
-module.exports = { verifyPacked, sha256File, scanForPlaintextSql };
+module.exports = { verifyPacked, readPackedMigrations, sha256File, scanForPlaintextSql };

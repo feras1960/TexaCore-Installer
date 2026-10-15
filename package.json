@@ -13,6 +13,7 @@
     "test": "node --test test/",
     "release:assets": "node scripts/release-assets.js",
     "sync:baseline": "node scripts/sync-baseline.js",
+    "sync:migrations": "node scripts/sync-migrations.js",
     "sync:frontend": "REQUIRE_LOCAL_FONTS=1 node scripts/sync-frontend.js",
     "prepare:pg:mac": "bash scripts/prepare-pg-mac.sh",
     "prepare:pg:win": "node scripts/prepare-pg-win.js",

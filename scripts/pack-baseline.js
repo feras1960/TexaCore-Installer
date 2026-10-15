@@ -8,7 +8,10 @@
 //
 //   in : baseline/{production_baseline.sql, production_baseline.inventory.json, storage_stubs.sql, [reference_data.sql]} (verified against the pin)
 //        src/bootstrap/{local_extras.sql, reference_seed.sql}
+//        migrations/ (2.0.2: the incremental SQL fetched from the private ERP repo by scripts/sync-migrations.js, checked against baseline/MIGRATIONS_PIN.json)
 //   out: build/baseline-pack/{baseline.bin, PACKED.json, BASELINE_PIN.json}   ← package.json extraResources "baseline" comes from here
+//        build/baseline-pack/{migrations.bin, MIGRATIONS_PACKED.json}         ← the migrations (migrations.json + the .sql files) in a SECOND container of the same
+//                                                                              TXB1 format, sealed with the SAME key — the package carries no plaintext migration
 //        src/baseline-key.generated.js                                        ← the key, as random fragments + a derivation (git-ignored;
 //                                                                              afterPack obfuscates it together with the rest of the app code)
 // A new random key every build. Nothing here is committed.
@@ -18,6 +21,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { pack, unpack, sha256 } = require('../src/baseline-pack');
 const bootstrap = require('../src/bootstrap');
+const MM = require('./lib/migrations-manifest');
 
 const ROOT = path.join(__dirname, '..');
 const BASELINE = path.join(ROOT, 'baseline');
@@ -41,6 +45,25 @@ module.exports = function key() {
   fs.writeFileSync(KEY_FILE, src, { mode: 0o600 });
   delete require.cache[require.resolve(KEY_FILE)];
   return require(KEY_FILE)();
+}
+
+/** The migrations container's entries: migrations.json + every pinned .sql, all checked against the pin. null = the pin lists none (a release without incremental migrations). */
+function migrationEntries(baselineSha256) {
+  const pin = MM.loadMigrationsPin(BASELINE);
+  if (!pin) { console.error(`pack-baseline: baseline/${MM.PIN_FILE} is missing`); process.exit(1); }
+  const pp = MM.checkPin(pin, baselineSha256);
+  if (pp.length) { console.error(`pack-baseline: the migrations pin is not valid — ${pp.join('; ')}`); process.exit(1); }
+  const dir = path.join(ROOT, 'migrations');
+  if (!pin.migrations.length) {
+    if (fs.existsSync(dir) && fs.readdirSync(dir).length) { console.error('pack-baseline: ./migrations holds files but the pin lists none — remove ./migrations'); process.exit(1); }
+    return null;
+  }
+  const inv = MM.checkInventory(BASELINE, pin);
+  const r = MM.checkManifest(dir, baselineSha256);
+  const problems = [...inv.problems, ...r.problems, ...(r.manifest ? MM.checkAgainstPin(r.manifest, pin) : [])];
+  if (r.manifest && inv.inventory && JSON.stringify(r.manifest.inventoryAfter) !== JSON.stringify(inv.inventory)) problems.push('migrations.json inventoryAfter differs from baseline/migrations.inventory.json');
+  if (problems.length) { console.error(`pack-baseline: the migrations do not match their pin — ${problems.join('; ')}\n  run: node scripts/sync-migrations.js --erp <ERP checkout>`); process.exit(1); }
+  return [{ name: 'migrations.json', data: fs.readFileSync(path.join(dir, 'migrations.json')) }, ...pin.migrations.map((m) => ({ name: m.file, data: fs.readFileSync(path.join(dir, m.file)) }))];
 }
 
 function main() {
@@ -67,6 +90,15 @@ function main() {
   const back = unpack(blob, require(KEY_FILE)());
   for (const e of entries) if (!back.get(e.name) || !back.get(e.name).equals(e.data)) { console.error(`pack-baseline: self-test failed for ${e.name}`); process.exit(1); }
 
+  // the incremental migrations: a second container, the same format and the same key (so one key module opens both)
+  const migEntries = migrationEntries(pin.files['production_baseline.sql'].sha256);
+  let migBlob = null;
+  if (migEntries) {
+    migBlob = pack(migEntries, key);
+    const mback = unpack(migBlob, require(KEY_FILE)());
+    for (const e of migEntries) if (!mback.get(e.name) || !mback.get(e.name).equals(e.data)) { console.error(`pack-baseline: self-test failed for ${e.name}`); process.exit(1); }
+  }
+
   fs.rmSync(OUT, { recursive: true, force: true });
   fs.mkdirSync(OUT, { recursive: true });
   fs.writeFileSync(path.join(OUT, 'baseline.bin'), blob);
@@ -75,6 +107,14 @@ function main() {
     format: 'TXB1', blobBytes: blob.length, blobSha256: sha256(blob), createdAt: new Date().toISOString(),
     entries: entries.map((e) => ({ name: e.name, bytes: e.data.length })),
   }, null, 2) + '\n');
+  if (migBlob) {
+    fs.writeFileSync(path.join(OUT, 'migrations.bin'), migBlob);
+    fs.writeFileSync(path.join(OUT, 'MIGRATIONS_PACKED.json'), JSON.stringify({
+      format: 'TXB1', blobBytes: migBlob.length, blobSha256: sha256(migBlob), createdAt: new Date().toISOString(),
+      entries: migEntries.map((e) => ({ name: e.name, bytes: e.data.length })),
+    }, null, 2) + '\n');
+    console.log(`pack-baseline: ${migEntries.length - 1} migration(s) + manifest (${(migEntries.reduce((n, e) => n + e.data.length, 0) / 1e3).toFixed(0)} KB) → migrations.bin ${(migBlob.length / 1e3).toFixed(0)} KB (same container format and key)`);
+  }
   const plainBytes = entries.reduce((n, e) => n + e.data.length, 0);
   console.log(`pack-baseline: ${entries.length} files (${(plainBytes / 1e6).toFixed(1)} MB) → baseline.bin ${(blob.length / 1e6).toFixed(1)} MB (gzip + AES-256-GCM), key module written (git-ignored)`);
 }

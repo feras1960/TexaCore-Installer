@@ -17,6 +17,7 @@ const bootstrap = require('./bootstrap');
 const { validateAdminPassword, adminPasswordProblem, defaultAdminPasswordFor } = require('./admin-password');
 const netGuard = require('./net-guard');
 const { openBaselineStore } = require('./baseline-store');
+const { openMigrationsStore } = require('./migrations-store');
 const { TunnelMonitor, redact } = require('./tunnel-monitor');
 
 // ─── Ports (defaults — TEXACORE_PORT_BASE moves the whole block; see ports.js) ───
@@ -91,15 +92,12 @@ class ServiceManager {
     this.activeGotruePort = DEFAULT_GOTRUE_PORT;
     this.activeApiPort = DEFAULT_API_PORT;
 
-    // Resolve migrations directory (packaged vs dev). 2.0.0 ships NO migrations: the database is built from the baseline.
-    // The runner stays for future incremental migrations (applied after the baseline, tracked in _texacore_migrations).
-    if (isPackaged) {
-      this.migrationsDir = path.join(process.resourcesPath, 'migrations');
-    } else {
-      this.migrationsDir = path.join(__dirname, '..', 'migrations');
-    }
     // The pinned production baseline (scripts/sync-baseline.js) and the installer-owned SQL beside this file.
     this.baselineDir = isPackaged ? path.join(process.resourcesPath, 'baseline') : path.join(__dirname, '..', 'baseline');
+    // The incremental migrations (2.0.0 shipped none: the database is built from the baseline; 2.0.2 ships the set production received after the baseline cut, applied after the
+    // baseline and tracked in _texacore_migrations). Packaged: ONLY inside the encrypted container (resources/baseline/migrations.bin, same key as the baseline), decrypted in memory;
+    // development: the git-ignored ./migrations build output (scripts/sync-migrations.js).
+    this.migrationsStore = openMigrationsStore({ packedDir: this.baselineDir, devDir: isPackaged ? null : path.join(__dirname, '..', 'migrations') });
     this.bootstrapSqlDir = path.join(__dirname, 'bootstrap');
     // The packaged app carries the baseline + installer SQL as ONE encrypted container (baseline-store.js); development reads the plain files.
     this.baselineStore = openBaselineStore({ baselineDir: this.baselineDir, bootstrapDir: this.bootstrapSqlDir });
@@ -644,10 +642,39 @@ class ServiceManager {
     return { baseline: summary, verified: v.stats };
   }
 
-  /** Counts + every function body against the inventory that ships with the baseline. */
+  /**
+   * Which of the shipped incremental migrations (the manifest in the migrations container, for THIS baseline) this database has applied.
+   * { manifest, total, applied: [names], all: bool, first: name of the first one missing }  — manifest null = none shipped / not for this baseline.
+   */
+  async _migrationState() {
+    try {
+      const manifest = this.migrationsStore.manifest();
+      this.migrationsStore.release();
+      if (!manifest) return { manifest: null, total: 0, applied: [], all: true };
+      const marker = bootstrap.readMarker(this.dataDir) || {};
+      if (!manifest.baselineSha256 || manifest.baselineSha256 !== marker.baselineSha256) return { manifest: null, total: 0, applied: [], all: true };
+      const t = await this.pgQuery(`SELECT to_regclass('public._texacore_migrations') IS NOT NULL AS ok`);
+      const names = t.rows[0].ok ? (await this.pgQuery('SELECT name FROM public._texacore_migrations')).rows.map((r) => r.name) : [];
+      const list = manifest.migrations || [];
+      const have = new Set(names);
+      const missing = list.filter((m) => !have.has(m.name));
+      return { manifest, total: list.length, applied: list.filter((m) => have.has(m.name)).map((m) => m.name), all: missing.length === 0, first: missing[0] && missing[0].name };
+    } catch (e) {
+      return { manifest: null, total: 0, applied: [], all: true, error: e.message };
+    }
+  }
+
+  /** Counts + every function body against the inventory that ships with the baseline (+ the manifest's measured delta once all its migrations are applied). */
   async verifyBaselineInstall() {
-    const inv = JSON.parse(this.baselineStore.read('production_baseline.inventory.json').toString('utf8'));
+    let inv = JSON.parse(this.baselineStore.read('production_baseline.inventory.json').toString('utf8'));
     const problems = [];
+    const mig = await this._migrationState();
+    let rlsDelta = 0;
+    if (mig.manifest && mig.all) { const a = bootstrap.applyMigrationInventory(inv, mig.manifest); inv = a.inv; rlsDelta = a.rlsDelta; }
+    else if (mig.manifest && mig.applied.length > 0) {
+      // a chain that stopped part-way: the expected inventory is not defined for a partial set — report it instead of a pile of function differences
+      return { ok: false, problems: [`database updates: ${mig.applied.length} of ${mig.total} applied, the next one is ${mig.first} (see logs/migrations.log)`], stats: { migrationsApplied: mig.applied.length, migrationsTotal: mig.total } };
+    }
     const schemas = inv.app_schemas || ['public', 'licensing', 'newpost', 'tomgenerators'];
     const q = await this.pgQuery(`
       SELECT
@@ -673,8 +700,8 @@ class ServiceManager {
     }
     const rls = await this.pgQuery(`SELECT count(*)::int AS n FROM pg_class c JOIN pg_namespace n ON n.oid=c.relnamespace
                                      WHERE n.nspname = ANY($1) AND c.relkind IN ('r','p') AND c.relrowsecurity`, [schemas]);
-    if (inv.main && inv.main.rls_enabled && Number(inv.main.rls_enabled) + bootstrap.LOCAL_EXTRAS.rlsTables !== rls.rows[0].n) {
-      problems.push(`row level security: expected ${Number(inv.main.rls_enabled) + bootstrap.LOCAL_EXTRAS.rlsTables} protected tables, installed ${rls.rows[0].n}`);
+    if (inv.main && inv.main.rls_enabled && Number(inv.main.rls_enabled) + bootstrap.LOCAL_EXTRAS.rlsTables + rlsDelta !== rls.rows[0].n) {
+      problems.push(`row level security: expected ${Number(inv.main.rls_enabled) + bootstrap.LOCAL_EXTRAS.rlsTables + rlsDelta} protected tables, installed ${rls.rows[0].n}`);
     }
     // extensions production has and the app calls as extensions.*: they must be real, not swallowed-away
     const ext = await this.pgQuery(`SELECT (SELECT count(*) FROM pg_extension e JOIN pg_namespace n ON n.oid=e.extnamespace WHERE n.nspname='extensions' AND e.extname IN ('uuid-ossp','pgcrypto'))::int AS n,
@@ -929,30 +956,36 @@ class ServiceManager {
   }
 
   // ─── Run Migrations ──────────────────────────────────────────
-  // 2.0.0 builds its database from the baseline; incremental migrations are for FUTURE releases and must be written for
+  // 2.0.0 builds its database from the baseline; incremental migrations (2.0.2: the 13 after the 2026-10-13 cut) must be written for
   // that exact baseline: the manifest has to say so ("baselineSha256"). A manifest without it — in particular the 1.x
   // one, whose ~1,300 files re-define functions the baseline already carries at newer versions — is REFUSED, never
   // replayed (that replay is how a first 2.0 trial ended up with 118 production functions rolled back to old bodies).
   async runMigrations() {
-    const manifestPath = path.join(this.migrationsDir, 'migrations.json');
-    if (!fs.existsSync(manifestPath)) {
-      console.log('[ServiceManager] No migrations.json found — skipping migrations');
+    if (!this.migrationsStore.available()) {
+      console.log('[ServiceManager] No migrations shipped — skipping migrations');
       return { applied: 0, total: 0 };
     }
     let manifest = null;
-    try { manifest = JSON.parse(fs.readFileSync(manifestPath, 'utf8')); } catch { /* handled below */ }
+    try { manifest = this.migrationsStore.manifest(); } catch (e) { console.warn('[ServiceManager] the migrations manifest cannot be read:', e.message); }
+    this.migrationsStore.release();
     const marker = bootstrap.readMarker(this.dataDir) || {};
     if (!manifest || !manifest.baselineSha256 || manifest.baselineSha256 !== marker.baselineSha256) {
       console.warn('[ServiceManager] migrations.json is not for this baseline (missing/different baselineSha256) — NOT applying it');
       return { applied: 0, total: 0, skipped: 'manifest-not-for-this-baseline' };
     }
 
+    // every line also goes to logs/migrations.log (the app's console is not kept): what ran, how long, and WHY a migration stopped the chain
+    const logLine = (level, msg) => {
+      (level === 'error' ? console.error : level === 'warn' ? console.warn : console.log)(msg);
+      try { fs.appendFileSync(path.join(this.logDir, 'migrations.log'), `[${new Date().toISOString()}] ${msg}\n`, { mode: 0o600 }); } catch { /* the log folder is not worth failing a start for */ }
+    };
     const runner = new MigrationRunner({
       psqlExec: (sql, db) => this.psqlExec(sql, db),
       pgEnv: () => this._pgEnv(),
       pgBin: this.pgBin,
       isWindows: this.isWindows,
-      migrationsDir: this.migrationsDir,
+      store: this.migrationsStore,
+      log: logLine,
       onProgress: (step, total, name) => {
         console.log(`[Migration] (${step}/${total}) ${name}`);
         if (this.onMigrationProgress) this.onMigrationProgress(step, total, name);
@@ -964,15 +997,15 @@ class ServiceManager {
 
   // ─── Get Migration Status ────────────────────────────────────
   async getMigrationStatus() {
-    if (!fs.existsSync(path.join(this.migrationsDir, 'migrations.json'))) {
+    if (!this.migrationsStore.available()) {
       return { total: 0, applied: 0, pending: 0 };
     }
     const runner = new MigrationRunner({
       psqlExec: (sql, db) => this.psqlExec(sql, db),
       pgEnv: () => this._pgEnv(),
-      migrationsDir: this.migrationsDir,
+      store: this.migrationsStore,
     });
-    return runner.getStatus();
+    try { return await runner.getStatus(); } finally { this.migrationsStore.release(); }
   }
 
   // ─── Start All Services ──────────────────────────────────────
@@ -1018,8 +1051,15 @@ class ServiceManager {
         await this.runGoTrueMigrations();
       }
 
-      // 4. Incremental migrations after the baseline (none ship in 2.0.0 — the runner skips when there is no manifest)
-      const migrationResult = await this.runMigrations();
+      // 4. Incremental migrations after the baseline (2.0.2: the 13 that production received after the cut; migrations/migrations.json, tied to the baseline's sha256).
+      //    A failing migration stops the chain and is logged (logs/migrations.log) — it never stops the app from starting.
+      let migrationResult;
+      try { migrationResult = await this.runMigrations(); }
+      catch (e) {
+        console.error('[ServiceManager] ⚠️ the database update could not run (non-fatal, the app starts on the current schema):', e.message);
+        try { fs.appendFileSync(path.join(this.logDir, 'migrations.log'), `[${new Date().toISOString()}] runner error: ${String(e.message).slice(0, 600)}\n`, { mode: 0o600 }); } catch { /* ignore */ }
+        migrationResult = { applied: 0, failed: 1, total: 0, errors: [{ name: '(runner)', error: e.message }] };
+      }
       console.log(`[ServiceManager] Migrations: ${migrationResult.applied} applied, ${migrationResult.failed || 0} failed`);
 
       // 5. Start PostgREST — grants and RLS are production's, untouched (no GRANT ... TO anon, no DISABLE ROW LEVEL SECURITY)

@@ -1,0 +1,97 @@
+{
+  "schema": 1,
+  "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
+  "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
+  "erpCommit": "5431c73530aacbd78a335ed1ef2c80ee4bccf2a7",
+  "migrations": [
+    {
+      "order": 1,
+      "name": "20270210i_cloud_trial_signup",
+      "file": "20270210i_cloud_trial_signup.sql",
+      "sha256": "00742c6921035f8adddd946b1b2c4716965b7ad612ac9e561a3282bd031e0ac3",
+      "bytes": 69563
+    },
+    {
+      "order": 2,
+      "name": "20270210j_cloud_readonly_state",
+      "file": "20270210j_cloud_readonly_state.sql",
+      "sha256": "38ea993db26489dbf1a76d39abeb1c3cace523e30976060adcee9ee2df58d029",
+      "bytes": 49778
+    },
+    {
+      "order": 3,
+      "name": "20270210k_cloud_readonly_guard",
+      "file": "20270210k_cloud_readonly_guard.sql",
+      "sha256": "cf24cce644f439a5b617a9d743600cba253c2c1167e4aa9dfe996e7932e0d4c6",
+      "bytes": 56913
+    },
+    {
+      "order": 4,
+      "name": "20270210q_free_plan_fabric_module",
+      "file": "20270210q_free_plan_fabric_module.sql",
+      "sha256": "f0d541dc7bce288f7028303c34bf9eddc6d4da64039a7682e9f818f0a0572eac",
+      "bytes": 3089
+    },
+    {
+      "order": 5,
+      "name": "20270210m_stock_holds_enable_fixes",
+      "file": "20270210m_stock_holds_enable_fixes.sql",
+      "sha256": "f50aa21657edcca87334af9956d579ba1c959984637168a2d9645ded83fdf12b",
+      "bytes": 90047
+    },
+    {
+      "order": 6,
+      "name": "20270210n_direct_sale_own_holds",
+      "file": "20270210n_direct_sale_own_holds.sql",
+      "sha256": "65c28e071ffa1528fcd70026d0078ab3bd9cd517e94f884d07f5a75f5d1a3b89",
+      "bytes": 27755
+    },
+    {
+      "order": 7,
+      "name": "20270210o_stock_holds_expiry_sweep",
+      "file": "20270210o_stock_holds_expiry_sweep.sql",
+      "sha256": "088648bd1309c8e523a681ebe0778f34bd3785e380857163cc67a9f69fc461c4",
+      "bytes": 48722
+    },
+    {
+      "order": 8,
+      "name": "20270210p_stock_hold_swap_and_list",
+      "file": "20270210p_stock_hold_swap_and_list.sql",
+      "sha256": "8ad72df285159a8e475a5562e2c1a454a31a65f57da3dc96e434b1b1a9d36b3b",
+      "bytes": 36715
+    },
+    {
+      "order": 9,
+      "name": "20270210s_material_card_guards",
+      "file": "20270210s_material_card_guards.sql",
+      "sha256": "3023adda07240994f99c932ad12384847a9d41c0a7f2693e40527bb12414789d",
+      "bytes": 18942
+    },
+    {
+      "order": 10,
+      "name": "20270210t_party_account_numbering",
+      "file": "20270210t_party_account_numbering.sql",
+      "sha256": "52ed7988dbdb9c6f540cc7755d3fc7072dcfd5140780f1dc0911c38588198ceb",
+      "bytes": 28440
+    },
+    {
+      "order": 11,
+      "name": "20270210r_purchase_receipt_units",
+      "file": "20270210r_purchase_receipt_units.sql",
+      "sha256": "3ea0337549bd73f2b33344e3b74d548c2b58510ebaaca47134c5e30fb2d308c9",
+      "bytes": 156749
+    },
+    {
+      "order": 12,
+      "name": "20270210u_sales_line_units",
+      "file": "20270210u_sales_line_units.sql",
+      "sha256": "a65021c2e08b7489fb87d57718137d1f88df7edab0814ccd4b9c61f9d2deec56",
+      "bytes": 212449
+    }
+  ],
+  "inventory": {
+    "file": "migrations.inventory.json",
+    "sha256": "f428439b0c74b1f3be1c92c0cbd19086e9701ecb5829de55ebae51628a5ae2a8",
+    "bytes": 8935
+  }
+}

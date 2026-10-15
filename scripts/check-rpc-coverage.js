@@ -35,6 +35,11 @@ function baselineFunctions() {
   const inv = JSON.parse(fs.readFileSync(path.join(ROOT, 'baseline', 'production_baseline.inventory.json'), 'utf8'));
   const out = new Set();
   for (const k of Object.keys(inv.functions_md5 || {})) { const m = /^public\.([a-zA-Z0-9_]+)\(/.exec(k); if (m) out.add(m[1]); }
+  // 2.0.2: the functions the shipped incremental migrations add
+  try {
+    const man = JSON.parse(fs.readFileSync(path.join(ROOT, 'migrations', 'migrations.json'), 'utf8'));
+    for (const k of Object.keys((man.inventoryAfter && man.inventoryAfter.functions) || {})) { const m = /^public\.([a-zA-Z0-9_]+)\(/.exec(k); if (m) out.add(m[1]); }
+  } catch { /* no migrations shipped */ }
   return out;
 }
 

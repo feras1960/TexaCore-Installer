@@ -148,3 +148,74 @@ test('FAILS when the macOS package has no cloudflared (2.0.0: Cloud Access dead,
   fs.rmSync(f.cfPath);
   assert.match(verifyPacked(f.args).join(), /cloudflared\.exe is missing/);
 });
+
+// ── 2.0.2: the incremental migrations ship ONLY inside the encrypted container (baseline/migrations.bin, same format and key as the baseline), exactly the repo's pin.
+//    There is NO plaintext exception: not a folder, not a single .sql file. ──
+const MM = require('../scripts/lib/migrations-manifest');
+function withMigrations(f, mutate) {
+  const sql = Buffer.from('BEGIN;\nSELECT 1;\nCOMMIT;\n');
+  const pinSha = JSON.parse(fs.readFileSync(path.join(f.repo, 'baseline', 'BASELINE_PIN.json'), 'utf8')).files['production_baseline.sql'].sha256;
+  const inv = { catalogDelta: { tables: 1 }, functions: {}, removed: [] };
+  const invBuf = Buffer.from(JSON.stringify(inv, null, 2) + '\n');
+  const mpin = { schema: 1, baselineSha256: pinSha, erpCommit: 'c', migrations: [{ order: 1, name: '20270210z_x', file: '20270210z_x.sql', sha256: sha(sql), bytes: sql.length }], inventory: { file: MM.INVENTORY_FILE, sha256: sha(invBuf), bytes: invBuf.length } };
+  const manifest = MM.buildManifest(mpin, inv);
+  const parts = { pin: mpin, manifest, entries: [{ name: 'migrations.json', data: null }, { name: '20270210z_x.sql', data: sql }], key: f.key };
+  mutate && mutate(parts, f);
+  fs.writeFileSync(path.join(f.repo, 'baseline', MM.PIN_FILE), JSON.stringify(parts.pin));
+  fs.writeFileSync(path.join(f.repo, 'baseline', MM.INVENTORY_FILE), invBuf);
+  parts.entries[0].data = Buffer.from(JSON.stringify(parts.manifest));
+  const blob = pack(parts.entries.filter((e) => e.data), parts.key);
+  const pk = path.join(f.res, 'baseline');
+  fs.writeFileSync(path.join(pk, 'migrations.bin'), blob);
+  fs.writeFileSync(path.join(pk, 'MIGRATIONS_PACKED.json'), JSON.stringify({ blobBytes: blob.length, blobSha256: sha(blob) }));
+  return f;
+}
+test('a package whose migrations are inside the encrypted container, exactly the repo\'s pin, passes (mac and win); nothing plain rides along', () => {
+  assert.deepEqual(verifyPacked(withMigrations(fixture()).args), []);
+  assert.deepEqual(verifyPacked(withMigrations(fixture('win32')).args), []);
+});
+test('FAILS when ANY plaintext migration is in the package: a resources/migrations folder, a lone .sql file (even one that matches the pin byte for byte), plain files beside the container - there is no exception list', () => {
+  let f = withMigrations(fixture());
+  fs.mkdirSync(path.join(f.res, 'migrations'));
+  fs.writeFileSync(path.join(f.res, 'migrations', 'migrations.json'), '{"baselineSha256":"x","migrations":[]}');
+  assert.match(verifyPacked(f.args).join(), /plaintext migrations folder/);
+  f = withMigrations(fixture());
+  fs.writeFileSync(path.join(f.res, 'frontend', '20270210z_x.sql'), 'BEGIN;\nSELECT 1;\nCOMMIT;\n');          // the exact pinned bytes, in a plain file
+  assert.match(verifyPacked(f.args).join(), /a plain \.sql file in the package: .*20270210z_x\.sql/);
+  f = withMigrations(fixture());
+  fs.writeFileSync(path.join(f.res, 'baseline', 'migrations.json'), '{}');
+  assert.match(verifyPacked(f.args).join(), /plain baseline files are in the package/);
+  f = withMigrations(fixture());
+  fs.writeFileSync(path.join(f.res, 'baseline', 'later.sql'), 'x');
+  assert.match(verifyPacked(f.args).join(), /plain baseline files are in the package/);
+});
+test('FAILS when the pin lists migrations but the container is missing, cannot be opened by the packaged key module, or was altered', () => {
+  let f = withMigrations(fixture());
+  fs.rmSync(path.join(f.res, 'baseline', 'migrations.bin'));
+  assert.match(verifyPacked(f.args).join(), /migrations\.bin was NOT packaged/);
+  f = withMigrations(fixture());
+  fs.writeFileSync(path.join(f.args.appCodeDir, 'src', 'baseline-key.generated.js'), 'module.exports = () => Buffer.alloc(32, 7);\n');
+  assert.match(verifyPacked(f.args).join(), /cannot open the (baseline|migrations) container/);
+  f = withMigrations(fixture());
+  const bin = path.join(f.res, 'baseline', 'migrations.bin');
+  const b = fs.readFileSync(bin); b[b.length - 3] ^= 0xff; fs.writeFileSync(bin, b);
+  assert.match(verifyPacked(f.args).join(), /migrations\.bin: size\/sha256 differ/);
+  f = withMigrations(fixture());
+  fs.rmSync(path.join(f.res, 'baseline', 'MIGRATIONS_PACKED.json'));
+  assert.match(verifyPacked(f.args).join(), /MIGRATIONS_PACKED\.json was NOT packaged/);
+});
+test('FAILS when the container is not the pin: another baseline, an edited file, an unpinned file, a reordered / shortened list, another inventory', () => {
+  const other = Buffer.from('BEGIN;\nSELECT 2;\nCOMMIT;\n');
+  assert.match(verifyPacked(withMigrations(fixture(), (p) => { p.manifest.baselineSha256 = 'f'.repeat(64); }).args).join(), /not for the packaged baseline|differs from the pin's/);
+  assert.match(verifyPacked(withMigrations(fixture(), (p) => { p.entries[1].data = other; }).args).join(), /20270210z_x\.sql in the container differs from the pin/);
+  assert.match(verifyPacked(withMigrations(fixture(), (p) => { p.entries.push({ name: 'sneaky.sql', data: Buffer.from('x') }); }).args).join(), /carries sneaky\.sql, which the pin does not list/);
+  assert.match(verifyPacked(withMigrations(fixture(), (p) => { p.manifest.migrations = []; }).args).join(), /not the pin's/);
+  assert.match(verifyPacked(withMigrations(fixture(), (p) => { p.manifest.migrations[0].sha256 = '9'.repeat(64); }).args).join(), /not the pin's/);
+  assert.match(verifyPacked(withMigrations(fixture(), (p) => { p.manifest.inventoryAfter = { catalogDelta: { tables: 9 }, functions: {}, removed: [] }; }).args).join(), /inventoryAfter is not baseline\/migrations\.inventory\.json/);
+  assert.match(verifyPacked(withMigrations(fixture(), (p) => { p.entries = p.entries.slice(0, 1); }).args).join(), /container lacks 20270210z_x\.sql/);
+});
+test('FAILS when a migrations container is packaged but the repo pin lists none (a stale package)', () => {
+  const f = withMigrations(fixture(), () => {});
+  fs.writeFileSync(path.join(f.repo, 'baseline', MM.PIN_FILE), JSON.stringify({ schema: 1, baselineSha256: 'x', migrations: [] }));
+  assert.match(verifyPacked(f.args).join(), /lists no migrations/);
+});

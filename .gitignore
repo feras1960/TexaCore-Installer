@@ -147,7 +147,10 @@ verify_*.js
 debug-*.js
 *.rsf
 
-# ═══ Migrations (synced from main repo) ═══
+# ═══ Migrations (synced from the PRIVATE ERP repo) ═══
+# 2.0.2: ./migrations is BUILD OUTPUT (the incremental SQL production received after the baseline cut + the manifest the runtime reads), generated at build time by
+# scripts/sync-migrations.js from the ERP repo's origin/main and packed into the encrypted container (scripts/pack-baseline.js). Neither the SQL nor the manifest is ever
+# committed; only baseline/MIGRATIONS_PIN.json (names, order, sha256 - no SQL) is.
 migrations/
 
 # ═══ Fix scripts (already applied) ═══
@@ -155,8 +158,10 @@ fix-*.sql
 
 # ═══ 2.0.0: build inputs synced from elsewhere at build time — never committed ═══
 # The private production baseline (only baseline/BASELINE_PIN.json is committed); see scripts/sync-baseline.js.
+# baseline/MIGRATIONS_PIN.json (names, order, sha256 of the incremental migrations - no SQL) is committed too; the measured inventory delta (baseline/migrations.inventory.json) is private like the baseline's.
 baseline/*
 !baseline/BASELINE_PIN.json
+!baseline/MIGRATIONS_PIN.json
 # The web bundle (built by the ERP repo, copied by scripts/sync-frontend.js) and the vendored PostgreSQL trees
 # (scripts/prepare-pg-mac.sh, scripts/prepare-pg-win.js) — large, reproducible, and not secret-bearing but not source either.
 /frontend/

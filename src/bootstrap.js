@@ -455,7 +455,25 @@ function compareTotals(expectedTotals, measured) {
   return problems;
 }
 
+/**
+ * The inventory a database is expected to match once the manifest's incremental migrations (2.0.2+: migrations/migrations.json) have ALL been applied:
+ * the baseline's counts + the manifest's measured delta, and the baseline's function map with the added / changed functions merged in.
+ * `manifest.inventoryAfter` = { catalogDelta: { tables, functions, triggers, policies, indexes, views, rlsTables }, functions: { 'public.f(args)': md5 }, removed: [sig] },
+ * measured on a lab install before and after the migrations (and proved against production's post-image: scripts/e2e/migrations-check.js).
+ * Returns { inv, rlsDelta }; without inventoryAfter the baseline inventory is returned unchanged.
+ */
+function applyMigrationInventory(inv, manifest) {
+  const after = manifest && manifest.inventoryAfter;
+  if (!after) return { inv, rlsDelta: 0 };
+  const out = { ...inv, catalog_totals: { ...(inv.catalog_totals || {}) }, functions_md5: { ...(inv.functions_md5 || {}) } };
+  for (const [k, d] of Object.entries(after.catalogDelta || {})) if (k !== 'rlsTables' && out.catalog_totals[k] !== undefined) out.catalog_totals[k] = Number(out.catalog_totals[k]) + Number(d);
+  for (const [sig, md5] of Object.entries(after.functions || {})) out.functions_md5[sig] = md5;
+  for (const sig of after.removed || []) delete out.functions_md5[sig];
+  return { inv: out, rlsDelta: Number((after.catalogDelta || {}).rlsTables || 0) };
+}
+
 module.exports = {
+  applyMigrationInventory,
   MARKER_FILE, EXPECTED_PG_MAJOR, REDACTED_FUNCTIONS, LOCAL_EXTRAS,
   readMarker, writeMarker, markerPath,
   pgMajorOf, detect, moveAside, prepareDataDir,
