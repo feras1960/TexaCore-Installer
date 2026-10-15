@@ -114,7 +114,10 @@
       "category": "public.app-category.business",
       "icon": "build/icon.icns",
       "extendInfo": {
-        "CFBundleIconName": "TexaCore"
+        "CFBundleIconName": "TexaCore",
+        "NSDesktopFolderUsageDescription": "TexaCore looks for the company file you chose in your Desktop folder, so your company file can be kept beside it.",
+        "NSDocumentsFolderUsageDescription": "TexaCore looks for the company file you chose in your Documents folder, so your company file can be kept beside it.",
+        "NSDownloadsFolderUsageDescription": "TexaCore looks for the company file you chose in your Downloads folder, so your company file can be kept beside it."
       },
       "extraResources": [
         {
