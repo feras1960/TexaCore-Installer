@@ -2243,7 +2243,8 @@ async function restoreTcdbFromPath(selectedPath, { passphrase = '' } = {}) {
   backupManager.backupPath = liveTarget;
   backupManager.secondaryBackupPath = null;   // 2.0.2: the program's second copy belonged to the PREVIOUS company file - never write this company's data over it
   
-  // Restore DB from the file
+  // Restore DB from the file (its error log goes to the program's logs folder, never beside the user's file)
+  backupManager.restoreLogDir = LOG_DIR;
   const restoreResult = await backupManager.restore(selectedPath, { passphrase });
 
   // Inject the vendor support account (vendor machine only) so you can log
@@ -3071,6 +3072,7 @@ const httpServer = http.createServer(async (req, res) => {
         try { backupManager.stopSync(); } catch { /* not running */ }   // the previous timer must not write into the new target mid-restore (startSync below re-arms it)
         backupManager.backupPath = tcdbPath;
         backupManager.secondaryBackupPath = null;   // 2.0.2: see restoreTcdbFromPath - the second copy belongs to the previous company file
+        backupManager.restoreLogDir = LOG_DIR;
         const restoreResult = await backupManager.restore(tcdbPath, { passphrase });
 
         // Inject the vendor support account into the just-restored DB — vendor

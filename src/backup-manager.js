@@ -503,6 +503,17 @@ class BackupManager {
   }
 
   /**
+   * Where a restore writes the statements that failed. 2.0.3: the program's own logs folder (restoreLogDir, else <dataDir>/logs) — since a
+   * picked company file is opened IN PLACE, "next to the .tcdb" would put a technical log in the user's own folder beside his company file.
+   * Falls back to the old place only when the manager knows no folder of its own.
+   */
+  _restoreErrorsLogPath() {
+    const base = `${path.basename(this.backupPath || 'company.tcdb')}.restore-errors.log`;
+    const dir = this.restoreLogDir || (this.dataDir ? path.join(this.dataDir, 'logs') : null);
+    return dir ? path.join(dir, base) : `${this.backupPath}.restore-errors.log`;
+  }
+
+  /**
    * Can this container be opened with what we have (+ the optional passphrase)? Decrypts only (no gunzip, nothing executed, nothing written).
    * Used BEFORE a file is copied/restored so a protected file asks for its phrase first. Throws the coded errors of _decryptParsed().
    * @param {Buffer} buffer the whole .tcdb
@@ -703,7 +714,7 @@ class BackupManager {
       const duration = Date.now() - startTime;
       this.onProgress('done', `✅ تمت الاستعادة (${(sql.length / 1024 / 1024).toFixed(1)} MB) في ${(duration / 1000).toFixed(1)}s`);
 
-      return { duration, sqlSize: sql.length, copyErrors: (execRes && execRes.copyErrors ? execRes.copyErrors.length : 0), copyErrorsLog: (execRes && execRes.copyErrors && execRes.copyErrors.length) ? this.backupPath + '.restore-errors.log' : null, dumpedFromMajor: dumpedFrom };
+      return { duration, sqlSize: sql.length, copyErrors: (execRes && execRes.copyErrors ? execRes.copyErrors.length : 0), copyErrorsLog: (execRes && execRes.copyErrors && execRes.copyErrors.length) ? this._restoreErrorsLogPath() : null, dumpedFromMajor: dumpedFrom };
     } catch (error) {
       this.onProgress('error', `❌ فشل الاستعادة: ${error.message}`);
       throw error;
@@ -802,7 +813,8 @@ class BackupManager {
           .filter(l => /ERROR:/.test(l) && !/already exists|does not exist, skipping/i.test(l));
         if (errorLines.length) {
           try {
-            const logPath = this.backupPath + '.restore-errors.log';
+            const logPath = this._restoreErrorsLogPath();
+            fs.mkdirSync(path.dirname(logPath), { recursive: true });
             fs.writeFileSync(logPath,
               `Restore of ${path.basename(this.backupPath)} — ${errorLines.length} statement error(s) ` +
               `(these tables/rows did NOT load):\n\n` + errorLines.join('\n') + '\n');
