@@ -121,7 +121,8 @@ const routeEnv = (rec) => ({
   TEXACORE_TUNNEL_PROBE_BASE: `http://127.0.0.1:${EDGE_PORT}`, TEXACORE_REGISTER_URL: `http://127.0.0.1:${REG_PORT}/register`,
   TEXACORE_TUNNEL_PROBE_TIMING: JSON.stringify({ schedule: [0, 300, 600, 900], quick: [0, 300], recheckMs: 4000, timeoutMs: 1500, repairWaitMs: 25000 }),
 });
-const WIN = `(() => { const g = (id) => document.getElementById(id); const cs = (id) => (g(id) ? getComputedStyle(g(id)).display : 'none');
+const WIN = `(() => { const g = (id) => document.getElementById(id);
+  const cs = (id) => { const e = g(id); return e && e.getClientRects().length > 0 && getComputedStyle(e).visibility !== 'hidden' ? 'block' : 'none'; };    // REALLY visible: an element inside a hidden ancestor has no client rects
   return { status: g('tunnel-status').textContent.trim(), state: g('tunnel-status').dataset.tunnelState, route: g('tunnel-route-msg').textContent.trim(), repair: g('tunnel-repair-msg').textContent.trim(),
     box: cs('tunnel-fix-box'), button: cs('btn-fix-link'), repairShown: cs('tunnel-repair-msg'), setup: cs('cloud-setup'), active: cs('cloud-active') }; })()`;
 

@@ -1328,6 +1328,8 @@ ipcMain.handle('register-subdomain', async (_, subdomain) => {
 ipcMain.handle('verify-subdomain', async () => {
   const config = loadConfig();
   if (!config.subdomain) return { valid: false, reason: 'none' };
+  // isolated release checks (the same switch that skips the DNS lookup before starting the tunnel): the fake name of a check is not in the public DNS, and the window must stay on the active view
+  if (process.env.TEXACORE_TUNNEL_SKIP_DNS === '1' && HARNESS_OK) return { valid: true, reason: 'harness', subdomain: config.subdomain };
   try {
     const ips = await require('dns').promises.resolve4(`${config.subdomain}.texacore.ai`);
     return { valid: Array.isArray(ips) && ips.length > 0, reason: 'resolved', subdomain: config.subdomain };
