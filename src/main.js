@@ -1872,7 +1872,7 @@ const sameFile = (a, b) => {
 /** What a coded file/key error becomes on the wire: a status + the code the page translates (the text is bilingual for logs). */
 function fileErrorStatus(code) {
   return ({ PICK_EXPIRED: 404, FILE_NOT_FOUND: 404, FILE_NOT_LOCAL: 504, FILE_TOO_LARGE: 413, EXPORT_EXISTS: 409, EXPORT_IS_LIVE_FILE: 409,
-    EXPORT_BUSY: 409, TCDB_PASSPHRASE_REQUIRED: 422, TCDB_BAD_PASSPHRASE: 422, TCDB_CORRUPT: 422, PASSPHRASE_TOO_SHORT: 400, BAD_REQUEST: 400, SERVICES_DOWN: 503, EXPORT_EMPTY: 409, NO_PERMISSION: 403 })[code] || 500;
+    EXPORT_BUSY: 409, TCDB_PASSPHRASE_REQUIRED: 422, TCDB_BAD_PASSPHRASE: 422, TCDB_CORRUPT: 422, LEGACY_TCDB: 422, PASSPHRASE_TOO_SHORT: 400, BAD_REQUEST: 400, SERVICES_DOWN: 503, EXPORT_EMPTY: 409, NO_PERMISSION: 403 })[code] || 500;
 }
 
 /**
@@ -2006,6 +2006,28 @@ async function handleCompanyFileRoutes(req, res) {
         return true;
       }
 
+      // ── POST /api/open-picked-tcdb {ref, passphrase?}: open the company file the user picked in the native window and keep working IN it ──
+      //    2.0.3 (owner 15-10: «عند تحديد الملف تزامن معه»): the 2.0.2 page uploaded a COPY to /api/restore-tcdb, which made "<name> (2).tcdb" in
+      //    <Documents>/TexaCore and synced there. This is the 1.x behaviour of GET /api/open-tcdb (restoreTcdbFromPath): restore, then the minute
+      //    sync writes back to the SAME file; a protected export keeps its bytes (the company file gets a free name beside it).
+      case 'POST /api/open-picked-tcdb': {
+        const body = await readJsonBody(req);
+        const item = pickedFiles.get(typeof body.ref === 'string' ? body.ref : '');
+        if (!item) throw Object.assign(new Error('The picked file is no longer available - pick it again'), { code: 'PICK_EXPIRED' });
+        if (item.type !== 'tcdb') throw Object.assign(new Error('Not a TexaCore company file'), { code: 'BAD_REQUEST' });
+        if (!svcManager || !svcManager.isRunning()) throw Object.assign(new Error('The services are not running'), { code: 'SERVICES_DOWN' });
+        // an evicted iCloud / OneDrive file must be local before the restore reads it synchronously (that read would block for good)
+        const idleMs = (HARNESS_OK && Number(process.env.TEXACORE_E2E_READ_IDLE_MS)) || 20000;
+        const buf = await companyFile.readFileIdle(item.filePath, { idleMs });
+        if (!isTcdbContainer(buf)) throw Object.assign(new Error('Not a TexaCore backup file'), { code: 'BAD_REQUEST' });
+        const passphrase = typeof body.passphrase === 'string' ? body.passphrase.slice(0, 256) : '';
+        newBackupManager().probeAccess(buf, { passphrase });   // a protected file answers TCDB_PASSPHRASE_REQUIRED / TCDB_BAD_PASSPHRASE BEFORE anything changes
+        const out = await restoreTcdbFromPath(item.filePath, { passphrase });
+        fileLog('[Pick] opened in place', item.filePath, '→ company file', out && out.tcdbPath);
+        sendJson(res, 200, { ...out, openedFrom: item.filePath, inPlace: !!(out && out.tcdbPath && path.resolve(out.tcdbPath) === path.resolve(item.filePath)) });
+        return true;
+      }
+
       // ── GET /api/picked-file?ref=…: the bytes of what the user picked (the page needs them for the import wizard / the restore) ──
       case 'GET /api/picked-file': {
         const item = pickedFiles.get(urlObj.searchParams.get('ref'));
@@ -2041,6 +2063,7 @@ const DESTRUCTIVE_API = new Set([
   '/api/update/install', '/api/update/pause', '/api/update/resume', '/api/update/retry', '/api/invite-employee',
   // 2.0.2: write files / open native dialogs / read a file the user picked — the same same-machine-origin rule as the rest
   '/api/export-backup', '/api/reveal-in-folder', '/api/pick-company-file', '/api/pick-save-location', '/api/picked-file', '/api/e2e-dialog',
+  '/api/open-picked-tcdb',   // 2.0.3: restores the picked company file and keeps syncing into it
 ]);
 // 2.0.0: every admin-API call except /api/ping must carry this install's secret (secrets.json → /config.js, same-origin only;
 // the Electron window gets it over IPC). It keeps other local programs and foreign web pages — which CORS "*" and a loopback
@@ -2205,8 +2228,15 @@ async function restoreTcdbFromPath(selectedPath, { passphrase = '' } = {}) {
   // 2.0.2: a file that opened only WITH a passphrase is an export meant to leave the computer. The live company file is written with the install's own
   // key every minute, so syncing back over it would silently strip its protection - the company file goes to its own new name instead, the export is untouched.
   const openedWithPassphrase = !!passphrase && backupManager.probeAccess(fs.readFileSync(selectedPath), { passphrase }).usedPassphrase;
-  const liveTarget = openedWithPassphrase ? companyFile.uniqueTcdbPath(companyFile.defaultCompanyDir(), fileName.replace(/\.tcdb$/i, '')) : selectedPath;
-  if (openedWithPassphrase) fs.mkdirSync(path.dirname(liveTarget), { recursive: true });
+  // 2.0.3: the work continues IN the opened file when it can be written; a protected export (or a file in a folder / on a medium this user cannot
+  // write) keeps its bytes and the company file gets a free name BESIDE it - or in <Documents>/TexaCore when its folder is read-only.
+  let fileWritable = false;
+  try { fs.accessSync(selectedPath, fs.constants.W_OK); fileWritable = true; } catch { fileWritable = false; }
+  const besideOk = companyFile.folderIsWritable(fileDir).ok;
+  const liveTarget = (!openedWithPassphrase && fileWritable && besideOk)
+    ? selectedPath
+    : companyFile.uniqueTcdbPath(besideOk ? fileDir : companyFile.defaultCompanyDir(), fileName.replace(/\.tcdb$/i, ''));
+  if (liveTarget !== selectedPath) fs.mkdirSync(path.dirname(liveTarget), { recursive: true });
 
   // Point backup to the ORIGINAL file (USB, Desktop, wherever)
   try { backupManager.stopSync(); } catch { /* not running */ }   // no tick of the previous timer may dump the old / half-restored DB into the opened file
@@ -2222,17 +2252,18 @@ async function restoreTcdbFromPath(selectedPath, { passphrase = '' } = {}) {
   // Re-apply the admin-portal password (the restore replaced the DB).
   try { if (svcManager) await svcManager.syncAdminPassword(); } catch (e) { console.warn('[Open-TCDB] admin pw sync:', e.message); }
 
-  // Also copy to C:\TexaCore as secondary
-  try {
-    const tcdbDir = isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore');
-    if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
-    const secondaryPath = path.join(tcdbDir, fileName);
-    if (selectedPath !== secondaryPath && !openedWithPassphrase) {
-      fs.copyFileSync(selectedPath, secondaryPath);
-      console.log(`[OpenTCDB] Secondary copy → ${secondaryPath}`);
-    }
-  } catch {}
-  
+  // A one-off copy of the file as it was opened, in the program's own backups folder under a free name (1.x copied it over
+  // <Documents>/TexaCore/<same name>, which could be ANOTHER company's file). Only when the work continues in the opened file itself.
+  if (liveTarget === selectedPath) {
+    try {
+      // one per company file per day: <app data>/backups/<name>.opened-<yyyy-mm-dd>.tcdb (EXCL: an existing copy of today is kept, never replaced)
+      const safetyCopy = path.join(DATA_DIR, 'backups', `${companyFile.safeFileBase(fileName.replace(/\.tcdb$/i, ''), 'company')}.opened-${companyFile.localDateStamp()}.tcdb`);
+      fs.mkdirSync(path.dirname(safetyCopy), { recursive: true });
+      fs.copyFileSync(selectedPath, safetyCopy, fs.constants.COPYFILE_EXCL);
+      fileLog('[OpenTCDB] copy of the opened file as it was →', safetyCopy);
+    } catch (e) { if (!e || e.code !== 'EEXIST') console.warn('[OpenTCDB] safety copy:', e && e.message); }
+  }
+
   // Start periodic sync — writes back to ORIGINAL file
   backupManager.startSync();
 
