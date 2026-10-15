@@ -1032,6 +1032,117 @@ async function main() {
         await dialog({ save: null });
         return 'ok';
       });
+
+      // ── 2.0.3: a company file picked in the native window opens IN PLACE (POST /api/open-picked-tcdb) ──
+      const exportTo = async (target, passphrase) => {
+        await dialog({ save: target });
+        const r = await api('POST', '/api/export-backup', { mode: 'choose', fileBase: 'ignored', ...(passphrase ? { passphrase } : {}) });
+        await dialog({ save: null });
+        if (!r.json.success || r.json.path !== target) throw new Error(`export to ${target} → ${r.text.slice(0, 250)}`);
+        return target;
+      };
+      const pickTcdb = async (file) => { await dialog({ open: file }); const r = (await api('POST', '/api/pick-company-file', {})).json; await dialog({ open: null }); return r; };
+      const openPicked = (ref, extra = {}) => api('POST', '/api/open-picked-tcdb', { ref, ...extra });
+      const walk = (d) => (fs.existsSync(d) ? fs.readdirSync(d).sort() : []);
+      const counts4 = async () => (await pg('SELECT (SELECT count(*) FROM public.companies)::int c, (SELECT count(*) FROM public.tenants)::int t, (SELECT count(*) FROM auth.users)::int u, (SELECT count(*) FROM public.chart_of_accounts)::int a')).rows[0];
+
+      await R.check('7.9a (2.0.3) an UNPROTECTED .tcdb picked in the native window opens IN PLACE: success + inPlace, the minute sync then rewrites the SAME file (no "(2)" file appears), one safety copy lands in the program\'s backups folder, the rows are those of the file', async () => {
+        const dir = path.join(WORK, 'inplace-plain'); fs.mkdirSync(dir, { recursive: true });
+        const target = await exportTo(path.join(dir, 'Mine.tcdb'));
+        const c0 = await counts4();
+        const bytes0 = fs.readFileSync(target); const sha0 = sha(bytes0); const st0 = fs.statSync(target);
+        const filesBefore = walk(dir).join('|');
+        const copiesBefore = walk(copyDir).filter((f) => /^Mine\.opened-\d{4}-\d{2}-\d{2}\.tcdb$/.test(f));
+        const pick = await pickTcdb(target);
+        if (!pick.success || pick.type !== 'tcdb' || !pick.ref) throw new Error(`pick → ${JSON.stringify(pick).slice(0, 200)}`);
+        const r = await openPicked(pick.ref);
+        if (r.status !== 200 || !r.json.success) throw new Error(`open-picked-tcdb → ${r.status} ${r.text.slice(0, 300)}`);
+        if (r.json.inPlace !== true || path.resolve(r.json.tcdbPath) !== path.resolve(target) || path.resolve(r.json.openedFrom) !== path.resolve(target)) throw new Error(`not in place: ${JSON.stringify({ inPlace: r.json.inPlace, tcdbPath: r.json.tcdbPath, openedFrom: r.json.openedFrom })}`);
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the opened file changed the rows');
+        // sync ticks: the live target is the picked file itself
+        await waitFor(async () => { const s_ = await status(); return s_.backupPath && path.resolve(s_.backupPath) === path.resolve(target); }, 'the picked file as the live target');
+        let changed = false; let st1 = st0;
+        for (let i = 0; i < 6 && !changed; i++) {
+          await api('POST', '/api/backup', {}); await new Promise((x) => setTimeout(x, 800));
+          st1 = fs.statSync(target);
+          changed = st1.mtimeMs > st0.mtimeMs || st1.size !== st0.size;
+        }
+        if (!changed) throw new Error(`the picked file was never rewritten by the sync (mtime ${st0.mtimeMs} -> ${st1.mtimeMs}, size ${st0.size} -> ${st1.size})`);
+        const after = fs.readFileSync(target);
+        if (after.subarray(0, 4).toString('latin1') !== 'TCDB') throw new Error('the file in place is not a .tcdb any more');
+        const filesAfter = walk(dir).join('|');
+        // the restore's own "statements that did not load" log lands beside the file it restored from (backup-manager: <file>.restore-errors.log; a full-schema dump onto an existing schema always reports the
+        // already-existing primary keys of the auth tables) - 2.0.2 wrote it into <Documents>/TexaCore beside the program copy. Nothing ELSE may appear.
+        const extra = walk(dir).filter((f) => f !== 'Mine.tcdb' && f !== 'Mine.tcdb.restore-errors.log');
+        if (extra.length) throw new Error(`files appeared beside the picked one: ${filesBefore} -> ${filesAfter}`);
+        if (walk(dir).some((f) => /\(2\)/.test(f) || /\.tmp$/.test(f))) throw new Error(`a "(2)" / temp file exists: ${walk(dir).join(', ')}`);
+        const errLog = path.join(dir, 'Mine.tcdb.restore-errors.log'); const errLogNote = fs.existsSync(errLog) ? `; restore log beside it: ${fs.statSync(errLog).size} bytes` : '';
+        const copiesAfter = walk(copyDir).filter((f) => /^Mine\.opened-\d{4}-\d{2}-\d{2}\.tcdb$/.test(f));
+        if (copiesAfter.length !== copiesBefore.length + 1) throw new Error(`safety copy: ${copiesBefore.length} -> ${copiesAfter.length} (${walk(copyDir).join(', ')})`);
+        const copy = fs.readFileSync(path.join(copyDir, copiesAfter.filter((f) => !copiesBefore.includes(f))[0]));
+        if (sha(copy) !== sha0) throw new Error('the safety copy is not the file as it was picked');
+        const st = await status();
+        return `inPlace=true; the SAME file rewritten by the sync (mtime +${Math.round(st1.mtimeMs - st0.mtimeMs)} ms, size ${st0.size} -> ${st1.size}), folder unchanged (${filesAfter}); safety copy ${copiesAfter.filter((f) => !copiesBefore.includes(f))[0]} = the picked bytes; sync state ${st.state}${errLogNote}`;
+      });
+
+      await R.check('7.9b (2.0.3) a PROTECTED export is never overwritten: without the phrase 422 TCDB_PASSPHRASE_REQUIRED (nothing changes), wrong phrase 422 TCDB_BAD_PASSPHRASE, with the phrase success + inPlace=false and the company file gets a free name BESIDE it; the export keeps its bytes and its protection after sync ticks', async () => {
+        const dir = path.join(WORK, 'inplace-protected'); fs.mkdirSync(dir, { recursive: true });
+        const prot = await exportTo(path.join(dir, 'Protected.tcdb'), 'correct horse battery');
+        const protSha = sha(fs.readFileSync(prot));
+        const c0 = await counts4(); const stBefore = await status();
+        const filesBefore = walk(dir).join('|');
+        const pick = await pickTcdb(prot);
+        if (!pick.success || !pick.ref) throw new Error(`pick → ${JSON.stringify(pick).slice(0, 200)}`);
+        const none = await openPicked(pick.ref);
+        if (none.status !== 422 || none.json.code !== 'TCDB_PASSPHRASE_REQUIRED') throw new Error(`no phrase → ${none.status} ${none.text.slice(0, 200)}`);
+        const wrong = await openPicked(pick.ref, { passphrase: 'not the phrase' });
+        if (wrong.status !== 422 || wrong.json.code !== 'TCDB_BAD_PASSPHRASE') throw new Error(`wrong phrase → ${wrong.status} ${wrong.text.slice(0, 200)}`);
+        if (walk(dir).join('|') !== filesBefore) throw new Error(`a refused open wrote files: ${filesBefore} -> ${walk(dir).join('|')}`);
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('a refused open changed the database');
+        const stMid = await status();
+        if (stMid.backupPath !== stBefore.backupPath) throw new Error(`a refused open moved the live target: ${stBefore.backupPath} -> ${stMid.backupPath}`);
+        const good = await openPicked(pick.ref, { passphrase: 'correct horse battery' });
+        if (good.status !== 200 || !good.json.success) throw new Error(`right phrase → ${good.status} ${good.text.slice(0, 300)}`);
+        const free = path.join(dir, 'Protected (2).tcdb');
+        if (good.json.inPlace !== false || path.resolve(good.json.tcdbPath) !== path.resolve(free)) throw new Error(`expected a new file beside the export: ${JSON.stringify({ inPlace: good.json.inPlace, tcdbPath: good.json.tcdbPath })}`);
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the protected file changed the rows');
+        await waitFor(async () => { const s_ = await status(); return s_.backupPath && path.resolve(s_.backupPath) === path.resolve(free); }, 'the free name as the live target');
+        for (let i = 0; i < 3; i++) { await api('POST', '/api/backup', {}); await new Promise((x) => setTimeout(x, 800)); }
+        if (sha(fs.readFileSync(prot)) !== protSha) throw new Error('the protected export was rewritten');
+        const m = multipart(fs.readFileSync(prot), 'Protected.tcdb', {});
+        const again = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m.ct }, body: m.body });
+        if (again.status !== 422 || again.json.code !== 'TCDB_PASSPHRASE_REQUIRED') throw new Error(`the export lost its protection: ${again.status}`);
+        const live = fs.readFileSync(free);
+        if (live.subarray(0, 4).toString('latin1') !== 'TCDB' || sha(live) === protSha) throw new Error('the live file is not a fresh install-key dump');
+        if (walk(dir).some((f) => /\.tmp$/.test(f))) throw new Error(`a temp file was left: ${walk(dir).join(', ')}`);
+        const stray = walk(dir).filter((f) => f !== 'Protected.tcdb' && f !== 'Protected (2).tcdb' && f !== 'Protected (2).tcdb.restore-errors.log');
+        if (stray.length) throw new Error(`unexpected files beside the export: ${stray.join(', ')}`);
+        return `no phrase / wrong phrase: 422 with no write and the live target unchanged; with the phrase: inPlace=false, "${path.basename(free)}" is the live target; "${path.basename(prot)}" byte-identical after sync ticks and still asks for its phrase`;
+      });
+
+      await R.check('7.9c (2.0.3) a made-up / expired reference is refused: 404 PICK_EXPIRED, nothing changes', async () => {
+        const c0 = await counts4(); const st0 = await status();
+        const r = await openPicked('does-not-exist-0000');
+        const r2 = await api('POST', '/api/open-picked-tcdb', {});
+        if (r.status !== 404 || r.json.code !== 'PICK_EXPIRED') throw new Error(`unknown ref → ${r.status} ${r.text.slice(0, 200)}`);
+        if (r2.status !== 404 || r2.json.code !== 'PICK_EXPIRED') throw new Error(`no ref → ${r2.status} ${r2.text.slice(0, 200)}`);
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0) || (await status()).backupPath !== st0.backupPath) throw new Error('a refused open changed something');
+        return 'unknown ref and no ref: 404 PICK_EXPIRED';
+      });
+
+      await R.check('7.9d (2.0.3) a picked .rsf is not a company file: open-picked-tcdb answers 400 BAD_REQUEST, nothing changes; the route needs the install secret and is not served to a LAN Host', async () => {
+        const c0 = await counts4(); const st0 = await status();
+        const pick = await pickTcdb(rsfFile);
+        if (!pick.success || pick.type !== 'rsf' || !pick.ref) throw new Error(`pick rsf → ${JSON.stringify(pick).slice(0, 200)}`);
+        const r = await openPicked(pick.ref);
+        if (r.status !== 400 || r.json.code !== 'BAD_REQUEST') throw new Error(`rsf ref → ${r.status} ${r.text.slice(0, 200)}`);
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0) || (await status()).backupPath !== st0.backupPath) throw new Error('a refused open changed something');
+        const noSecret = await request('POST', `${ADMIN}/api/open-picked-tcdb`, { body: { ref: pick.ref } });
+        if (noSecret.status !== 401) throw new Error(`without the secret → ${noSecret.status}`);
+        const lan = await request('POST', `${UI}/api/open-picked-tcdb`, { headers: { ...H, Host: `192.168.77.20:${PORTS.ui}` }, body: { ref: pick.ref } });
+        if (lan.status < 400) throw new Error(`from a LAN Host → ${lan.status}`);
+        return `rsf ref: 400 BAD_REQUEST; without the secret: ${noSecret.status}; from a LAN Host: ${lan.status}`;
+      });
     }
   } catch (e) {
     R.rows.push({ name: 'harness', ok: false, evidence: e.stack || e.message, ms: 0 });

@@ -375,12 +375,15 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         const rest = await request('GET', `${API}/rest/v1/fabric_materials?select=code&id=eq.${cardOld.id}`, { headers: { apikey: upg.secrets.anonKey, Authorization: `Bearer ${login.json.access_token}` } });
         if (rest.status !== 200 || !rest.json.length || rest.json[0].code !== 'OLD-1') throw new Error(`REST read of the old card → ${rest.status} ${rest.text.slice(0, 160)}`);
         n1 = rows.map((r) => `${r.id}:${r.applied_at.toISOString()}`);
+        // 2.0.3: the plan answer the ERP page asks for (closed to anybody but the caller's own tenant by 20270210x) is still given to the admin an OLDER build created
+        const plan = await request('POST', `${API}/rest/v1/rpc/get_all_plan_limits`, { headers: { apikey: upg.secrets.anonKey, Authorization: `Bearer ${login.json.access_token}` }, body: { p_tenant_id: oc.tenantId } });
+        if (plan.status !== 200 || !plan.json || plan.json.error || !plan.json.plan_code || !Array.isArray(plan.json.modules) || !plan.json.modules.length) throw new Error(`the old admin's plan answer: ${plan.status} ${plan.text.slice(0, 200)}`);
         // a new card on the upgraded company: M-000001 (the typed OLD-1 is not an M-<digits> code)
         const auth = { apikey: upg.secrets.anonKey, Authorization: `Bearer ${login.json.access_token}`, Prefer: 'return=representation' };
         const r1 = await request('POST', `${API}/rest/v1/fabric_materials`, { headers: auth, body: { tenant_id: oc.tenantId, company_id: oc.companyId, code: null, name_ar: 'بطاقة جديدة' } });
         if (r1.status !== 201 || r1.json[0].code !== 'M-000001') throw new Error(`new card on the upgraded install → ${r1.status} ${r1.text.slice(0, 200)}`);
         postFp = await fingerprint(); catPost = await catalog(); invPost = await invFns();
-        return `${got.length} applied on start; counts ${JSON.stringify(counts1)} unchanged; OLD-1 intact and readable by its admin; new card ${r1.json[0].code}; migrations.log ${ok} ✅`;
+        return `${got.length} applied on start; counts ${JSON.stringify(counts1)} unchanged; OLD-1 intact and readable by its admin, who still gets his plan answer (${plan.json.plan_code}, ${plan.json.modules.length} modules); new card ${r1.json[0].code}; migrations.log ${ok} ✅`;
       });
     } finally { if (upg) await stopApp(upg.child, B); }
 
@@ -464,11 +467,13 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         const auth = { apikey: cu.secrets.anonKey, Authorization: `Bearer ${login.json.access_token}`, Prefer: 'return=representation' };
         const rest = await request('GET', `${API}/rest/v1/fabric_materials?select=code&id=eq.${cardOld.id}`, { headers: auth });
         if (rest.status !== 200 || !rest.json.length || rest.json[0].code !== 'OLD-1') throw new Error(`REST read of the old card → ${rest.status} ${rest.text.slice(0, 160)}`);
+        const plan = await request('POST', `${API}/rest/v1/rpc/get_all_plan_limits`, { headers: auth, body: { p_tenant_id: oc.tenantId } });
+        if (plan.status !== 200 || !plan.json || plan.json.error || !plan.json.plan_code || !Array.isArray(plan.json.modules) || !plan.json.modules.length) throw new Error(`the old admin's plan answer: ${plan.status} ${plan.text.slice(0, 200)}`);
         const r1 = await request('POST', `${API}/rest/v1/fabric_materials`, { headers: auth, body: { tenant_id: oc.tenantId, company_id: oc.companyId, code: null, name_ar: 'بطاقة جديدة' } });
         if (r1.status !== 201 || r1.json[0].code !== 'M-000001') throw new Error(`new card on the upgraded install → ${r1.status} ${r1.text.slice(0, 200)}`);
         n1 = now;
         cPostFp = await fingerprint();
-        return `${NAMES.length - nPrev} applied on start (${NAMES.slice(nPrev).map((n) => n.replace(/^2027021/, '').split('_')[0]).join(' ')}), the ${nPrev} older rows untouched; counts ${JSON.stringify(counts1)} unchanged; OLD-1 readable by its admin; new card ${r1.json[0].code}; migrations.log ${ok} ✅`;
+        return `${NAMES.length - nPrev} applied on start (${NAMES.slice(nPrev).map((n) => n.replace(/^2027021/, '').split('_')[0]).join(' ')}), the ${nPrev} older rows untouched; counts ${JSON.stringify(counts1)} unchanged; OLD-1 readable by its admin, who still gets his plan answer (${plan.json.plan_code}); new card ${r1.json[0].code}; migrations.log ${ok} ✅`;
       });
     } finally { if (cu) await stopApp(cu.child, C); }
     let c2 = null;
