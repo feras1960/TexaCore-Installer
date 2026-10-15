@@ -2284,6 +2284,7 @@ async function restoreTcdbFromPath(selectedPath, { passphrase = '' } = {}) {
 
   // Point backup to the ORIGINAL file (USB, Desktop, wherever)
   try { backupManager.stopSync(); } catch { /* not running */ }   // no tick of the previous timer may dump the old / half-restored DB into the opened file
+  await backupManager.waitIdle();   // ... and a dump already running must finish BEFORE the target is re-pointed (it would write the old database into the opened file) and before the truncate
   backupManager.backupPath = liveTarget;
   backupManager.secondaryBackupPath = null;   // 2.0.2: the program's second copy belonged to the PREVIOUS company file - never write this company's data over it
   
@@ -3114,6 +3115,7 @@ const httpServer = http.createServer(async (req, res) => {
         
         // Restore the database from TCDB
         try { backupManager.stopSync(); } catch { /* not running */ }   // the previous timer must not write into the new target mid-restore (startSync below re-arms it)
+        await backupManager.waitIdle();   // a dump already running finishes first (see restoreTcdbFromPath)
         backupManager.backupPath = tcdbPath;
         backupManager.secondaryBackupPath = null;   // 2.0.2: see restoreTcdbFromPath - the second copy belongs to the previous company file
         backupManager.restoreLogDir = LOG_DIR;

@@ -66,6 +66,7 @@ class BackupManager {
 
     this._timer = null;
     this._running = false;
+    this._restoring = false;   // a restore is running: the timer's backup() skips (it would dump a half-cleared database and hold locks the truncate needs)
     this._lastBackupTime = null;
     this._backupCount = 0;
     // 2.0.2: what the user is shown - per target ('primary' = the company file, 'copy' = the program's own second copy): when it last
@@ -134,6 +135,10 @@ class BackupManager {
   async backup() {
     if (this._running) {
       console.log('[BackupManager] Backup already in progress, skipping');
+      return null;
+    }
+    if (this._restoring) {
+      console.log('[BackupManager] A restore is running, skipping this backup');
       return null;
     }
 
@@ -611,7 +616,28 @@ class BackupManager {
     return BackupManager.dumpedFromMajor(sql.subarray(0, 4000).toString('utf8'));
   }
 
+  /**
+   * Resolve once no backup is running (or after `maxMs`): a dump that started before a restore reads the very tables the restore truncates (they deadlock),
+   * and one that finishes after the target was re-pointed would write the OLD database into the new target file.
+   */
+  async waitIdle(maxMs = 120000) {
+    const t0 = Date.now();
+    while (this._running && Date.now() - t0 < maxMs) await new Promise((r) => setTimeout(r, 100));
+    return !this._running;
+  }
+
+  /** Restore a .tcdb into the database. A running backup is waited for first and no new one starts until the restore is over. */
   async restore(filePath, { passphrase = '' } = {}) {
+    this._restoring = true;
+    try {
+      await this.waitIdle();
+      return await this._restoreFile(filePath, { passphrase });
+    } finally {
+      this._restoring = false;
+    }
+  }
+
+  async _restoreFile(filePath, { passphrase = '' } = {}) {
     const tcdbPath = filePath || this.backupPath;
     if (!fs.existsSync(tcdbPath)) {
       throw new Error(`ملف النسخة الاحتياطية غير موجود: ${tcdbPath}`);
@@ -870,7 +896,21 @@ class BackupManager {
    * restore loudly — leaving the previous company's data intact rather than
    * corrupt. to_regclass guards tables the dump will CREATE (not yet present).
    */
-  _truncatePublic(tables) {
+  async _truncatePublic(tables) {
+    // The truncate is ONE rolled-back-on-failure transaction, so a retry is safe. A query that another client (PostgREST for an ERP page open in a browser tab, GoTrue)
+    // has in flight can deadlock with it, and the deadlock detector picks the TRUNCATE as the victim: try again a few times before the restore fails.
+    const delays = this.truncateRetryDelaysMs || [1000, 2000, 4000];
+    for (let attempt = 0; ; attempt++) {
+      try { return await this._truncatePublicOnce(tables); } catch (e) {
+        const transient = /deadlock detected|canceling statement due to lock timeout/i.test(String(e && e.message));
+        if (!transient || attempt >= delays.length) throw e;
+        console.warn(`[BackupManager] the pre-restore truncate collided with another query (${/deadlock/i.test(e.message) ? 'deadlock' : 'lock timeout'}); retry ${attempt + 1}/${delays.length} in ${delays[attempt]} ms`);
+        await new Promise((r) => setTimeout(r, delays[attempt]));
+      }
+    }
+  }
+
+  _truncatePublicOnce(tables) {
     return new Promise((resolve, reject) => {
       if (!tables || tables.length === 0) return resolve();
       const arr = tables.map(t => "'" + t.replace(/'/g, "''") + "'").join(',');
