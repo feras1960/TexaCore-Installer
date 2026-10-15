@@ -63,12 +63,15 @@ async function main() {
   fs.mkdirSync(WORK, { recursive: true });
   const userData = path.join(WORK, 'userdata');
   const logFile = path.join(WORK, 'app.log');
+  // 2.0.3: the folders POST /api/locate-picked-file may search in this run (it never scans the real profile): the checks below put their files here
+  const LOCATE_ROOTS = [path.join(WORK, 'locate-a'), path.join(WORK, 'locate-b')];
+  for (const d of LOCATE_ROOTS) fs.mkdirSync(d, { recursive: true });
   for (const p of Object.values(PORTS)) if (!(await portFree(p))) { console.error(`port ${p} is in use — stop whatever holds it first`); process.exit(2); }
 
   console.log(`launch-check: license=${LICENSE} workdir=${WORK}`);
   const appBinary = APP ? path.join(path.resolve(APP), 'Contents', 'MacOS', path.basename(path.resolve(APP), '.app')) : '';
   if (APP && !fs.existsSync(appBinary)) { console.error(`no executable at ${appBinary}`); process.exit(2); }
-  const { child, ready } = startApp({ userData, license: LICENSE, logFile, appBinary, extraEnv: { TEXACORE_UI_SMOKE: '1', ...(TCDB_IN_COMPANY_FOLDER ? { TEXACORE_TCDB_DIR: path.join(WORK, 'rashid-folder') } : {}) } });
+  const { child, ready } = startApp({ userData, license: LICENSE, logFile, appBinary, extraEnv: { TEXACORE_UI_SMOKE: '1', TEXACORE_E2E_LOCATE_ROOTS: LOCATE_ROOTS.join(path.delimiter), ...(TCDB_IN_COMPANY_FOLDER ? { TEXACORE_TCDB_DIR: path.join(WORK, 'rashid-folder') } : {}) } });
   let secrets = null;
   try {
     await R.check('1.1 first run: initdb → baseline → services up', async () => {
@@ -1142,6 +1145,183 @@ async function main() {
         const lan = await request('POST', `${UI}/api/open-picked-tcdb`, { headers: { ...H, Host: `192.168.77.20:${PORTS.ui}` }, body: { ref: pick.ref } });
         if (lan.status < 400) throw new Error(`from a LAN Host → ${lan.status}`);
         return `rsf ref: 400 BAD_REQUEST; without the secret: ${noSecret.status}; from a LAN Host: ${lan.status}`;
+      });
+
+      // ── 2.0.3 round 2: the page picks the file in the BROWSER's own chooser (Playwright setInputFiles on the launcher input = the same path), the page hashes it and
+      //    POST /api/locate-picked-file finds the real file; the app only searches the folders of TEXACORE_E2E_LOCATE_ROOTS (locate-a, locate-b) in this run ──
+      const LA = LOCATE_ROOTS[0]; const LB = LOCATE_ROOTS[1]; const OUTSIDE = path.join(WORK, 'locate-outside'); fs.mkdirSync(OUTSIDE, { recursive: true });
+      const ui2 = `http://localhost:${PORTS.ui}`;
+      const openInBrowser = (file, tag, extra = []) => {
+        const out = require('child_process').spawnSync('node', [path.join(__dirname, 'browser-open-file.cjs'), '--erp', ERP, '--ui', ui2, '--file', file, '--shots', path.join(WORK, 'shots-open'), '--tag', tag, ...extra], { encoding: 'utf8', timeout: 240000 });
+        const line = (out.stdout || '').split('\n').find((l) => l.startsWith('OPENFILE '));
+        if (!line) throw new Error(`browser step failed (exit ${out.status}): ${(out.stderr || out.stdout || '').slice(0, 400)}`);
+        return JSON.parse(line.slice('OPENFILE '.length));
+      };
+      const locateApi = (b) => api('POST', '/api/locate-picked-file', b);
+      const fileSha = (f) => sha(fs.readFileSync(f));
+      const bodyOf = (f) => ({ name: path.basename(f), size: fs.statSync(f).size, lastModified: Math.round(fs.statSync(f).mtimeMs), sha256: fileSha(f) });
+      const NOTE_INPLACE = /الملف نفسه الذي فتحته|file you opened|відкритий вами файл|открытый вами файл/;
+      const NOTE_BESIDE = /بقي كما هو|stays as it was|залишився без змін|остался без изменений/;
+      const NOTE_NOT_LOCATED_TCDB = /تعذّر تحديد مكان الملف الذي اخترته|could not be located on this computer|Не вдалося визначити місце вибраного файлу|Не удалось определить место выбранного файла/;
+      const NOTE_NOT_LOCATED_RSF = /تعذّر تحديد مكان ملف الرشيد|Rashid file could not be located|Не вдалося визначити місце файлу Рашид|Не удалось определить место файла Рашид/;
+      const NOTE_BESIDE_RSF = /سيُحفظ ملف الشركة \(\.tcdb\) بجانب ملف الرشيد|will be saved beside the Rashid file|буде збережено поруч із файлом Рашид|будет сохранён рядом с файлом Рашид/;
+
+      await R.check('7.10a (2.0.3 browser chooser) an UNPROTECTED .tcdb chosen in the BROWSER\'s chooser is located by name+size+SHA-256 and opened IN PLACE: the page sends no path, the same file is rewritten by the sync (no "(2)", no restore log beside it), the login view says it is saved into that file', async () => {
+        const dir = path.join(LA, 'plain'); fs.mkdirSync(dir, { recursive: true });
+        const target = await exportTo(path.join(dir, 'Chooser Mine.tcdb'));
+        const c0 = await counts4(); const st0 = fs.statSync(target); const sha0 = fileSha(target);
+        const copiesBefore = walk(copyDir).filter((f) => /^Chooser Mine\.opened-\d{4}-\d{2}-\d{2}\.tcdb$/.test(f));
+        const res = openInBrowser(target, '7-10a');
+        const rq = res.locateRequest;
+        if (!rq || JSON.stringify(rq.keys) !== JSON.stringify(['lastModified', 'name', 'sha256', 'size']) || rq.name !== 'Chooser Mine.tcdb' || rq.size !== st0.size || !rq.shaOk || !rq.lastModifiedIsNumber) throw new Error(`what the page sent: ${JSON.stringify(rq)}`);
+        if (res.alerts.length) throw new Error(`the page alerted: ${res.alerts.join(' | ')}`);
+        if (!res.located || res.located.success !== true || res.located.type !== 'tcdb' || !res.located.hasRef || path.resolve(res.located.filePath) !== path.resolve(target)) throw new Error(`located → ${JSON.stringify(res.located)}`);
+        const routes = res.routes.map((r) => `${r.route}:${r.status}`);
+        if (!routes.includes('open-picked-tcdb:200') || routes.some((r) => r.startsWith('restore-tcdb') || r.startsWith('pick-company-file'))) throw new Error(`the page used ${routes.join(', ')}`);
+        if (!res.note || res.note.testId !== 'live-company-file-note' || !res.note.text.includes(target) || !NOTE_INPLACE.test(res.note.text)) throw new Error(`login-view note → ${JSON.stringify(res.note)}`);
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the opened file changed the rows');
+        await waitFor(async () => { const s_ = await status(); return s_.backupPath && path.resolve(s_.backupPath) === path.resolve(target); }, 'the chosen file as the live target');
+        let changed = false; let st1 = st0;
+        for (let i = 0; i < 6 && !changed; i++) { await api('POST', '/api/backup', {}); await new Promise((x) => setTimeout(x, 800)); st1 = fs.statSync(target); changed = st1.mtimeMs > st0.mtimeMs || st1.size !== st0.size; }
+        if (!changed) throw new Error('the chosen file was never rewritten by the sync');
+        const left = walk(dir);
+        if (left.join('|') !== 'Chooser Mine.tcdb') throw new Error(`files in the folder: ${left.join(', ')} (a "(2)" copy or a restore log beside the user's file)`);
+        const copiesAfter = walk(copyDir).filter((f) => /^Chooser Mine\.opened-\d{4}-\d{2}-\d{2}\.tcdb$/.test(f));
+        if (copiesAfter.length !== copiesBefore.length + 1 || sha(fs.readFileSync(path.join(copyDir, copiesAfter.filter((f) => !copiesBefore.includes(f))[0]))) !== sha0) throw new Error('the safety copy of the opened file is missing or differs');
+        return `page sent {name,size,lastModified,sha256} only; located ${path.basename(res.located.filePath)} in locate-a; open-picked-tcdb 200; the SAME file rewritten (mtime +${Math.round(st1.mtimeMs - st0.mtimeMs)} ms); folder = [${left.join(', ')}]; note "${res.note.text.slice(0, 60)}…"; status line(s) seen: ${JSON.stringify(res.statusTexts)}`;
+      });
+
+      await R.check('7.10b (2.0.3 browser chooser) a PROTECTED export chosen in the browser: the page asks for the phrase, nothing is overwritten - the company file is "<name> (2).tcdb" BESIDE it, the export stays byte-identical (and protected), the note says so', async () => {
+        const dir = path.join(LA, 'protected'); fs.mkdirSync(dir, { recursive: true });
+        const prot = await exportTo(path.join(dir, 'Protected.tcdb'), 'correct horse battery');
+        const protSha = fileSha(prot); const c0 = await counts4();
+        const res = openInBrowser(prot, '7-10b', ['--phrase', 'correct horse battery']);
+        if (!res.prompt) throw new Error('the page never asked for the phrase');
+        if (!res.located || res.located.success !== true || path.resolve(res.located.filePath) !== path.resolve(prot)) throw new Error(`located → ${JSON.stringify(res.located)}`);
+        const routes = res.routes.map((r) => `${r.route}:${r.status}`);
+        if (!routes.includes('open-picked-tcdb:422') || !routes.includes('open-picked-tcdb:200')) throw new Error(`routes ${routes.join(', ')} (expected 422 without the phrase, then 200)`);
+        const free = path.join(dir, 'Protected (2).tcdb');
+        if (!res.note || !res.note.text.includes(free) || !NOTE_BESIDE.test(res.note.text)) throw new Error(`note → ${JSON.stringify(res.note)}`);
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the protected file changed the rows');
+        await waitFor(async () => { const s_ = await status(); return s_.backupPath && path.resolve(s_.backupPath) === path.resolve(free); }, 'the free name as the live target');
+        for (let i = 0; i < 3; i++) { await api('POST', '/api/backup', {}); await new Promise((x) => setTimeout(x, 800)); }
+        if (fileSha(prot) !== protSha) throw new Error('the protected export was rewritten');
+        const m = multipart(fs.readFileSync(prot), 'Protected.tcdb', {});
+        const again = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m.ct }, body: m.body });
+        if (again.status !== 422 || again.json.code !== 'TCDB_PASSPHRASE_REQUIRED') throw new Error(`the export lost its protection: ${again.status}`);
+        const stray = walk(dir).filter((f) => f !== 'Protected.tcdb' && f !== 'Protected (2).tcdb');
+        if (stray.length) throw new Error(`unexpected files beside the export: ${stray.join(', ')}`);
+        return `prompt shown; 422 then 200; "${path.basename(free)}" is the live target; the export is byte-identical and still asks for its phrase`;
+      });
+
+      await R.check('7.10c (2.0.3 browser chooser) a Rashid .rsf chosen in the browser: the app locates it and the page shows the company file will be saved BESIDE it - for the small synthetic file with an Arabic name AND for the REAL 25 MB file (the page hashes the whole content itself; the «جارٍ تحديد مكان الملف…» line is the page\'s own)', async () => {
+        const ev = [];
+        for (const [sub, name, srcFile] of [['rsf', 'شركة الرشيد.rsf', rsfFile], ['rsf-real', 'real_2023.rsf', RSF]]) {
+          const dir = path.join(LA, sub); fs.mkdirSync(dir, { recursive: true });
+          const target = path.join(dir, name); fs.copyFileSync(srcFile, target);
+          const t0 = Date.now();
+          const res = openInBrowser(target, `7-10c-${sub}`, sub === 'rsf-real' ? ['--delay-locate', '1500'] : []);
+          if (!res.located || res.located.success !== true || res.located.type !== 'rsf' || path.resolve(res.located.filePath) !== path.resolve(target)) throw new Error(`${sub}: located → ${JSON.stringify(res.located)}`);
+          const planned = path.join(dir, name.replace(/\.rsf$/, '.tcdb'));
+          if (res.located.companyFilePath !== planned) throw new Error(`${sub}: companyFilePath ${res.located.companyFilePath}`);
+          if (!res.note || res.note.testId !== 'rsf-company-file-target' || !res.note.text.includes(planned) || !NOTE_BESIDE_RSF.test(res.note.text)) throw new Error(`${sub}: form note → ${JSON.stringify(res.note)}`);
+          if (res.locateRequest.size !== fs.statSync(target).size || !res.locateRequest.shaOk) throw new Error(`${sub}: request ${JSON.stringify(res.locateRequest)}`);
+          if (res.routes.some((r) => r.route === 'create-local-company' || r.route === 'pick-company-file')) throw new Error(`${sub}: unexpected route ${JSON.stringify(res.routes)}`);
+          if (walk(dir).join('|') !== name) throw new Error(`${sub}: the search or the page wrote beside the Rashid file: ${walk(dir).join(', ')}`);
+          if (sub === 'rsf-real' && !res.statusTexts.some((t) => /جارٍ تحديد مكان الملف|Locating the file|Визначення місця файлу|Определение места файла/.test(t))) throw new Error(`${sub}: the page did not show the «locating…» line while the app searched: ${JSON.stringify(res.statusTexts)}`);
+          ev.push(`${name}: ${res.locateRequest.size} bytes hashed in the page, located in locate-a, form «${res.note.text.slice(0, 60)}…», ${Date.now() - t0} ms incl. browser start, status line(s) seen ${JSON.stringify(res.statusTexts)}`);
+        }
+        return ev.join(' | ');
+      });
+
+      await R.check('7.10d (2.0.3 locate) two files with the SAME name and size but different content: only the matching one is ever used or answered (browser: the real .tcdb opens in place, the decoy is untouched; API: each digest finds its own file, a digest nobody holds finds nothing and leaks no path; identical copies are told apart by modification time)', async () => {
+        fs.mkdirSync(path.join(LA, 'dup'), { recursive: true });
+        const real = await exportTo(path.join(LA, 'dup', 'Dup.tcdb'));
+        fs.mkdirSync(path.join(LB, 'dup'), { recursive: true });
+        const decoy = path.join(LB, 'dup', 'Dup.tcdb'); const bytes = Buffer.from(fs.readFileSync(real)); bytes[bytes.length - 3] ^= 0xff; fs.writeFileSync(decoy, bytes);
+        const otherSize = path.join(LB, 'dup2', 'Dup.tcdb'); fs.mkdirSync(path.dirname(otherSize), { recursive: true }); fs.writeFileSync(otherSize, Buffer.concat([bytes, Buffer.from('x')]));
+        const decoySha = fileSha(decoy); const decoyMtime = fs.statSync(decoy).mtimeMs;
+        const res = openInBrowser(real, '7-10d');
+        if (!res.located || res.located.success !== true || path.resolve(res.located.filePath) !== path.resolve(real)) throw new Error(`browser located → ${JSON.stringify(res.located)}`);
+        if (!res.routes.some((r) => r.route === 'open-picked-tcdb' && r.status === 200)) throw new Error(`routes ${JSON.stringify(res.routes)}`);
+        if (fileSha(decoy) !== decoySha || fs.statSync(decoy).mtimeMs !== decoyMtime) throw new Error('the decoy was touched');
+        // API level: each digest finds exactly its own file
+        const a = (await locateApi(bodyOf(real))).json; const b = (await locateApi(bodyOf(decoy))).json;
+        if (!a.success || path.resolve(a.filePath) !== path.resolve(real)) throw new Error(`real → ${JSON.stringify(a).slice(0, 200)}`);
+        if (!b.success || path.resolve(b.filePath) !== path.resolve(decoy)) throw new Error(`decoy → ${JSON.stringify(b).slice(0, 200)}`);
+        const nobody = await locateApi({ ...bodyOf(real), sha256: sha(Buffer.from('nobody holds this file')) });
+        if (nobody.status !== 200 || nobody.json.success !== false || nobody.json.code !== 'NOT_FOUND' || JSON.stringify(nobody.json).includes(WORK)) throw new Error(`a digest nobody holds → ${nobody.status} ${nobody.text.slice(0, 200)}`);
+        const wrongSize = await locateApi({ ...bodyOf(real), size: bodyOf(real).size + 1 });
+        if (wrongSize.json.success !== false || wrongSize.json.code !== 'NOT_FOUND') throw new Error(`a wrong size → ${wrongSize.text.slice(0, 200)}`);
+        // identical copies: the browser's modification time decides; otherwise ambiguous
+        const sameA = path.join(LA, 'same', 'Z.rsf'); const sameB = path.join(LB, 'same', 'Z.rsf');
+        for (const f of [sameA, sameB]) { fs.mkdirSync(path.dirname(f), { recursive: true }); fs.writeFileSync(f, Buffer.from('identical rashid bytes '.repeat(40))); }
+        const t0 = Date.now() / 1000 - 86400 * 4; fs.utimesSync(sameA, t0, t0); fs.utimesSync(sameB, t0 + 7200, t0 + 7200);
+        const zb = bodyOf(sameA);
+        const z1 = (await locateApi(zb)).json; const z2 = (await locateApi({ ...zb, lastModified: Math.round(fs.statSync(sameB).mtimeMs) })).json; const z3 = (await locateApi({ ...zb, lastModified: zb.lastModified + 3600000 })).json;
+        if (!z1.success || path.resolve(z1.filePath) !== path.resolve(sameA)) throw new Error(`copy A by time → ${JSON.stringify(z1).slice(0, 160)}`);
+        if (!z2.success || path.resolve(z2.filePath) !== path.resolve(sameB)) throw new Error(`copy B by time → ${JSON.stringify(z2).slice(0, 160)}`);
+        if (z3.success !== false || z3.code !== 'NOT_FOUND' || z3.reason !== 'ambiguous') throw new Error(`neither time → ${JSON.stringify(z3).slice(0, 160)}`);
+        return 'browser: the real file opened in place, the decoy byte-identical; API: own digest → own file, unknown digest / wrong size → NOT_FOUND without a path, identical copies → told apart by mtime else NOT_FOUND ambiguous';
+      });
+
+      await R.check('7.10e (2.0.3 fallback) a file OUTSIDE the searched folders is not found: a .tcdb falls back to the upload (a copy in the TexaCore folder - here the scratch one) and the login view says where; a .rsf shows the TexaCore-folder line in the form; neither crashes', async () => {
+        const outRsf = path.join(OUTSIDE, 'Outside Rashid.rsf'); fs.copyFileSync(rsfFile, outRsf);
+        const r1 = openInBrowser(outRsf, '7-10e-rsf');
+        if (!r1.located || r1.located.success !== false || r1.located.code !== 'NOT_FOUND' || r1.locateStatus !== 200) throw new Error(`rsf located → ${JSON.stringify(r1.located)} (${r1.locateStatus})`);
+        const info = (await api('GET', '/api/backup-export-info')).json;
+        if (!r1.note || r1.note.testId !== 'rsf-company-file-fallback' || !NOTE_NOT_LOCATED_RSF.test(r1.note.text) || !r1.note.text.includes(info.defaultDir)) throw new Error(`rsf note → ${JSON.stringify(r1.note)} (default ${info.defaultDir})`);
+        const outTcdb = await exportTo(path.join(OUTSIDE, 'Outside.tcdb'));
+        const c0 = await counts4(); const outSha = fileSha(outTcdb);
+        const r2 = openInBrowser(outTcdb, '7-10e-tcdb');
+        if (!r2.located || r2.located.success !== false || r2.located.code !== 'NOT_FOUND') throw new Error(`tcdb located → ${JSON.stringify(r2.located)}`);
+        const routes = r2.routes.map((r) => `${r.route}:${r.status}`);
+        if (!routes.includes('restore-tcdb:200') || routes.some((r) => r.startsWith('open-picked-tcdb'))) throw new Error(`fallback routes ${routes.join(', ')}`);
+        const copy = path.join(WORK, 'restore-tcdb', 'Outside.tcdb');
+        if (!fs.existsSync(copy)) throw new Error(`no fallback copy at ${copy}: ${walk(path.join(WORK, 'restore-tcdb')).join(', ')}`);
+        if (!r2.note || r2.note.testId !== 'live-company-file-note' || !NOTE_NOT_LOCATED_TCDB.test(r2.note.text) || !r2.note.text.includes(copy)) throw new Error(`tcdb note → ${JSON.stringify(r2.note)}`);
+        if (fileSha(outTcdb) !== outSha) throw new Error('the file outside was modified');
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the fallback restore changed the rows');
+        return `rsf: NOT_FOUND (HTTP 200) → form line with ${info.defaultDir}; tcdb: NOT_FOUND → upload fallback → ${copy}; the original untouched; notes shown`;
+      });
+
+      await R.check('7.10f (2.0.3 locate) the route is behind the same guards: no secret 401; a LAN Host refused; a foreign Origin refused; an older-style empty body is a 400, never a search', async () => {
+        fs.mkdirSync(path.join(LA, 'guard'), { recursive: true });
+        const real = await exportTo(path.join(LA, 'guard', 'G.tcdb'));
+        const b = bodyOf(real);
+        const noSecret = await request('POST', `${ADMIN}/api/locate-picked-file`, { body: b });
+        if (noSecret.status !== 401) throw new Error(`without the secret → ${noSecret.status}`);
+        const wrongSecret = await request('POST', `${ADMIN}/api/locate-picked-file`, { headers: { 'x-texacore-local-secret': 'nope' }, body: b });
+        if (wrongSecret.status !== 401) throw new Error(`wrong secret → ${wrongSecret.status}`);
+        const lan = await request('POST', `${UI}/api/locate-picked-file`, { headers: { ...H, Host: `192.168.77.20:${PORTS.ui}` }, body: b });
+        if (lan.status < 400 || /filePath|"ref"/.test(lan.text)) throw new Error(`from a LAN Host → ${lan.status} ${lan.text.slice(0, 120)}`);
+        const foreign = await api('POST', '/api/locate-picked-file', b, { Origin: 'https://evil.example' });
+        if (foreign.status !== 403 || /filePath|"ref"/.test(foreign.text)) throw new Error(`foreign Origin → ${foreign.status}`);
+        const empty = await locateApi({});
+        if (empty.status !== 400 || empty.json.code !== 'BAD_REQUEST') throw new Error(`empty body → ${empty.status} ${empty.text.slice(0, 120)}`);
+        const ok = await locateApi(b);
+        if (ok.status !== 200 || !ok.json.success) throw new Error(`the guarded route does not work with the secret: ${ok.status} ${ok.text.slice(0, 160)}`);
+        return `no secret ${noSecret.status}, wrong secret ${wrongSecret.status}, LAN Host ${lan.status}, foreign Origin ${foreign.status}, empty body 400; with the secret it answers`;
+      });
+
+      await R.check('7.10g (2.0.3 locate) a bad body is a 400 and never searches or answers a path: separators / traversal / wrong extension / hidden names in the name, size 0 / negative / fractional / over 1 GiB / not a number, a short or non-hex digest, a non-number time, a non-JSON body', async () => {
+        const good = { name: 'Mine.tcdb', size: 1234, lastModified: 1760000000000, sha256: 'a'.repeat(64) };
+        const bad = [
+          { ...good, name: '../Mine.tcdb' }, { ...good, name: 'a/Mine.tcdb' }, { ...good, name: 'a\\Mine.tcdb' }, { ...good, name: '/etc/passwd.tcdb' }, { ...good, name: 'Mine.txt' },
+          { ...good, name: '.hidden.tcdb' }, { ...good, name: 'a..b.rsf' }, { ...good, name: '' }, { ...good, name: 5 },
+          { ...good, size: 0 }, { ...good, size: -4 }, { ...good, size: 1.5 }, { ...good, size: 1024 ** 3 + 1 }, { ...good, size: '1234' },
+          { ...good, sha256: 'a'.repeat(63) }, { ...good, sha256: 'z'.repeat(64) }, { ...good, sha256: '' }, { ...good, lastModified: 'yesterday' },
+        ];
+        for (const b of bad) {
+          const r = await locateApi(b);
+          if (r.status !== 400 || r.json.code !== 'BAD_REQUEST' || /filePath|"ref"/.test(r.text)) throw new Error(`${JSON.stringify(b)} → ${r.status} ${r.text.slice(0, 120)}`);
+        }
+        const notJson = await request('POST', `${ADMIN}/api/locate-picked-file`, { headers: { ...H, 'Content-Type': 'application/json' }, body: '{"name":' });
+        const arr = await request('POST', `${ADMIN}/api/locate-picked-file`, { headers: H, body: [good] });
+        if (notJson.status !== 400 || arr.status !== 400) throw new Error(`non-JSON → ${notJson.status}, array → ${arr.status}`);
+        const fine = await locateApi(good);   // well formed, nobody holds it
+        if (fine.status !== 200 || fine.json.code !== 'NOT_FOUND') throw new Error(`a well-formed unknown file → ${fine.status} ${fine.text.slice(0, 120)}`);
+        return `${bad.length} malformed bodies → 400 BAD_REQUEST, non-JSON 400, array 400; a well-formed unknown file → 200 NOT_FOUND`;
       });
     }
   } catch (e) {
