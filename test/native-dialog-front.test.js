@@ -27,7 +27,7 @@ test('the panel hangs from a visible always-on-top host on the current Space, ne
 test('macOS: the app activates before the panel and hands the screen back when it had no window open', () => {
   assert.match(body, /app\.focus\(\{ steal: true \}\)/);
   assert.ok(body.indexOf('app.focus({ steal: true })') < body.indexOf('Dialog(host, options)'), 'activate first');
-  assert.match(body, /if \(isMac && !appWindowOpen\) \{ try \{ app\.hide\(\); \}/);
+  assert.match(body, /if \(isMac && !appWindowOpen && openNativeDialogs === 0\) \{ try \{ app\.hide\(\); \}/, 'hide only when the last open dialog closes (rv203 S4)');
   assert.match(body, /finally \{\s*try \{ host\.destroy\(\); \}/);
 });
 

@@ -9,6 +9,7 @@ const path = require('path');
 const crypto = require('crypto');
 const { execFile, spawn } = require('child_process');
 const zlib = require('zlib');
+const os = require('os');
 const companyFile = require('./company-file');
 
 // ─── Encryption Constants ────────────────────────────────────
@@ -141,9 +142,16 @@ class BackupManager {
       console.log('[BackupManager] A restore is running, skipping this backup');
       return null;
     }
+    if (!this.backupPath) {   // 2.0.3 (review): a failed open detached the company file (afterFailedRestore) - the database belongs to no file, nothing is written
+      console.log('[BackupManager] No company file attached, skipping this backup');
+      return null;
+    }
 
     this._running = true;
     const startTime = Date.now();
+    // the targets are fixed when the run starts: a company file opened while this dump runs (re-pointed after waitIdle gave up) must never receive the OLD database
+    const target = this.backupPath;
+    const secondary = this.secondaryBackupPath;
     let stage = 'dump';
     let tempPath = null;
 
@@ -155,9 +163,9 @@ class BackupManager {
 
       // Step 5: Atomic write (write to temp then rename)
       stage = 'write';
-      tempPath = this.backupPath + '.tmp';
+      tempPath = target + '.tmp';
       fs.writeFileSync(tempPath, tcdbBuffer);
-      fs.renameSync(tempPath, this.backupPath);
+      fs.renameSync(tempPath, target);
       tempPath = null;
 
       const duration = Date.now() - startTime;
@@ -180,14 +188,14 @@ class BackupManager {
       // ─── Copy to secondary backup location (the program's own second copy) ───
       // 2.0.2: written through a temp name + rename (a half-written copy never replaces a good one), and its own success/failure is kept
       // so the user can see that THIS target is in step (or why it is not) without the primary's result hiding it.
-      if (this.secondaryBackupPath) {
+      if (secondary) {
         let secTemp = null;
         try {
-          const secDir = path.dirname(this.secondaryBackupPath);
+          const secDir = path.dirname(secondary);
           if (!fs.existsSync(secDir)) fs.mkdirSync(secDir, { recursive: true });
-          secTemp = this.secondaryBackupPath + '.tmp';
-          fs.copyFileSync(this.backupPath, secTemp);
-          fs.renameSync(secTemp, this.secondaryBackupPath);
+          secTemp = secondary + '.tmp';
+          fs.copyFileSync(target, secTemp);
+          fs.renameSync(secTemp, secondary);
           secTemp = null;
           this._markOk('copy');
         } catch (e) {
@@ -198,7 +206,7 @@ class BackupManager {
       }
 
       // ─── Daily snapshot rotation (last 5 days per company) ───
-      this._rotateDailySnapshot();
+      if (this.backupPath === target) this._rotateDailySnapshot();
 
       return stats;
     } catch (error) {
@@ -340,7 +348,7 @@ class BackupManager {
           (now - this._lastSnapshotAt) < minIntervalMs) {
         return; // already refreshed today's snapshot recently
       }
-      const dir = path.join(path.dirname(this.backupPath), 'snapshots');
+      const dir = this.snapshotDir || path.join(path.dirname(this.backupPath), 'snapshots');   // 2.0.3: a file opened in place keeps its snapshots in the program's folder
       if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
       const base = path.basename(this.backupPath).replace(/\.tcdb$/i, '');
       const datedPath = path.join(dir, `${base}.${today}.tcdb`);
@@ -629,12 +637,42 @@ class BackupManager {
   /** Restore a .tcdb into the database. A running backup is waited for first and no new one starts until the restore is over. */
   async restore(filePath, { passphrase = '' } = {}) {
     this._restoring = true;
+    this.lastRestoreTouchedDb = false;
     try {
       await this.waitIdle();
       return await this._restoreFile(filePath, { passphrase });
     } finally {
       this._restoring = false;
     }
+  }
+
+  /**
+   * 2.0.3 (review): a restore failed AFTER the caller re-pointed this manager at the file being opened. No later backup (the timer, «backup now», the final
+   * backup at quit) may write a database that is not that file's into it. Nothing replaced yet (the truncate never committed) = the database is still the
+   * previous company's: it goes back to ITS file and timer. Otherwise the database is cleared / half loaded and belongs to no file: nothing is written.
+   */
+  afterFailedRestore({ prevTarget = null, prevSecondary = null, wasSyncing = false } = {}) {
+    this.stopSync();
+    if (!this.lastRestoreTouchedDb && prevTarget) {
+      this.backupPath = prevTarget;
+      this.secondaryBackupPath = prevSecondary;
+      if (wasSyncing) this.startSync();
+    } else {
+      this.backupPath = null;
+      this.secondaryBackupPath = null;
+    }
+  }
+
+  /**
+   * A private file for a psql script. 2.0.3 (review): never beside the company file - opened IN PLACE that is the user's own folder (Desktop, a USB stick,
+   * a cloud folder, beside a passphrase-protected export) and the restore script is the whole DECRYPTED database. Windows: an ASCII-only folder
+   * (psql.exe reads its arguments in the ANSI code page).
+   */
+  _tmpSqlPath(kind) {
+    const t = os.tmpdir();
+    const dir = (process.platform === 'win32' && !/^[\x20-\x7e]+$/.test(t)) ? path.join(companyFile.defaultCompanyDir('win32'), '.tmp') : t;
+    fs.mkdirSync(dir, { recursive: true });
+    return path.join(dir, `texacore-${kind}-${process.pid}-${crypto.randomBytes(8).toString('hex')}.sql`);
   }
 
   async _restoreFile(filePath, { passphrase = '' } = {}) {
@@ -691,6 +729,7 @@ class BackupManager {
 
       this.onProgress('restore', 'تهيئة الاستبدال...');
       await this._truncatePublic(this._extractCopyTables(sqlStr));
+      this.lastRestoreTouchedDb = true;   // from here on the database is no longer the previous company's (afterFailedRestore)
       this.onProgress('restore', 'استعادة قاعدة البيانات...');
       const execRes = await this._executeSql(sql);
 
@@ -798,12 +837,12 @@ class BackupManager {
    */
   _executeSql(sqlBuffer) {
     return new Promise((resolve, reject) => {
-      const tmpFile = this.backupPath + '.restore.sql';
+      const tmpFile = this._tmpSqlPath('restore');
       // Wrap SQL with FK constraint disable/enable for reliable restoration
       // Without this, COPY statements fail due to FK ordering issues
       const header = Buffer.from("SET session_replication_role = 'replica';\n");
       const footer = Buffer.from("\nSET session_replication_role = 'origin';\n");
-      fs.writeFileSync(tmpFile, Buffer.concat([header, sqlBuffer, footer]));
+      fs.writeFileSync(tmpFile, Buffer.concat([header, sqlBuffer, footer]), { mode: 0o600, flag: 'wx' });
 
       const env = {
         ...process.env,
@@ -924,8 +963,8 @@ class BackupManager {
         "    END IF;\n" +
         "  END LOOP;\n" +
         "END $TXR$;\n";
-      const tmpFile = this.backupPath + '.truncate.sql';
-      fs.writeFileSync(tmpFile, sqlText);
+      const tmpFile = this._tmpSqlPath('truncate');
+      fs.writeFileSync(tmpFile, sqlText, { mode: 0o600, flag: 'wx' });
       const env = { ...process.env, PGPASSWORD: this.dbPassword };
       const args = [
         '-h', this.dbHost, '-p', String(this.dbPort),
@@ -1005,8 +1044,8 @@ class BackupManager {
 
   _runAuthSql(sqlText) {
     return new Promise((resolve, reject) => {
-      const tmpFile = this.backupPath + '.auth.sql';
-      fs.writeFileSync(tmpFile, sqlText);
+      const tmpFile = this._tmpSqlPath('auth');
+      fs.writeFileSync(tmpFile, sqlText, { mode: 0o600, flag: 'wx' });
       const env = { ...process.env, PGPASSWORD: this.dbPassword };
       const args = [
         '-h', this.dbHost, '-p', String(this.dbPort),

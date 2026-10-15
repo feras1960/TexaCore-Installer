@@ -1793,6 +1793,7 @@ function dialogHostBounds(screenApi) {
   }
 }
 
+let openNativeDialogs = 0;   // (review rv203 S4) the app hides itself only when the LAST open dialog closes
 async function showNativeDialog(kind, options) {
   // A headless harness run NEVER opens a real window: the test answers it (POST /api/e2e-dialog); no answer = the user closed it.
   if (HARNESS_OK && process.env.TEXACORE_HEADLESS === '1') {
@@ -1808,6 +1809,7 @@ async function showNativeDialog(kind, options) {
     minimizable: false, maximizable: false, fullscreenable: false, skipTaskbar: true, alwaysOnTop: true,
     title: 'TexaCore', backgroundColor: '#00000000',
   });
+  openNativeDialogs += 1;
   try {
     host.setAlwaysOnTop(true, 'screen-saver');
     if (isMac) {
@@ -1822,7 +1824,8 @@ async function showNativeDialog(kind, options) {
   } finally {
     try { host.destroy(); } catch { /* already gone */ }
     // Give the screen back to the browser: with no TexaCore window open there is nothing of ours to look at.
-    if (isMac && !appWindowOpen) { try { app.hide(); } catch { /* best effort */ } }
+    openNativeDialogs = Math.max(0, openNativeDialogs - 1);
+    if (isMac && !appWindowOpen && openNativeDialogs === 0) { try { app.hide(); } catch { /* best effort */ } }
   }
 }
 
@@ -1873,7 +1876,7 @@ const sameFile = (a, b) => {
 /** What a coded file/key error becomes on the wire: a status + the code the page translates (the text is bilingual for logs). */
 function fileErrorStatus(code) {
   return ({ PICK_EXPIRED: 404, FILE_NOT_FOUND: 404, FILE_NOT_LOCAL: 504, FILE_TOO_LARGE: 413, EXPORT_EXISTS: 409, EXPORT_IS_LIVE_FILE: 409,
-    EXPORT_BUSY: 409, TCDB_PASSPHRASE_REQUIRED: 422, TCDB_BAD_PASSPHRASE: 422, TCDB_CORRUPT: 422, LEGACY_TCDB: 422, PASSPHRASE_TOO_SHORT: 400, BAD_REQUEST: 400, SERVICES_DOWN: 503, EXPORT_EMPTY: 409, NO_PERMISSION: 403, LOCATE_BUSY: 429, BAD_JSON: 400, BODY_TOO_LARGE: 413 })[code] || 500;
+    EXPORT_BUSY: 409, TCDB_PASSPHRASE_REQUIRED: 422, TCDB_BAD_PASSPHRASE: 422, TCDB_CORRUPT: 422, LEGACY_TCDB: 422, PASSPHRASE_TOO_SHORT: 400, BAD_REQUEST: 400, SERVICES_DOWN: 503, EXPORT_EMPTY: 409, NO_PERMISSION: 403, LOCATE_BUSY: 429, BAD_JSON: 400, BODY_TOO_LARGE: 413, RESTORE_BUSY: 409 })[code] || 500;
 }
 
 /** Keep a picked / located company file under an opaque reference and describe it to the page (the answer of POST /api/pick-company-file and /api/locate-picked-file). */
@@ -2236,7 +2239,15 @@ function adminRequestIsLocal(req) {
 // ─── Open a .tcdb: restore it into the running database and keep syncing back to the SAME file ───────────────
 // Shared by the file-dialog route (GET /api/open-tcdb) and the launcher's upgrade notice («فتح» beside a company file named in the old config).
 // Returns the JSON the route sends; throws on failure.
-async function restoreTcdbFromPath(selectedPath, { passphrase = '' } = {}) {
+// 2.0.3 (review): ONE company file is opened at a time. Two opens at once (a second click, two tabs) interleaved two truncates + loads into one database, the
+// first to finish cleared the backup manager's «restoring» flag and its startSync() wrote the mixed database into the file the second open had re-pointed to.
+let restoreInFlight = false;
+async function restoreTcdbFromPath(selectedPath, opts = {}) {
+  if (restoreInFlight) throw Object.assign(new Error('يُفتح ملف شركة آخر الآن | Another company file is being opened - wait for it to finish'), { code: 'RESTORE_BUSY' });
+  restoreInFlight = true;
+  try { return await openTcdbFromPathUnlocked(selectedPath, opts); } finally { restoreInFlight = false; }
+}
+async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '' } = {}) {
   const fileName = path.basename(selectedPath);
   const fileDir = path.dirname(selectedPath);
   if (!svcManager || !svcManager.isRunning()) throw new Error('الخدمات غير شغّالة — شغّل النظام أولاً ثم افتح الملف');
@@ -2244,6 +2255,8 @@ async function restoreTcdbFromPath(selectedPath, { passphrase = '' } = {}) {
   const os = require('os');
   const isWin = process.platform === 'win32';
 
+  // what the backup manager was writing before this open: put back if the restore fails without touching the database (afterFailedRestore)
+  const prevSync = { prevTarget: backupManager ? backupManager.backupPath : null, prevSecondary: backupManager ? backupManager.secondaryBackupPath : null, wasSyncing: !!(backupManager && backupManager._timer) };
   // Initialize backupManager pointing to the ORIGINAL file path
   if (!backupManager) {
     const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
@@ -2282,15 +2295,23 @@ async function restoreTcdbFromPath(selectedPath, { passphrase = '' } = {}) {
     : companyFile.uniqueTcdbPath(besideOk ? fileDir : companyFile.defaultCompanyDir(), fileName.replace(/\.tcdb$/i, ''));
   if (liveTarget !== selectedPath) fs.mkdirSync(path.dirname(liveTarget), { recursive: true });
 
+  // (review rv203 S5) re-opening the file that is ALREADY the live company file: write the database into it first, so the restore below
+  // brings back the current work and not the snapshot of up to a minute ago.
+  if (backupManager.backupPath && path.resolve(backupManager.backupPath) === path.resolve(selectedPath)) {
+    try { await backupManager.waitIdle(); await backupManager.backup(); } catch (e) { console.warn('[OpenTCDB] flush before re-open:', e.message); }
+  }
   // Point backup to the ORIGINAL file (USB, Desktop, wherever)
   try { backupManager.stopSync(); } catch { /* not running */ }   // no tick of the previous timer may dump the old / half-restored DB into the opened file
   await backupManager.waitIdle();   // ... and a dump already running must finish BEFORE the target is re-pointed (it would write the old database into the opened file) and before the truncate
   backupManager.backupPath = liveTarget;
   backupManager.secondaryBackupPath = null;   // 2.0.2: the program's second copy belonged to the PREVIOUS company file - never write this company's data over it
+  // (review rv203) the daily snapshots of a file opened in place in the user's own folder go to the program's backups folder, not into a
+  // 'snapshots' folder created beside the user's file (Desktop, a USB stick, iCloud…); a file in the TexaCore folder keeps them beside it as before.
+  backupManager.snapshotDir = path.resolve(path.dirname(liveTarget)) === path.resolve(companyFile.defaultCompanyDir()) ? null : path.join(DATA_DIR, 'backups', 'snapshots');
   
   // Restore DB from the file (its error log goes to the program's logs folder, never beside the user's file)
   backupManager.restoreLogDir = LOG_DIR;
-  const restoreResult = await backupManager.restore(selectedPath, { passphrase });
+  const restoreResult = await backupManager.restore(selectedPath, { passphrase }).catch((e) => { backupManager.afterFailedRestore(prevSync); throw e; });   // (a failed open never leaves the manager writing into the picked file)
 
   // Inject the vendor support account (vendor machine only) so you can log
   // in to the restored backup with your own username + password.
@@ -2979,12 +3000,15 @@ const httpServer = http.createServer(async (req, res) => {
       if (!tooBig) chunks.push(chunk);
     });
     req.on('end', async () => {
+      let heldRestore = false;
       try {
         if (tooBig) {
           res.writeHead(413, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: 'File too large' }));
           return;
         }
+        if (restoreInFlight) throw Object.assign(new Error('يُفتح ملف شركة آخر الآن | Another company file is being opened - wait for it to finish'), { code: 'RESTORE_BUSY' });
+        restoreInFlight = true; heldRestore = true;   // (before the upload is written: a refused second open leaves no file behind)
         const body = Buffer.concat(chunks);
         const boundary = req.headers['content-type']?.split('boundary=')[1];
         
@@ -3098,6 +3122,7 @@ const httpServer = http.createServer(async (req, res) => {
         }
         console.log(`[Restore] TCDB saved to: ${tcdbPath} (${(fileData.length / 1024).toFixed(0)} KB)`);
         
+        const prevSync = { prevTarget: backupManager ? backupManager.backupPath : null, prevSecondary: backupManager ? backupManager.secondaryBackupPath : null, wasSyncing: !!(backupManager && backupManager._timer) };
         // Initialize backupManager if needed
         if (!backupManager) {
           const pgBinDir = svcManager ? path.join(svcManager.binsDir, 'pg', 'bin') : (isWin ? 'C:\\Program Files\\PostgreSQL\\16\\bin' : '/opt/homebrew/bin');
@@ -3119,7 +3144,7 @@ const httpServer = http.createServer(async (req, res) => {
         backupManager.backupPath = tcdbPath;
         backupManager.secondaryBackupPath = null;   // 2.0.2: see restoreTcdbFromPath - the second copy belongs to the previous company file
         backupManager.restoreLogDir = LOG_DIR;
-        const restoreResult = await backupManager.restore(tcdbPath, { passphrase });
+        const restoreResult = await backupManager.restore(tcdbPath, { passphrase }).catch((e) => { backupManager.afterFailedRestore(prevSync); throw e; });
 
         // Inject the vendor support account into the just-restored DB — vendor
         // machine ONLY (gated by vendor-support.json) — so you can log in to a
@@ -3142,8 +3167,10 @@ const httpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ success: true, tcdbPath, ...restoreResult }));
       } catch (err) {
         console.error('[Restore] ❌ Failed:', err.message);
-        res.writeHead(/^TCDB_/.test(String(err.code)) ? 422 : 500, { 'Content-Type': 'application/json' });
+        res.writeHead(/^TCDB_/.test(String(err.code)) ? 422 : (err.code === 'RESTORE_BUSY' ? 409 : 500), { 'Content-Type': 'application/json' });
         res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null }));
+      } finally {
+        if (heldRestore) restoreInFlight = false;
       }
     });
     return;

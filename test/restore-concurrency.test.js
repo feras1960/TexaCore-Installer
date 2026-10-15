@@ -86,8 +86,10 @@ test('waitIdle: true as soon as nothing runs; gives up after maxMs', async () =>
 test('both restore paths of the app let a running dump finish before the target is re-pointed', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   const inPlace = main.slice(main.indexOf('async function restoreTcdbFromPath('), main.indexOf('const restoreResult = await backupManager.restore(selectedPath'));
-  assert.ok(inPlace.indexOf('backupManager.stopSync()') > 0 && inPlace.indexOf('await backupManager.waitIdle()') > inPlace.indexOf('backupManager.stopSync()'));
-  assert.ok(inPlace.indexOf('backupManager.backupPath = liveTarget') > inPlace.indexOf('await backupManager.waitIdle()'), 'idle first, then the target moves');
+  const stopAt = inPlace.indexOf('backupManager.stopSync()');
+  const idleAt = inPlace.indexOf('await backupManager.waitIdle()', stopAt);   // (the S5 flush before a re-open waits too, earlier: the one AFTER stopSync counts here)
+  assert.ok(stopAt > 0 && idleAt > stopAt);
+  assert.ok(inPlace.indexOf('backupManager.backupPath = liveTarget') > idleAt, 'idle first, then the target moves');
   const upload = main.slice(main.indexOf("// Restore the database from TCDB\n        try { backupManager.stopSync()"), main.indexOf('const restoreResult = await backupManager.restore(tcdbPath'));
   assert.ok(upload.indexOf('await backupManager.waitIdle()') > 0 && upload.indexOf('backupManager.backupPath = tcdbPath') > upload.indexOf('await backupManager.waitIdle()'));
 });

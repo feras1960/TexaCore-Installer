@@ -283,7 +283,12 @@ async function locatePickedFile(q, deps = {}) {
   stats.matches = matches.length;
 
   if (matches.length === 0) return { found: false, reason: 'none', stats };
-  if (matches.length === 1) return { found: true, filePath: matches[0].filePath, stats };
+  // (review rv203 S1) a single match must also carry the modification time the browser reported: an identical copy in Desktop/Documents
+  // must not be taken for a file the user chose on a USB stick or elsewhere outside the searched folders (that case falls back, with a note).
+  if (matches.length === 1) {
+    if (typeof q.lastModified !== 'number' || Math.abs(matches[0].mtimeMs - q.lastModified) <= MTIME_TOLERANCE_MS) return { found: true, filePath: matches[0].filePath, stats };
+    return { found: false, reason: 'mtime', stats };
+  }
   // identical copies: the one the browser reported with the same modification time is the file the user chose (a copy has its own time)
   if (typeof q.lastModified === 'number') {
     const sameTime = matches.filter((m) => Math.abs(m.mtimeMs - q.lastModified) <= MTIME_TOLERANCE_MS);

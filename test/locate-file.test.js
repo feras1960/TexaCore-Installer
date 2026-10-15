@@ -210,6 +210,20 @@ test('locatePickedFile: not found when the file is outside the searched roots', 
   assert.equal(r.found, false); assert.equal(r.reason, 'none');
 });
 
+test('locatePickedFile: a SINGLE match must carry the browser\'s modification time too (rv203 S1: a copy in Desktop is not the file chosen on a USB stick)', async () => {
+  const root = mkdtemp();
+  const buf = Buffer.from('only one copy in the searched folders');
+  const a = put(root, 'Mine.tcdb', buf);
+  const t0 = Date.now() / 1000 - 86400 * 2; fs.utimesSync(a, t0, t0);
+  const mt = fs.statSync(a).mtimeMs;
+  let r = await locate(query(buf, { lastModified: mt + 1500 }), [root]);
+  assert.equal(r.found, true); assert.equal(r.filePath, a);
+  r = await locate(query(buf, { lastModified: mt + 3600 * 1000 }), [root]);
+  assert.equal(r.found, false); assert.equal(r.reason, 'mtime');
+  r = await locate(query(buf), [root]);   // no time reported: the content match alone decides
+  assert.equal(r.found, true);
+});
+
 test('locatePickedFile: identical copies - the one with the browser\'s modification time wins (+-2 s); still ambiguous otherwise; a hard link is one file', async () => {
   const root = mkdtemp();
   const buf = Buffer.from('same content in two places');
