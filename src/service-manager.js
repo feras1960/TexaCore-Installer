@@ -1107,7 +1107,7 @@ class ServiceManager {
   }
 
   // ─── Run Migrations ──────────────────────────────────────────
-  // 2.0.0 builds its database from the baseline; incremental migrations (2.0.2: the 13 after the 2026-10-13 cut) must be written for
+  // 2.0.0 builds its database from the baseline; incremental migrations (2.0.2: those production received after the 2026-10-13 cut, from the encrypted container) must be written for
   // that exact baseline: the manifest has to say so ("baselineSha256"). A manifest without it — in particular the 1.x
   // one, whose ~1,300 files re-define functions the baseline already carries at newer versions — is REFUSED, never
   // replayed (that replay is how a first 2.0 trial ended up with 118 production functions rolled back to old bodies).
@@ -1202,7 +1202,7 @@ class ServiceManager {
         await this.runGoTrueMigrations();
       }
 
-      // 4. Incremental migrations after the baseline (2.0.2: the 13 that production received after the cut; migrations/migrations.json, tied to the baseline's sha256).
+      // 4. Incremental migrations after the baseline (2.0.2: the 13 that matter locally of the 14 production received after the cut; the manifest in the encrypted migrations container, tied to the baseline's sha256).
       //    A failing migration stops the chain and is logged (logs/migrations.log) — it never stops the app from starting.
       let migrationResult;
       try { migrationResult = await this.runMigrations(); }

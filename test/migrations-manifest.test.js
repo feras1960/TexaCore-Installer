@@ -23,9 +23,9 @@ test('baseline/MIGRATIONS_PIN.json exists, is valid and tied to the PINNED basel
   assert.equal(pin.baselineSha256, pinSha);
 });
 
-test('2.0.2 ships the 12 migrations production received after the 2026-10-13T13:21Z cut that matter locally, in PRODUCTION\'s order (s and t before r and u); 20270210l is production-only data and is NOT shipped', () => {
-  assert.deepEqual(pin.migrations.map((x) => x.name.replace(/^20270210([a-z]).*/, '$1')), ['i', 'j', 'k', 'q', 'm', 'n', 'o', 'p', 's', 't', 'r', 'u']);
-  assert.deepEqual(pin.migrations.map((x) => x.order), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12]);
+test('2.0.2 ships the 13 migrations production received after the 2026-10-13T13:21Z cut that matter locally, in PRODUCTION\'s order (s and t before r and u; v last); 20270210l is production-only data and is NOT shipped', () => {
+  assert.deepEqual(pin.migrations.map((x) => x.name.replace(/^20270210([a-z]).*/, '$1')), ['i', 'j', 'k', 'q', 'm', 'n', 'o', 'p', 's', 't', 'r', 'u', 'v']);
+  assert.deepEqual(pin.migrations.map((x) => x.order), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13]);
   assert.ok(!pin.migrations.some((x) => /20270210l/.test(x.name)));
 });
 

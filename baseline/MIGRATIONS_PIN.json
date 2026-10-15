@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "5431c73530aacbd78a335ed1ef2c80ee4bccf2a7",
+  "erpCommit": "cf70e19028e4f0d6de86635ab7f0165badfe61e1",
   "migrations": [
     {
       "order": 1,
@@ -87,11 +87,18 @@
       "file": "20270210u_sales_line_units.sql",
       "sha256": "a65021c2e08b7489fb87d57718137d1f88df7edab0814ccd4b9c61f9d2deec56",
       "bytes": 212449
+    },
+    {
+      "order": 13,
+      "name": "20270210v_material_tracking_mode",
+      "file": "20270210v_material_tracking_mode.sql",
+      "sha256": "ae5c105c564e47c93211f362f1ef448d10a2c058805acad2532b4f657eff4dca",
+      "bytes": 39039
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "f428439b0c74b1f3be1c92c0cbd19086e9701ecb5829de55ebae51628a5ae2a8",
-    "bytes": 8935
+    "sha256": "819dda705a41dd27a77fa64c7d0b5b13fc5a604c37f63073ad1dc33ae7a68ef1",
+    "bytes": 9563
   }
 }

@@ -23,6 +23,9 @@
 //   B2  the new build starts on that data: they all apply, the company / users / the card are intact, the baseline marker is the manifest's
 //   B3  a second start applies 0: the table, its ids and its timestamps are unchanged
 //   B4  the upgraded install and the fresh install have the SAME functions, triggers, policies and table grants (the upgrade path = the fresh path)
+//   A6  20270210v (one tracking mode per material): fabric -> roll, a serial flag -> serial, a plain card -> quantity; a mode change on a card with stock is refused (tracking_mode_locked); a load that switches the triggers
+//       OFF leaves the default 'quantity' and the server's own repair `UPDATE fabric_materials SET tracking_mode = NULL WHERE material_type = 'fabric'` (as the app does) works and makes them roll
+//   B5  RESTORE of a .tcdb written by the previous build (no tracking_mode column) into the upgraded install: the cards come back 'quantity' and the restore path repairs them by itself (fabric -> roll)
 //   D   fingerprints: for every function the shipped migrations created or replaced, md5(prosrc) (and owner-side grants / SECURITY DEFINER) on this database equals production's post-image
 // ════════════════════════════════════════════════════════════════
 const fs = require('fs');
@@ -44,6 +47,30 @@ const ROOT = path.join(__dirname, '..', '..');
 const ADMIN = `http://127.0.0.1:${PORTS.admin}`;
 const API = `http://127.0.0.1:${PORTS.api}`;
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
+const http = require('http');
+const crypto = require('crypto');
+const UI = `http://127.0.0.1:${PORTS.ui}`;
+const rawRequest = (method, url, { headers = {}, body = null } = {}) => new Promise((resolve, reject) => {
+  const u = new URL(url);
+  const req = http.request({ hostname: u.hostname, port: u.port, path: u.pathname + u.search, method, agent: false, headers: { ...headers, ...(body ? { 'Content-Length': body.length } : {}) } }, (res) => {
+    const chunks = []; res.on('data', (c) => chunks.push(c));
+    res.on('end', () => { const buf = Buffer.concat(chunks); let json = null; try { json = JSON.parse(buf.toString('utf8')); } catch { /* binary */ } resolve({ status: res.statusCode, buf, json }); });
+  });
+  req.on('error', reject); if (body) req.write(body); req.end();
+});
+const multipart = (file, filename, fields = {}) => {
+  const b = '----mig' + crypto.randomBytes(6).toString('hex');
+  const parts = [];
+  for (const [k, v] of Object.entries(fields)) parts.push(Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
+  parts.push(Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="file"; filename="${filename}"\r\nContent-Type: application/octet-stream\r\n\r\n`), file, Buffer.from(`\r\n--${b}--\r\n`));
+  return { ct: `multipart/form-data; boundary=${b}`, body: Buffer.concat(parts) };
+};
+// production's post-image of the functions of 20270210v (coordinator, from production after the apply of 2026-10-15)
+const V_MD5 = {
+  'fn_guard_material_card()': 'ff6c7cfcde0eb7fcfb780c6e5b62137b', 'fn_material_tracking_sync()': 'db9d6ce5a94060f3d226916ec28b4969', 'fn_material_base_unit_guard()': 'f8e16d1cd348b37965396d14aa240fe0',
+  'fn_material_mode_derive(text,boolean,boolean,boolean)': '521081d97f20ee86078bc13b9cd3b78f', 'fn_material_stock_lock_reasons(uuid,boolean,boolean)': 'af15bdf8b84ddda0040b21de0eda3a59',
+  'fn_material_tracking_mode(uuid)': 'e8ad0124e16ef96dbd5f00ae7ed1be7b',
+};
 
 const binOf = (app) => (app ? path.join(app, 'Contents', 'MacOS', path.basename(app, '.app')) : '');
 const resOf = (app) => (app ? path.join(app, 'Contents', 'Resources') : ROOT);
@@ -221,6 +248,35 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
       } finally { await pg(`ALTER DATABASE postgres RESET app.stock_holds_sweep_external`); await pg(`DELETE FROM public.warehouse_settings WHERE company_id = $1`, [acc.companyId]); }
       return 'refused: reservation_sweep_missing; accepted after ALTER DATABASE … SET app.stock_holds_sweep_external = \'on\' (reset again)';
     });
+    await R.check('A6 20270210v: one tracking mode per material — fabric -> roll, a serial flag -> serial, a plain card -> quantity; a mode change on a card with stock is refused (tracking_mode_locked); a trigger-OFF load leaves the default "quantity" and the server\'s repair `UPDATE fabric_materials SET tracking_mode = NULL WHERE material_type = \'fabric\'` works and makes the cards roll', async () => {
+      const mode = async (id) => (await pg('SELECT tracking_mode FROM public.fabric_materials WHERE id = $1', [id])).rows[0].tracking_mode;
+      if ((await mode(cardIds[0])) !== 'roll') throw new Error(`a fabric card (default type) is ${await mode(cardIds[0])}`);
+      const mk = async (code, extra = {}) => { const r = await request('POST', `${API}/rest/v1/fabric_materials`, { headers: authA, body: { tenant_id: acc.tenantId, company_id: acc.companyId, code, name_ar: `بطاقة ${code}`, ...extra } }); if (r.status !== 201) throw new Error(`insert ${code} → ${r.status} ${r.text.slice(0, 200)}`); return r.json[0].id; };
+      const std = await mk('TM-STD', { material_type: 'standard' }); const ser = await mk('TM-SER', { material_type: 'standard', track_serial: true });
+      if ((await mode(std)) !== 'quantity' || (await mode(ser)) !== 'serial') throw new Error(`standard ${await mode(std)}, serial-flag ${await mode(ser)}`);
+      // stock on the plain card -> its mode is locked
+      const wh = (await pg('SELECT id FROM public.warehouses WHERE tenant_id = $1 ORDER BY created_at LIMIT 1', [acc.tenantId])).rows[0].id;     // the company's own (the free plan allows one)
+      await pg(`INSERT INTO public.inventory_stock (tenant_id, company_id, material_id, warehouse_id, quantity_on_hand) VALUES ($1, $2, $3, $4, 10)`, [acc.tenantId, acc.companyId, std, wh]);
+      let locked = null; try { await pg(`UPDATE public.fabric_materials SET tracking_mode = 'batch' WHERE id = $1`, [std]); } catch (e) { locked = e; }
+      if (!locked || !/tracking_mode_locked/.test(`${locked.message} ${locked.hint || ''}`)) throw new Error(`a card with stock changed its mode: ${locked ? locked.message : 'accepted'}`);
+      let conflict = null; try { await pg(`UPDATE public.fabric_materials SET tracking_mode = 'quantity' WHERE id = $1`, [cardIds[0]]); } catch (e) { conflict = e; }
+      if (!conflict) throw new Error('a fabric card accepted the mode quantity');
+      // a load with the user triggers OFF (a .tcdb restore / pg_restore --disable-triggers): the card keeps the net default, and the app's repair works — with stock on it
+      const c = new Client(pgOptions()); await c.connect();
+      let loadedId;
+      try {
+        await c.query('BEGIN'); await c.query(`SET LOCAL session_replication_role = 'replica'`);
+        loadedId = (await c.query(`INSERT INTO public.fabric_materials (tenant_id, company_id, code, name_ar, material_type) VALUES ($1, $2, 'TM-LOADED', 'بطاقة محمّلة', 'fabric') RETURNING id`, [acc.tenantId, acc.companyId])).rows[0].id;
+        await c.query(`INSERT INTO public.inventory_stock (tenant_id, company_id, material_id, warehouse_id, quantity_on_hand) VALUES ($1, $2, $3, $4, 25)`, [acc.tenantId, acc.companyId, loadedId, wh]);
+        await c.query('COMMIT');
+      } finally { await c.end(); }
+      if ((await mode(loadedId)) !== 'quantity') throw new Error(`the trigger-off load did not leave the default (it is ${await mode(loadedId)})`);
+      const up = await pg(`UPDATE public.fabric_materials SET tracking_mode = NULL WHERE material_type = 'fabric'`);
+      if ((await mode(loadedId)) !== 'roll' || up.rowCount < 1) throw new Error(`the repair left ${await mode(loadedId)} (rows ${up.rowCount})`);
+      const bad = (await pg(`SELECT count(*)::int n FROM public.fabric_materials WHERE material_type = 'fabric' AND tracking_mode <> 'roll'`)).rows[0].n;
+      if (bad) throw new Error(`${bad} fabric cards are not roll after the repair`);
+      return `fabric default -> roll; standard -> quantity; serial flag -> serial; stock on a card: mode change refused (tracking_mode_locked); fabric -> quantity refused; trigger-off load: quantity, then the app's UPDATE … SET tracking_mode = NULL (${up.rowCount} card(s), one with 25 in stock) -> roll`;
+    });
     freshFp = await fingerprint();
   } finally { if (a) await stopApp(a.child, A); }
 
@@ -228,7 +284,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
   let preFp = null; let postFp = null; let upg = null; let catPre = null; let catPost = null; let invPre = null; let invPost = null;
   if (OLD_APP) {
     const B = path.join(WORK, 'upgrade');
-    let o = null; let oc = null; let cardOld = null; let counts0 = null;
+    let o = null; let oc = null; let cardOld = null; let counts0 = null; let legacy = null; let oldTcdb = null;
     try {
       o = await boot(B, OLD_APP, 'old');
       await R.check('B1 UPGRADE, step 1: the previous build provisions an install (no migration table), a company and one material card with a typed code', async () => {
@@ -236,6 +292,23 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         if (t) throw new Error('the previous build already has a migration table');
         oc = await createCompany(o.secrets, 'b');
         cardOld = (await pg(`INSERT INTO public.fabric_materials (tenant_id, company_id, code, name_ar) VALUES ($1,$2,'OLD-1','بطاقة قديمة') RETURNING id, code, created_at`, [oc.tenantId, oc.companyId])).rows[0];
+        // legacy cards the way the previous build wrote them (no tracking_mode column yet): a fabric with stock, a plain card, a serial-flagged card
+        const whOld = (await pg('SELECT id FROM public.warehouses WHERE tenant_id = $1 ORDER BY created_at LIMIT 1', [oc.tenantId])).rows[0].id;
+        const mkOld = async (code, type, flags = {}) => (await pg(`INSERT INTO public.fabric_materials (tenant_id, company_id, code, name_ar, material_type, is_roll_tracked, track_serial, track_batch) VALUES ($1,$2,$3,$4,$5,$6,$7,$8) RETURNING id`,
+          [oc.tenantId, oc.companyId, code, `قديمة ${code}`, type, !!flags.roll, !!flags.serial, !!flags.batch])).rows[0].id;
+        const oldFab = await mkOld('OLD-FAB', 'fabric'); const oldStd = await mkOld('OLD-STD', 'standard'); const oldSer = await mkOld('OLD-SER', 'standard', { serial: true });
+        await pg(`INSERT INTO public.inventory_stock (tenant_id, company_id, material_id, warehouse_id, quantity_on_hand) VALUES ($1,$2,$3,$4,30)`, [oc.tenantId, oc.companyId, oldFab, whOld]);
+        legacy = { oldFab, oldStd, oldSer };
+        // the company file of the PREVIOUS build (what a user of 2.0.1 holds): a forced sync AFTER the inserts (the first sync after the company was made may still be running), then a copy
+        const companyFile = oc.tcdbPath || path.join(WORK, 'tcdb-b', 'mig-b.tcdb');       // 2.0.1 does not return the path: storagePath + dbFileName
+        const tInsert = Date.now() - 1000;
+        let synced = false;
+        for (let i = 0; i < 90 && !synced; i++) {
+          const bk = await request('POST', `${ADMIN}/api/backup`, { headers: { 'x-texacore-local-secret': o.secrets.localApiSecret }, body: {} });
+          if (bk.json && bk.json.success && !bk.json.skipped && fs.existsSync(companyFile) && fs.statSync(companyFile).mtimeMs >= tInsert) synced = true; else await sleep(1000);
+        }
+        if (!synced) throw new Error(`the previous build did not write a company file after the inserts (${companyFile})`);
+        oldTcdb = path.join(WORK, 'old-2.0.1.tcdb'); fs.copyFileSync(companyFile, oldTcdb);
         counts0 = (await pg(`SELECT (SELECT count(*)::int FROM public.companies) c, (SELECT count(*)::int FROM public.tenants) t, (SELECT count(*)::int FROM auth.users) u, (SELECT count(*)::int FROM public.chart_of_accounts) a, (SELECT count(*)::int FROM public.fabric_materials) m`)).rows[0];
         preFp = await fingerprint(); catPre = await catalog(); invPre = await invFns();
         const v = JSON.parse(fs.readFileSync(path.join(B, 'texacore-data', 'bootstrap.json'), 'utf8'));
@@ -288,6 +361,22 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         if (okLines !== NAMES.length) throw new Error(`${okLines} ✅ lines in total (expected ${NAMES.length}: the second start must add none)`);
         return `${rows.length} rows, same ids and timestamps; migrations.log: "All migrations already applied", still ${okLines} ✅`;
       });
+      await R.check('B5 RESTORE of a .tcdb written by the PREVIOUS build (no tracking_mode column) into the upgraded install: the load runs with the triggers off, the cards come back "quantity", and the restore path repairs them by itself (fabric -> roll, serial flag -> serial); the migration table is untouched', async () => {
+        const mBefore = (await appliedRows()).length;
+        const m = multipart(fs.readFileSync(oldTcdb), 'old-2.0.1.tcdb', {});
+        const r = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { 'x-texacore-local-secret': second.secrets.localApiSecret, 'Content-Type': m.ct }, body: m.body });
+        if (r.status !== 200 || !r.json || !r.json.success) throw new Error(`restore → ${r.status} ${r.buf.toString().slice(0, 300)}`);
+        const q = Object.fromEntries((await pg(`SELECT code, tracking_mode FROM public.fabric_materials WHERE code IN ('OLD-1','OLD-FAB','OLD-STD','OLD-SER')`)).rows.map((x) => [x.code, x.tracking_mode]));
+        if (q['OLD-FAB'] !== 'roll' || q['OLD-1'] !== 'roll' || q['OLD-SER'] !== 'serial' || q['OLD-STD'] !== 'quantity') throw new Error(`modes after the restore: ${JSON.stringify(q)}`);
+        const stock = (await pg(`SELECT quantity_on_hand FROM public.inventory_stock WHERE material_id = $1`, [legacy.oldFab])).rows[0];
+        if (!stock || Number(stock.quantity_on_hand) !== 30) throw new Error(`the stock of the restored fabric card: ${JSON.stringify(stock)}`);
+        const log = fs.readFileSync(second.logFile, 'utf8');
+        const note = /\[BackupManager\] tracking_mode: (\d+) card\(s\) of an older file worked out from their flags/.exec(log);
+        if (!note || Number(note[1]) < 3) throw new Error(`no repair line in the app log (${note ? note[0] : 'none'})`);
+        const again = await pg(`UPDATE public.fabric_materials SET tracking_mode = NULL WHERE material_type = 'fabric'`);   // the app's own repair, run again: harmless
+        if ((await appliedRows()).length !== mBefore) throw new Error('the migration table changed by the restore');
+        return `restored ${legacy ? 'a 2.0.1 file' : ''}: OLD-FAB (30 in stock) ${q['OLD-FAB']}, OLD-1 ${q['OLD-1']}, OLD-SER ${q['OLD-SER']}, OLD-STD ${q['OLD-STD']}; log "${note[0].slice(0, 60)}…"; the same UPDATE again: ${again.rowCount} card(s), no error; migration table untouched (${mBefore} rows)`;
+      });
     } finally { if (second) await stopApp(second.child, B); }
 
     await R.check('B4 the upgraded install and the fresh install have the SAME functions, triggers, policies and table grants (the upgrade path equals the fresh path)', async () => {
@@ -326,6 +415,13 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
       return `${touched.length} functions created/replaced by the shipped migrations: ${sameMd5} md5 = production, ${same} with identical SECURITY DEFINER + grants; outside them: ${outside.length} differ from production's md5 (redacted / local extras), ${prodOnly.length} production-only functions`;
     });
   }
+
+  await R.check('V 20270210v: the six functions it creates / replaces have production\'s post-image md5 (coordinator\'s table)', async () => {
+    const local = fnMap(post);
+    const bad = Object.entries(V_MD5).filter(([sig, md5]) => !local.has(sig) || local.get(sig).md5 !== md5).map(([sig]) => `${sig}: ${local.has(sig) ? local.get(sig).md5.slice(0, 8) : 'missing'}`);
+    if (bad.length) throw new Error(`${bad.join('; ')}`);
+    return `${Object.keys(V_MD5).length}/${Object.keys(V_MD5).length} md5 equal (fn_guard_material_card ff6c7cfc…, fn_material_tracking_sync db9d6ce5…, …)`;
+  });
 
   // ═════════ the inventory delta of the migrations (what manifest.inventoryAfter carries) ═════════
   if (WRITE_INV) {

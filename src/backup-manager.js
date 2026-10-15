@@ -657,6 +657,18 @@ class BackupManager {
       this.onProgress('restore', 'استعادة قاعدة البيانات...');
       const execRes = await this._executeSql(sql);
 
+      // 2.0.2 (20270210v): a file written before that migration has no fabric_materials.tracking_mode and the load above ran with the user triggers OFF (replica role),
+      // so every card came back with the column's net default 'quantity' (a fabric must be 'roll'). The server's own repair puts them right. Only for a file that LACKS the column.
+      if (BackupManager.needsTrackingModeRepair(sqlStr)) {
+        try {
+          const n = await this._repairTrackingModes();
+          console.log(`[BackupManager] tracking_mode: ${n} card(s) of an older file worked out from their flags (fabric -> roll, serial / batch / roll flags -> that mode)`);
+        } catch (re) {
+          console.warn('[BackupManager] ⚠️ tracking_mode repair failed (the cards keep the default "quantity"; run: UPDATE public.fabric_materials SET tracking_mode = NULL WHERE material_type = \'fabric\'):', re.message);
+          this.onProgress('restore', '⚠️ تعذّر ضبط نمط تتبّع المواد — راجع السجل');
+        }
+      }
+
       // Step 5b: Guarantee login accounts are loaded. The bulk restore above can
       // silently drop auth.users (its single transaction aborts on GoTrue's
       // pre-created tables) → no login after reopening, on any machine. Load them
@@ -696,6 +708,23 @@ class BackupManager {
       this.onProgress('error', `❌ فشل الاستعادة: ${error.message}`);
       throw error;
     }
+  }
+
+  /** Does this plain dump COPY fabric_materials WITHOUT the tracking_mode column (a file written before 20270210v)? */
+  static needsTrackingModeRepair(sqlText) {
+    const m = /^COPY public\.fabric_materials \(([^)]*)\) FROM stdin;$/m.exec(String(sqlText || ''));
+    return !!m && !/\btracking_mode\b/.test(m[1]);
+  }
+
+  /**
+   * UPDATE … SET tracking_mode = NULL = "work it out from the flags" (the server's own repair for a load that switched the triggers off, 20270210v): a fabric -> roll, track_serial -> serial,
+   * track_batch -> batch, is_roll_tracked -> roll, a service -> none. Runs with the triggers ON, as the superuser. Returns how many cards moved. A database without the column: 0.
+   */
+  async _repairTrackingModes() {
+    const has = String(await this._queryScalar("SELECT EXISTS (SELECT 1 FROM information_schema.columns WHERE table_schema = 'public' AND table_name = 'fabric_materials' AND column_name = 'tracking_mode')")).trim();
+    if (has !== 't') return 0;
+    const out = await this._queryScalar("WITH u AS (UPDATE public.fabric_materials SET tracking_mode = NULL WHERE tracking_mode = 'quantity' AND (material_type = 'fabric' OR is_roll_tracked OR track_serial OR track_batch OR material_type = 'service') RETURNING 1) SELECT count(*) FROM u");
+    return parseInt(String(out).trim(), 10) || 0;
   }
 
   _parseTcdbFile(buffer) {
