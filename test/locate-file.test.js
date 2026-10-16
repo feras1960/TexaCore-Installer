@@ -293,7 +293,7 @@ test('locatePickedFile: at most 12 candidates are hashed; the hashing has its ow
 // ── the route (main.js is not loadable without Electron: the wiring is checked in the source) ──
 const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
 const routeAt = main.indexOf("case 'POST /api/locate-picked-file'");
-const route = main.slice(routeAt, main.indexOf("// ── POST /api/open-picked-tcdb"));
+const route = main.slice(routeAt, main.indexOf('// ═══ 2.0.4: the search for the picked file as a JOB'));
 
 test('the route is guarded like the other company-file routes and validates the body before it looks at the disk', () => {
   const set = main.slice(main.indexOf('const DESTRUCTIVE_API = new Set(['), main.indexOf(']);', main.indexOf('const DESTRUCTIVE_API')));
@@ -310,7 +310,7 @@ test('the route reveals a path only through a located (hash-verified) file, regi
   assert.match(route, /code: 'NOT_FOUND', reason: 'ambiguous'/);
   const reg = route.indexOf('registerPickedFile(r.filePath, q.ext)');
   assert.ok(reg > route.indexOf('if (!r.found)'), 'registered only after the not-found branch returned');
-  assert.equal((main.match(/registerPickedFile\(/g) || []).length, 3, 'the helper + the native pick + the located pick: one answer shape');
+  assert.equal((main.match(/registerPickedFile\(/g) || []).length, 4, 'the helper + the native pick + the 2.0.3 located pick + the 2.0.4 confirm: one answer shape');
   // no log line prints a list of paths: the count line holds r.stats numbers only, the other logs the one chosen path
   const logs = route.split('\n').filter((l) => /fileLog\(/.test(l));
   assert.equal(logs.length, 2);

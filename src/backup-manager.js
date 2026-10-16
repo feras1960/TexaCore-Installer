@@ -64,6 +64,9 @@ class BackupManager {
     this.intervalMs = opts.intervalMs || 5 * 60 * 1000; // 5 minutes default
     this.onProgress = opts.onProgress || (() => {});
     this.onError = opts.onError || ((e) => console.error('[BackupManager]', e));
+    // 2.0.4: asked before a write into the user's folder: on macOS a protected folder (Desktop / Documents / ...) whose permission is not granted - or whose
+    // prompt is still up - would BLOCK the synchronous write and with it the whole program. { ok:false } skips this run and records why (no-permission).
+    this.accessGuard = opts.accessGuard || BackupManager.defaultAccessGuard || null;
 
     this._timer = null;
     this._running = false;
@@ -75,6 +78,7 @@ class BackupManager {
     this._status = { primary: { lastSuccess: null, error: null, failures: 0 }, copy: { lastSuccess: null, error: null, failures: 0 } };
     this._consecutiveFailures = 0;
     this._lastSkipped = null;
+    this._lastAccessBlock = null;
   }
 
   _markOk(role, when = new Date()) {
@@ -149,6 +153,18 @@ class BackupManager {
 
     this._running = true;
     const startTime = Date.now();
+    if (this.accessGuard) {
+      let g = null;
+      try { g = await this.accessGuard(path.dirname(this.backupPath)); } catch { g = null; }
+      if (g && g.ok === false) {
+        this._running = false;
+        this._markFail('primary', Object.assign(new Error(g.state === 'pending' ? 'macOS is still asking for permission to use the folder' : 'No permission to use the company file folder'), { code: 'EPERM' }), 'write');
+        this._lastAccessBlock = { state: g.state || 'denied', area: g.area || null, at: new Date().toISOString() };
+        this.onProgress('error', `⛔ لا إذن للمجلد (${g.area || ''}) | no permission for the folder (${g.area || ''})`);
+        return null;
+      }
+      this._lastAccessBlock = null;
+    }
     // the targets are fixed when the run starts: a company file opened while this dump runs (re-pointed after waitIdle gave up) must never receive the OLD database
     const target = this.backupPath;
     const secondary = this.secondaryBackupPath;
@@ -1145,6 +1161,7 @@ class BackupManager {
       consecutiveFailures: this._consecutiveFailures,
       lastError: p.error,
       lastSkipped: this._lastSkipped,
+      accessBlock: this._lastAccessBlock || null,   // 2.0.4: { state: 'denied'|'pending', area } while macOS' folder permission is missing
       targets: this.getTargets(),
     };
   }
@@ -1158,7 +1175,10 @@ class BackupManager {
     const make = (role, filePath) => {
       const t = this._status[role];
       let exists = false; let size = 0; let mtime = null; let onThisComputer = true;
+      // 2.0.4: a folder macOS has not allowed (or is still asking about) is not touched here - a stat in it would wait for the prompt, in the main process
+      const blocked = role === 'primary' && !!this._lastAccessBlock;
       try {
+        if (blocked) throw new Error('blocked');
         const st = fs.statSync(filePath);
         exists = st.isFile(); size = st.size; mtime = st.mtime.toISOString();
         if (companyFile.looksLikeCloudPlaceholder(st)) onThisComputer = false;

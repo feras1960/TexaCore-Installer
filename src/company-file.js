@@ -85,7 +85,7 @@ function classifyFsError(err, stage = 'write') {
   if (stage === 'dump') return { code: code || 'PG_DUMP_FAILED', reason: 'dump-failed' };
   if (code === 'FILE_NOT_LOCAL' || code === 'ETIMEDOUT' || code === 'ECANCELED') return { code, reason: 'not-downloaded' };
   if (code === 'ENOENT' || code === 'ENOTDIR') return { code, reason: 'folder-missing' };
-  if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS') return { code, reason: 'no-permission' };
+  if (code === 'EACCES' || code === 'EPERM' || code === 'EROFS' || code === 'FOLDER_PERMISSION') return { code, reason: 'no-permission' };
   if (code === 'ENOSPC' || code === 'EDQUOT') return { code, reason: 'disk-full' };
   return { code: code || 'EUNKNOWN', reason: 'unknown' };
 }

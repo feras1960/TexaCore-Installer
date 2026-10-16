@@ -19,6 +19,9 @@ const cloudClient = require('./cloud-client');
 const BackupManager = require('./backup-manager');
 const companyFile = require('./company-file');
 const locateFile = require('./locate-file');
+const folderAccessMod = require('./folder-access');   // 2.0.4: macOS «Files and Folders» permission - probed in a child process, never in the main loop
+const locateJobMod = require('./locate-job');
+const cloudFiles = require('./cloud-files');
 const { RsfReader, detectFileType } = require('./rsf-reader');
 const { RsfExporter, RsfSyncManager } = require('./rsf-exporter');
 const { PORTS, harnessAllowed } = require('./ports');
@@ -953,6 +956,11 @@ class HeartbeatSender {
   async _uploadCloudBackup(config) {
     try {
       if (!config.licenseKey) return;
+      // (2.0.4) a company file in a folder macOS has not allowed (or is still asking about) is not touched: the stat/read below would wait for the prompt
+      for (const c0 of [config.currentDbPath, ...((config.companies || []).map((co) => co && (co.tcdbPath || co.storagePath)))].filter((x) => typeof x === 'string' && path.isAbsolute(x))) {
+        const g = await BackupManager.defaultAccessGuard(path.dirname(c0));
+        if (g && g.ok === false) return;
+      }
       
       // Find TCDB file to upload (+ track the active company's name)
       let tcdbPath = null;
@@ -1472,6 +1480,24 @@ async function handleCreateLocalCompany(companyData) {
       return { success: false, code: 'INVALID_FILE_NAME', error: 'Invalid backup file name' };
     }
 
+    // ── 0. (2.0.4) macOS folder permission: ask about the folder the company file will live in BEFORE any database work. A folder macOS has not allowed
+    //       (or is still asking about) answers FOLDER_PERMISSION and nothing is created; `fileFolderFallback: 'program'` (the user's choice on the permission
+    //       step) keeps the company file in the program's own folder instead, which needs no permission. ──
+    if (companyData && companyData.fileFolderFallback !== 'program') {
+      const pre = companyData.rsfSourceRef ? pickedFiles.get(companyData.rsfSourceRef) : null;
+      let need = null;
+      if (pre && pre.type === 'rsf') need = path.dirname(pre.filePath);
+      else if (companyData.storagePath) need = String(companyData.storagePath).startsWith('~') ? path.join(require('os').homedir(), String(companyData.storagePath).slice(1)) : String(companyData.storagePath);
+      else if (pre || companyData.purpose === 'rsf_import') need = companyFile.defaultCompanyDir();
+      if (need && path.isAbsolute(need)) {
+        const v = await folderAccess.ensureUsable(need, { waitMs: 3000 });
+        if (v.state !== 'allowed' && v.state !== 'missing' && v.state !== 'error') {
+          fileLog('[TexaCore] Company creation held back: no permission for the', v.kind, 'folder (' + v.state + ')');
+          return { success: false, code: 'FOLDER_PERMISSION', area: v.kind, state: v.state, error: folderPermissionError(v).message };
+        }
+      }
+    }
+
     // ── 1. Create tenant, owner, company (server functions, as the admin) ──
     const result = await provisioning.createLocalCompany(provisioningDeps(), companyData);
     if (!result.success) {
@@ -1495,7 +1521,10 @@ async function handleCreateLocalCompany(companyData) {
     let storageDir = companyData.storagePath || null;
     try {
       let dir = null; let base = null;
-      if (pickedSource && pickedSource.type === 'rsf') {
+      if (companyData.fileFolderFallback === 'program') {
+        dir = path.join(DATA_DIR, 'company-files'); base = companyData.companyName || companyData.dbFileName || 'company'; tcdbPlacement = 'program-folder';
+      }
+      if (!dir && pickedSource && pickedSource.type === 'rsf') {
         const plan = companyFile.rsfCompanyFilePlan(pickedSource.filePath);
         const w = companyFile.folderIsWritable(plan.dir);
         if (w.ok) { dir = plan.dir; base = plan.base; tcdbPlacement = 'beside-rsf'; }
@@ -1769,6 +1798,62 @@ function initBackupOnStartup() {
 // 1.x did the same for a Rashid file (GET /api/open-tcdb → the path → POST /api/import-rsf-path, which wrote <folder of the .rsf>/<name>.tcdb);
 // the dialog code is that route's, now shared (showNativeDialog), and so is the config.companies[].tcdbPath/storagePath bookkeeping.
 const pickedFiles = companyFile.createPickRegistry();
+
+// ─── 2.0.4: folder permission (macOS TCC) + the search job ────────────────────────────────────────────────────────────────────────────────────
+// Every touch of Desktop / Documents / Downloads / iCloud Drive / a volume goes through `folderAccess` first (a child process asks; macOS' prompt
+// blocks THAT child, never this event loop). The harness can pretend (HARNESS_OK only, via POST /api/e2e-folder-access): a fake verdict per area,
+// scratch folders standing in for the areas, and files that behave like cloud placeholders - so the packaged app is driven through every path
+// without touching the real privacy settings.
+const E2E_FS = { sim: {}, kinds: {}, placeholders: new Map(), settingsOpened: [] };
+const e2eKindOf = (p) => {
+  if (!HARNESS_OK) return null;
+  const r = path.resolve(String(p || ''));
+  for (const [prefix, kind] of Object.entries(E2E_FS.kinds)) { const pr = path.resolve(prefix); if (r === pr || r.startsWith(pr + path.sep)) return kind; }
+  return null;
+};
+const folderAccess = folderAccessMod.createFolderAccess({
+  simulate: (kind) => (HARNESS_OK ? (E2E_FS.sim[kind] || null) : null),
+  kindResolver: e2eKindOf,
+});
+/** The harness's pretend cloud files: a placeholder path → a download that takes `msPerChunk` per 1 MiB and then makes the file "local". */
+const cloudDeps = {
+  ...cloudFiles,
+  cloudState: async (p, o) => ((HARNESS_OK && E2E_FS.placeholders.has(path.resolve(p))) ? 'placeholder' : cloudFiles.cloudState(p, o)),
+  startMaterialize: (p, o) => {
+    const key = path.resolve(p);
+    const sim = HARNESS_OK ? E2E_FS.placeholders.get(key) : null;
+    if (!sim) return cloudFiles.startMaterialize(p, o);
+    let state = 'running'; let loaded = 0; let code = null; let timer = null; let resolveDone;
+    const done = new Promise((r) => { resolveDone = r; });
+    const total = o.size;
+    const finish = (s, c) => { if (state !== 'running') return; state = s; code = c || null; clearInterval(timer); if (s === 'done') { loaded = total; E2E_FS.placeholders.delete(key); } resolveDone({ state, loaded, total, ...(code ? { code } : {}) }); };
+    const step = Math.max(1, Math.ceil(total / Math.max(1, sim.steps || 8)));
+    timer = setInterval(() => { if (sim.fail) return finish('failed', sim.fail); if (sim.stall) return; loaded = Math.min(total, loaded + step); if (loaded >= total) finish('done'); }, sim.msPerStep || 150);
+    return { snapshot: () => ({ state, loaded, total, ...(code ? { code } : {}) }), cancel: () => finish('cancelled'), done };
+  },
+};
+const locateJobs = locateJobMod.createLocateJobs({ folderAccess, cloud: cloudDeps });
+let locateJobsRunning = 0;
+
+/** A coded error the page turns into the permission step: the area, and whether macOS is still asking (`pending`) or the answer was no (`denied`). */
+function folderPermissionError(v, dir) {
+  const err = Object.assign(new Error(v.state === 'pending'
+    ? `macOS is asking for access to the ${v.kind} folder - answer its prompt | ينتظر macOS موافقتك على الوصول إلى مجلد ${v.kind}`
+    : `TexaCore has no permission for the ${v.kind} folder | لا يملك TexaCore إذن الوصول إلى مجلد ${v.kind}`), { code: 'FOLDER_PERMISSION', area: v.kind, state: v.state, folderCode: v.code || null });
+  if (dir) err.dirKind = v.kind;
+  return err;
+}
+/** Resolve when `dir` may be used, or throw FOLDER_PERMISSION. 'missing' (no such area on this Mac) and 'error' (cannot tell) never block: the real operation reports them. */
+async function requireFolderAccess(dir, { waitMs = 2500 } = {}) {
+  const v = await folderAccess.ensureUsable(dir, { waitMs });
+  if (v.state === 'allowed' || v.state === 'missing' || v.state === 'error') return v;
+  throw folderPermissionError(v, dir);
+}
+// the live sync asks before it writes into a protected folder: a blocked write would freeze the whole program
+BackupManager.defaultAccessGuard = async (dir) => {
+  const v = await folderAccess.ensureUsable(dir, { waitMs: 800 });
+  return (v.state === 'allowed' || v.state === 'missing' || v.state === 'error') ? { ok: true } : { ok: false, state: v.state, area: v.kind, code: 'FOLDER_PERMISSION' };
+};
 const E2E_DIALOG = { open: null, save: null, reveal: [] };   // isolated test runs only (HARNESS_OK): answers for the native dialogs, a log of "show in folder"
 let exportInFlight = false;
 const MIN_PASSPHRASE_LEN = 6;
@@ -1876,7 +1961,25 @@ const sameFile = (a, b) => {
 /** What a coded file/key error becomes on the wire: a status + the code the page translates (the text is bilingual for logs). */
 function fileErrorStatus(code) {
   return ({ PICK_EXPIRED: 404, FILE_NOT_FOUND: 404, FILE_NOT_LOCAL: 504, FILE_TOO_LARGE: 413, EXPORT_EXISTS: 409, EXPORT_IS_LIVE_FILE: 409,
-    EXPORT_BUSY: 409, TCDB_PASSPHRASE_REQUIRED: 422, TCDB_BAD_PASSPHRASE: 422, TCDB_CORRUPT: 422, LEGACY_TCDB: 422, PASSPHRASE_TOO_SHORT: 400, BAD_REQUEST: 400, SERVICES_DOWN: 503, EXPORT_EMPTY: 409, NO_PERMISSION: 403, LOCATE_BUSY: 429, BAD_JSON: 400, BODY_TOO_LARGE: 413, RESTORE_BUSY: 409 })[code] || 500;
+    EXPORT_BUSY: 409, TCDB_PASSPHRASE_REQUIRED: 422, TCDB_BAD_PASSPHRASE: 422, TCDB_CORRUPT: 422, LEGACY_TCDB: 422, PASSPHRASE_TOO_SHORT: 400, BAD_REQUEST: 400, SERVICES_DOWN: 503, EXPORT_EMPTY: 409, NO_PERMISSION: 403, LOCATE_BUSY: 429, BAD_JSON: 400, BODY_TOO_LARGE: 413, RESTORE_BUSY: 409,
+    FOLDER_PERMISSION: 403, JOB_EXPIRED: 404, BAD_STATE: 409, NOT_LOCAL: 409 })[code] || 500;
+}
+
+/** The folders a search for a picked file looks in (harness runs may replace them with scratch folders so they never scan the real profile). */
+function locateSearchRoots() {
+  const override = (HARNESS_OK && process.env.TEXACORE_E2E_LOCATE_ROOTS)
+    ? process.env.TEXACORE_E2E_LOCATE_ROOTS.split(path.delimiter).filter(Boolean) : null;
+  let companyDirs = [];
+  try {
+    for (const co of (loadConfig().companies || [])) {
+      if (co && co.tcdbPath) companyDirs.push(path.dirname(co.tcdbPath));
+      if (co && co.storagePath) companyDirs.push(co.storagePath);
+    }
+  } catch { companyDirs = []; }
+  const userDirs = [];
+  for (const n of ['desktop', 'documents', 'downloads']) { try { userDirs.push(app.getPath(n)); } catch { /* not available on this platform */ } }
+  // existsSync on a protected folder would wait for the prompt: the roots are listed from NAMES (the search job asks macOS first and skips what is missing)
+  return locateFile.locateRoots({ override, companyDirs, defaultDir: companyFile.defaultCompanyDir(), extraRoots: userDirs, existsSync: (p) => (folderAccess.kindOf(p) ? true : fs.existsSync(p)) });
 }
 
 /** Keep a picked / located company file under an opaque reference and describe it to the page (the answer of POST /api/pick-company-file and /api/locate-picked-file). */
@@ -1928,7 +2031,11 @@ async function handleCompanyFileRoutes(req, res) {
         if (exportInFlight) throw Object.assign(new Error('تصدير آخر قيد التنفيذ | Another export is running'), { code: 'EXPORT_BUSY' });
         const live = liveCompanyFile();
         const base = companyFile.safeFileBase(body.fileBase || `TexaCore-backup-${companyFile.localDateStamp()}`, 'TexaCore-backup');
-        const startDir = (live && companyFile.folderIsWritable(path.dirname(live)).ok) ? path.dirname(live) : companyFile.defaultCompanyDir();
+        // (2.0.4) ask macOS before any synchronous touch of the folder (a folder it has not allowed would freeze the program until its prompt is answered)
+        let liveDirOk = false;
+        if (live) { await requireFolderAccess(path.dirname(live)); liveDirOk = companyFile.folderIsWritable(path.dirname(live)).ok; }
+        const startDir = liveDirOk ? path.dirname(live) : companyFile.defaultCompanyDir();
+        if (!liveDirOk) await requireFolderAccess(startDir);
         let target; let overwrite = false;
         if (mode === 'company-folder') {
           if (!companyFile.folderIsWritable(startDir).ok) throw Object.assign(new Error(`Cannot write to ${startDir}`), { code: 'FILE_NOT_FOUND' });
@@ -1942,6 +2049,7 @@ async function handleCompanyFileRoutes(req, res) {
           });
           if (r.canceled || !r.filePath) { sendJson(res, 200, { success: false, canceled: true }); return true; }
           target = /\.tcdb$/i.test(r.filePath) ? r.filePath : `${r.filePath}.tcdb`;
+          await requireFolderAccess(path.dirname(target));
           // The OS save dialog asks "replace it?" itself — an answer of yes is the user's own explicit choice. A harness answer was never asked.
           overwrite = !r.harness && path.resolve(target) === path.resolve(r.filePath) && fs.existsSync(target);   // "report" confirmed != "report.tcdb" replaced
         }
@@ -1961,7 +2069,10 @@ async function handleCompanyFileRoutes(req, res) {
         const base = companyFile.safeFileBase(body.suggestedName || 'my_company', 'my_company');
         let dir = typeof body.dir === 'string' && body.dir ? body.dir : companyFile.defaultCompanyDir();
         if (dir.startsWith('~')) dir = path.join(require('os').homedir(), dir.slice(1));
-        if (!path.isAbsolute(dir) || !fs.existsSync(dir)) dir = companyFile.defaultCompanyDir();
+        // (2.0.4) existsSync on a protected folder waits for macOS' prompt: ask first (a folder that is not allowed is simply not the start folder)
+        if (path.isAbsolute(dir)) { const v0 = await folderAccess.ensureUsable(dir, { waitMs: 1500 }); if (v0.state !== 'allowed' && v0.state !== 'missing' && v0.state !== 'error') dir = null; }
+        if (!dir || !path.isAbsolute(dir) || !fs.existsSync(dir)) dir = companyFile.defaultCompanyDir();
+        if (folderAccess.kindOf(dir)) { const v1 = await folderAccess.ensureUsable(dir, { waitMs: 1500 }); if (v1.state !== 'allowed' && v1.state !== 'missing' && v1.state !== 'error') dir = DATA_DIR; }
         const r = await showNativeDialog('save', {
           title: 'مكان ملف الشركة — TexaCore',
           defaultPath: path.join(dir, `${base}.tcdb`),
@@ -1971,6 +2082,7 @@ async function handleCompanyFileRoutes(req, res) {
         if (r.canceled || !r.filePath) { sendJson(res, 200, { success: false, canceled: true }); return true; }
         const chosen = path.resolve(/\.tcdb$/i.test(r.filePath) ? r.filePath : `${r.filePath}.tcdb`);
         const chosenDir = path.dirname(chosen);
+        await requireFolderAccess(chosenDir);
         const w = companyFile.folderIsWritable(chosenDir);
         if (!w.ok) throw Object.assign(new Error(`Cannot write to ${chosenDir} (${w.reason})`), { code: w.reason === 'ENOENT' ? 'FILE_NOT_FOUND' : 'NO_PERMISSION' });
         const fileBase = path.basename(chosen).replace(/\.tcdb$/i, '');
@@ -2025,18 +2137,12 @@ async function handleCompanyFileRoutes(req, res) {
         if (locateInFlight) throw Object.assign(new Error('A search for a picked file is already running'), { code: 'LOCATE_BUSY' });
         locateInFlight = true;
         try {
-          const override = (HARNESS_OK && process.env.TEXACORE_E2E_LOCATE_ROOTS)
-            ? process.env.TEXACORE_E2E_LOCATE_ROOTS.split(path.delimiter).filter(Boolean) : null;   // isolated test runs never scan the real profile
-          let companyDirs = [];
-          try {
-            for (const co of (loadConfig().companies || [])) {
-              if (co && co.tcdbPath) companyDirs.push(path.dirname(co.tcdbPath));
-              if (co && co.storagePath) companyDirs.push(co.storagePath);
-            }
-          } catch { companyDirs = []; }
-          const userDirs = [];
-          for (const n of ['desktop', 'documents', 'downloads']) { try { userDirs.push(app.getPath(n)); } catch { /* not available on this platform */ } }
-          const roots = locateFile.locateRoots({ override, companyDirs, defaultDir: companyFile.defaultCompanyDir(), extraRoots: userDirs });
+          // 2.0.3 protocol (kept for pages that still use it). 2.0.4: a protected folder whose permission is not granted yet is LEFT OUT - reading it
+          // would wait for the macOS prompt - and the answer says so (the 2.0.4 page uses the job routes below, which wait for the user properly).
+          const override = !!(HARNESS_OK && process.env.TEXACORE_E2E_LOCATE_ROOTS);
+          const allRoots = locateSearchRoots();
+          const roots = [];
+          for (const r0 of allRoots) { const v = await folderAccess.ensureUsable(r0, { waitMs: 1500 }); if (v.state === 'allowed') roots.push(r0); }
           const r = await locateFile.locatePickedFile(q, { roots, useMdfind: !override });
           // (counts only - never the candidate list)
           fileLog('[Pick] locate', q.ext, `roots=${r.stats.roots} spotlight=${r.stats.spotlight} dirs=${r.stats.walkDirs}${r.stats.walkTimedOut ? ' (time budget)' : ''} candidates=${r.stats.candidates} hashed=${r.stats.hashed} matches=${r.stats.matches}`);
@@ -2050,6 +2156,87 @@ async function handleCompanyFileRoutes(req, res) {
         } finally {
           locateInFlight = false;
         }
+      }
+
+      // ═══ 2.0.4: the search for the picked file as a JOB the page follows (see locate-job.js) ═══
+      // POST /api/locate-start {name,size,lastModified}   → {job, phase, ...}: searches by METADATA in the background (a protected folder only after macOS said yes)
+      // GET  /api/locate-status?job=…                     → phase (searching | waiting-permission | ready | not-found | permission-denied | cancelled), the areas
+      //                                                     being asked about, the candidates (opaque ids + state - never a path), the download progress
+      // POST /api/locate-materialize {job}                → download the iCloud / cloud placeholders (progress in status)
+      // POST /api/locate-confirm {job, sha256}            → the page hashed the (now local) file: a path is answered ONLY for a file with that full content
+      // POST /api/locate-cancel {job}
+      case 'POST /api/locate-start': {
+        const q = locateFile.validateLocateBody(await readJsonBody(req), { requireHash: false });
+        const roots = locateSearchRoots();
+        const id = locateJobs.start(q, { roots });
+        fileLog('[Pick] locate-start', q.ext, `roots=${roots.length}`);
+        sendJson(res, 200, locateJobs.status(id));
+        return true;
+      }
+      case 'GET /api/locate-status': {
+        sendJson(res, 200, locateJobs.status(urlObj.searchParams.get('job')));
+        return true;
+      }
+      case 'POST /api/locate-materialize': {
+        const body = await readJsonBody(req);
+        fileLog('[Pick] locate-materialize');
+        sendJson(res, 200, locateJobs.materialize(typeof body.job === 'string' ? body.job : ''));
+        return true;
+      }
+      case 'POST /api/locate-cancel': {
+        const body = await readJsonBody(req);
+        sendJson(res, 200, locateJobs.cancel(typeof body.job === 'string' ? body.job : ''));
+        return true;
+      }
+      case 'POST /api/locate-confirm': {
+        const body = await readJsonBody(req);
+        const r = await locateJobs.confirm(typeof body.job === 'string' ? body.job : '', body.sha256);
+        // (counts only - never the candidate list)
+        fileLog('[Pick] locate-confirm', `candidates=${r.stats.candidates} hashed=${r.stats.hashed} matches=${r.stats.matches}`);
+        if (!r.found) { sendJson(res, 200, { success: false, code: 'NOT_FOUND', reason: r.reason }); return true; }
+        const ext = path.extname(r.filePath).toLowerCase().slice(1);
+        if (ext !== 'rsf' && ext !== 'tcdb') { sendJson(res, 400, { success: false, code: 'BAD_REQUEST', error: 'Unsupported file type' }); return true; }
+        fileLog('[Pick] located', ext, r.filePath);
+        sendJson(res, 200, registerPickedFile(r.filePath, ext));
+        return true;
+      }
+
+      // ── GET /api/folder-access?kinds=desktop,documents&retry=1: the macOS «Files and Folders» verdict per area (waits ~1.2 s for a prompt, then says pending) ──
+      case 'GET /api/folder-access': {
+        const wanted = String(urlObj.searchParams.get('kinds') || 'desktop,documents,downloads').split(',').map((x) => x.trim()).filter((x) => folderAccessMod.KINDS.includes(x)).slice(0, 6);
+        const retry = urlObj.searchParams.get('retry') === '1';
+        const areas = {};
+        await Promise.all(wanted.map(async (k) => {
+          if (retry) folderAccess.forget(k);
+          const v = await folderAccess.check(k, { waitMs: 1200 });
+          areas[k] = { state: v.state, ...(v.code ? { code: v.code } : {}), ...(v.sinceMs != null ? { sinceMs: v.sinceMs } : {}) };
+        }));
+        sendJson(res, 200, { success: true, platform: process.platform, areas });
+        return true;
+      }
+
+      // ── POST /api/open-privacy-settings: System Settings → Privacy & Security → Files and Folders (opened by THIS app - a web page cannot open that link) ──
+      case 'POST /api/open-privacy-settings': {
+        if (process.platform !== 'darwin' && !HARNESS_OK) { sendJson(res, 200, { success: false, code: 'UNSUPPORTED' }); return true; }
+        if (HARNESS_OK && process.env.TEXACORE_HEADLESS === '1') { E2E_FS.settingsOpened.push(Date.now()); sendJson(res, 200, { success: true, stubbed: true }); return true; }
+        let opened = false;
+        for (const url of folderAccessMod.settingsUrls()) {
+          try { await shell.openExternal(url); opened = true; break; } catch (e) { fileLog('[Privacy] could not open', url, e && e.message); }
+        }
+        sendJson(res, 200, { success: opened, ...(opened ? {} : { code: 'OPEN_FAILED' }) });
+        return true;
+      }
+
+      // ── (harness only) POST /api/e2e-folder-access {sim?, kinds?, placeholders?, reset?, get?}: pretend permission verdicts / scratch folders as protected areas / cloud placeholders ──
+      case 'POST /api/e2e-folder-access': {
+        if (!HARNESS_OK) return false;
+        const b = await readJsonBody(req);
+        if (b.reset) { E2E_FS.sim = {}; E2E_FS.kinds = {}; E2E_FS.placeholders.clear(); E2E_FS.settingsOpened = []; for (const k of folderAccessMod.KINDS) folderAccess.forget(k); }
+        if (b.sim && typeof b.sim === 'object') { E2E_FS.sim = { ...E2E_FS.sim, ...b.sim }; for (const k of folderAccessMod.KINDS) folderAccess.forget(k); }
+        if (b.kinds && typeof b.kinds === 'object') E2E_FS.kinds = { ...E2E_FS.kinds, ...b.kinds };
+        if (b.placeholders && typeof b.placeholders === 'object') for (const [fp, spec] of Object.entries(b.placeholders)) E2E_FS.placeholders.set(path.resolve(fp), spec && typeof spec === 'object' ? spec : {});
+        sendJson(res, 200, { success: true, sim: E2E_FS.sim, kinds: E2E_FS.kinds, placeholders: [...E2E_FS.placeholders.keys()].length, settingsOpened: E2E_FS.settingsOpened.length });
+        return true;
       }
 
       // ── POST /api/open-picked-tcdb {ref, passphrase?}: open the company file the user picked in the native window and keep working IN it ──
@@ -2092,7 +2279,7 @@ async function handleCompanyFileRoutes(req, res) {
     }
   } catch (err) {
     const code = err && err.code ? String(err.code) : 'ERROR';
-    if (!res.headersSent) sendJson(res, fileErrorStatus(code), { success: false, code, error: err.message });
+    if (!res.headersSent) sendJson(res, fileErrorStatus(code), { success: false, code, error: err.message, ...(code === 'FOLDER_PERMISSION' ? { area: err.area || null, state: err.state || 'denied' } : {}) });
     else res.end();
     if (fileErrorStatus(code) === 500) console.error(`[CompanyFile] ${route} failed:`, err.message);
     return true;
@@ -2111,6 +2298,9 @@ const DESTRUCTIVE_API = new Set([
   '/api/export-backup', '/api/reveal-in-folder', '/api/pick-company-file', '/api/pick-save-location', '/api/picked-file', '/api/e2e-dialog',
   '/api/open-picked-tcdb',   // 2.0.3: restores the picked company file and keeps syncing into it
   '/api/locate-picked-file', // 2.0.3: finds the file the page picked in the browser's own chooser (name + size + SHA-256) and registers it like a native pick
+  // 2.0.4: the same search as a job (metadata first, permission-aware, placeholders downloaded with progress) + the folder-permission helpers
+  '/api/locate-start', '/api/locate-status', '/api/locate-materialize', '/api/locate-cancel', '/api/locate-confirm',
+  '/api/folder-access', '/api/open-privacy-settings', '/api/e2e-folder-access',
 ]);
 // 2.0.0: every admin-API call except /api/ping must carry this install's secret (secrets.json → /config.js, same-origin only;
 // the Electron window gets it over IPC). It keeps other local programs and foreign web pages — which CORS "*" and a loopback
@@ -2289,7 +2479,9 @@ async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '' } = {}) 
   // write) keeps its bytes and the company file gets a free name BESIDE it - or in <Documents>/TexaCore when its folder is read-only.
   let fileWritable = false;
   try { fs.accessSync(selectedPath, fs.constants.W_OK); fileWritable = true; } catch { fileWritable = false; }
+  await requireFolderAccess(fileDir);   // (2.0.4) the folder beside the opened file: macOS must have said yes before the synchronous checks below
   const besideOk = companyFile.folderIsWritable(fileDir).ok;
+  if (!besideOk) await requireFolderAccess(companyFile.defaultCompanyDir());
   const liveTarget = (!openedWithPassphrase && fileWritable && besideOk)
     ? selectedPath
     : companyFile.uniqueTcdbPath(besideOk ? fileDir : companyFile.defaultCompanyDir(), fileName.replace(/\.tcdb$/i, ''));
@@ -3087,13 +3279,24 @@ const httpServer = http.createServer(async (req, res) => {
           throw probeErr;
         }
         
+        // 2.0.4: the user's choice on the permission step - keep the company file in the program's own folder (no macOS permission needed)
+        let folderChoice = '';
+        for (const part of parts) {
+          const he = part.indexOf('\r\n\r\n');
+          if (he === -1) continue;
+          const hdr = part.subarray(0, he).toString();
+          if (/name="folder"/.test(hdr) && !hdr.includes('filename=')) { folderChoice = part.subarray(he + 4, part.lastIndexOf('\r\n')).toString('utf8').slice(0, 16); break; }
+        }
         // Save to C:\TexaCore (Windows) or ~/Documents/TexaCore (Mac)
         const os = require('os');
         const isWin = process.platform === 'win32';
         // (isolated test runs — HARNESS_OK — may point this at a scratch folder so they never write into the real one)
-        const tcdbDir = (HARNESS_OK && process.env.TEXACORE_TCDB_DIR)
-          ? path.resolve(process.env.TEXACORE_TCDB_DIR)
-          : (isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore'));
+        const tcdbDir = folderChoice === 'program'
+          ? path.join(DATA_DIR, 'company-files')
+          : ((HARNESS_OK && process.env.TEXACORE_TCDB_DIR)
+            ? path.resolve(process.env.TEXACORE_TCDB_DIR)
+            : (isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore')));
+        if (folderChoice !== 'program') await requireFolderAccess(tcdbDir);   // 2.0.4: macOS must have said yes before the synchronous folder calls below
         if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
         // 2.0.2 (review): a FREE name - the picked file may itself live in this folder (a passphrase-protected export saved to the company folder):
         // the live sync below rewrites tcdbPath every minute with the install key, so tcdbPath must never be an existing file.
@@ -3167,8 +3370,8 @@ const httpServer = http.createServer(async (req, res) => {
         res.end(JSON.stringify({ success: true, tcdbPath, ...restoreResult }));
       } catch (err) {
         console.error('[Restore] ❌ Failed:', err.message);
-        res.writeHead(/^TCDB_/.test(String(err.code)) ? 422 : (err.code === 'RESTORE_BUSY' ? 409 : 500), { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null }));
+        res.writeHead(/^TCDB_/.test(String(err.code)) ? 422 : (err.code === 'RESTORE_BUSY' ? 409 : (err.code === 'FOLDER_PERMISSION' ? 403 : 500)), { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null, ...(err.code === 'FOLDER_PERMISSION' ? { area: err.area || null, state: err.state || 'denied' } : {}) }));
       } finally {
         if (heldRestore) restoreInFlight = false;
       }
@@ -4046,7 +4249,7 @@ app.on('before-quit', (event) => {
           fileLog('[TexaCore] Running final backup before quit...');
           await backupManager.backup();
           const primaryPath = backupManager.backupPath;
-          if (primaryPath && fs.existsSync(primaryPath)) {
+          if (primaryPath && !backupManager._lastAccessBlock && fs.existsSync(primaryPath)) {
             const appBackupDir = path.join(DATA_DIR, 'backups');
             if (!fs.existsSync(appBackupDir)) fs.mkdirSync(appBackupDir, { recursive: true });
             fs.copyFileSync(primaryPath, path.join(appBackupDir, path.basename(primaryPath)));

@@ -54,7 +54,7 @@ const MAX_STALLED_DIRS = 3;       // ... and the walk stops after this many: eac
  * name: a plain base name (no separator, no `..`, no control character) ending .rsf or .tcdb; size: a positive integer ≤ 1 GiB;
  * sha256: 64 hex characters; lastModified: optional, a finite number of milliseconds.
  */
-function validateLocateBody(body) {
+function validateLocateBody(body, { requireHash = true } = {}) {
   const b = body && typeof body === 'object' && !Array.isArray(body) ? body : null;
   if (!b) throw badRequest('Expected a JSON object');
   const name = b.name;
@@ -62,13 +62,14 @@ function validateLocateBody(body) {
   if (!ext) throw badRequest('name must be a plain file name ending .rsf or .tcdb');
   const size = b.size;
   if (typeof size !== 'number' || !Number.isSafeInteger(size) || size <= 0 || size > MAX_FILE_BYTES) throw badRequest('size must be a positive integer of at most 1 GiB');
-  if (typeof b.sha256 !== 'string' || !/^[0-9a-fA-F]{64}$/.test(b.sha256)) throw badRequest('sha256 must be 64 hex characters');
+  const hasHash = typeof b.sha256 === 'string' && /^[0-9a-fA-F]{64}$/.test(b.sha256);
+  if (requireHash ? !hasHash : (b.sha256 !== undefined && b.sha256 !== null && !hasHash)) throw badRequest('sha256 must be 64 hex characters');
   let lastModified = null;
   if (b.lastModified !== undefined && b.lastModified !== null) {
     if (typeof b.lastModified !== 'number' || !Number.isFinite(b.lastModified) || b.lastModified < 0) throw badRequest('lastModified must be a number of milliseconds');
     lastModified = b.lastModified;
   }
-  return { name, ext, size, sha256: b.sha256.toLowerCase(), lastModified };
+  return { name, ext, size, sha256: hasHash ? b.sha256.toLowerCase() : null, lastModified };
 }
 
 /**
@@ -298,6 +299,6 @@ async function locatePickedFile(q, deps = {}) {
 }
 
 module.exports = {
-  validateLocateBody, locateRoots, withTimeout, skipDirName, searchPathAllowed, mdfindArgs, mdfindCandidates, walkForFile, sha256FileIdle, locatePickedFile,
+  validateLocateBody, locateRoots, withTimeout, nfc, MTIME_TOLERANCE_MS, LSTAT_TIMEOUT_MS, MAX_HASHED, HASH_IDLE_MS, skipDirName, searchPathAllowed, mdfindArgs, mdfindCandidates, walkForFile, sha256FileIdle, locatePickedFile,
   MAX_FILE_BYTES, WALK_BUDGET_MS, MDFIND_TIMEOUT_MS, WALK_MAX_DEPTH,
 };
