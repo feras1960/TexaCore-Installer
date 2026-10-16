@@ -1325,7 +1325,9 @@ class ServiceManager {
         // by Host + TCP peer + the absence of proxy headers, not by "not a .texacore.ai host".
         const site = String(req.headers['sec-fetch-site'] || '');
         const origin = String(req.headers['origin'] || '');
-        const sameOrigin = site === 'same-origin' || site === 'none' || (!site && !origin);
+        // 2.0.4 (security S5): "no Sec-Fetch-Site and no Origin" used to count as same-origin, so ANY loopback client without those headers (another program, another
+        // user's `curl`, an old tool) was handed the admin secret. A same-origin signal is now required (net-guard.hasSameOriginSignal).
+        const sameOrigin = netGuard.hasSameOriginSignal(req.headers, host);
         const adminBits = (isLocal && sameOrigin)
           ? `
   localApiBase: "",

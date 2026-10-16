@@ -207,7 +207,24 @@ function safeUploadName(name, { ext = null, maxLen = 120 } = {}) {
   return n;
 }
 
+/**
+ * (2.0.4, security S5) Does this request carry a same-origin signal? A browser loading its own page's script says Sec-Fetch-Site: same-origin (or none for a
+ * typed address); a browser too old for Fetch Metadata sends the page's URL as Referer. A bare client (curl, another program) sends neither and is NOT same-origin:
+ * "no header" proves nothing. `headers` = req.headers (lower-cased names), `host` = the Host the request was made to.
+ */
+function hasSameOriginSignal(headers, host) {
+  const site = String((headers && headers['sec-fetch-site']) || '');
+  const origin = String((headers && headers['origin']) || '');
+  if (site === 'same-origin' || site === 'none') return true;
+  if (site || origin) return false;
+  try {
+    const ref = headers && headers['referer'];
+    return !!ref && new URL(String(ref)).host.toLowerCase() === String(host || '').toLowerCase();
+  } catch { return false; }
+}
+
 module.exports = {
+  hasSameOriginSignal,
   isLoopbackHost,
   isLoopbackAddress,
   normalizeAddress,

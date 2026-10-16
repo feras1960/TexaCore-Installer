@@ -11,6 +11,7 @@ const path = require('path');
 const crypto = require('crypto');
 const zlib = require('zlib');
 const { execFileSync, execSync } = require('child_process');
+const sqlGuard = require('./sql-guard');   // 2.0.4: a dump is read for psql meta-commands / COPY PROGRAM … before psql sees it
 
 const TCDB_PATH = '/Users/macbook/Desktop/2026 مطور بعد الصيانة.tcdb';
 const ENCRYPTION_KEY = 'texacore-default-backup-key-2026';
@@ -62,14 +63,13 @@ async function main() {
   if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
   const tmpFile = path.join(tmpDir, 'restore_temp.sql');
   
-  // Wrap with FK constraint disable
-  const header = Buffer.from("SET session_replication_role = 'replica';\n");
-  const footer = Buffer.from("\nSET session_replication_role = 'origin';\n");
-  fs.writeFileSync(tmpFile, Buffer.concat([header, sql, footer]));
+  // Wrap with FK constraint disable (and psql's restricted mode); a file with commands TexaCore never writes is refused here too
+  sqlGuard.assertSafeDump(sql);
+  fs.writeFileSync(tmpFile, sqlGuard.prepareDump(sql, { before: "SET session_replication_role = 'replica';\n", after: "\nSET session_replication_role = 'origin';\n" }));
   
   try {
     execFileSync(path.join(PG_BIN, 'psql'), [
-      '-h', 'localhost', '-p', PG_PORT, '-U', 'postgres', '-d', 'postgres',
+      '-X', '-h', 'localhost', '-p', PG_PORT, '-U', 'postgres', '-d', 'postgres',
       '-f', tmpFile, '--set', 'ON_ERROR_STOP=off'
     ], { env, stdio: 'pipe', maxBuffer: 100 * 1024 * 1024 });
     console.log('  ✅ استعادة قاعدة البيانات تمت بنجاح\n');

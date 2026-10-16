@@ -11,6 +11,7 @@ const { execFile, spawn } = require('child_process');
 const zlib = require('zlib');
 const os = require('os');
 const companyFile = require('./company-file');
+const sqlGuard = require('./sql-guard');   // 2.0.4: nothing a company file carries may run a command on the user's computer
 
 // ─── Encryption Constants ────────────────────────────────────
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
@@ -726,6 +727,11 @@ class BackupManager {
       this.onProgress('decompress', 'فك ضغط البيانات...');
       const sql = await this._decompress(compressed);
 
+      // 2.0.4 (security S3): the default key of a company file is public, so the dump may have been written by anyone. Before ANYTHING is touched it is read the way psql
+      // reads it: a psql meta-command (\! shell, \copy … program, \i, \o, \gexec …), COPY … PROGRAM, ALTER SYSTEM, an unshipped extension or language, file /
+      // large-object functions, role changes … refuse the file (TCDB_UNSAFE_SQL). The refusal changes nothing: no truncate, no restore.
+      sqlGuard.assertSafeDump(sql);
+
       // Step 5: Execute SQL via psql.
       // Replace-not-merge: clear the existing public data BEFORE loading the
       // snapshot. The dump has no --clean, and COPY into a populated table fails
@@ -856,9 +862,8 @@ class BackupManager {
       const tmpFile = this._tmpSqlPath('restore');
       // Wrap SQL with FK constraint disable/enable for reliable restoration
       // Without this, COPY statements fail due to FK ordering issues
-      const header = Buffer.from("SET session_replication_role = 'replica';\n");
-      const footer = Buffer.from("\nSET session_replication_role = 'origin';\n");
-      fs.writeFileSync(tmpFile, Buffer.concat([header, sqlBuffer, footer]), { mode: 0o600, flag: 'wx' });
+      // 2.0.4: ... and with psql's own restricted mode (\restrict <random key> … \unrestrict): even a meta-command the scanner missed cannot run
+      fs.writeFileSync(tmpFile, sqlGuard.prepareDump(sqlBuffer, { before: "SET session_replication_role = 'replica';\n", after: "\nSET session_replication_role = 'origin';\n" }), { mode: 0o600, flag: 'wx' });
 
       const env = {
         ...process.env,
@@ -866,6 +871,7 @@ class BackupManager {
       };
 
       const args = [
+        '-X',   // 2.0.4: no ~/.psqlrc - a start-up file of the user's account is not part of the restore
         '-h', this.dbHost,
         '-p', String(this.dbPort),
         '-U', this.dbUser,
@@ -918,7 +924,7 @@ class BackupManager {
   _queryScalar(sql) {
     return new Promise((resolve, reject) => {
       const env = { ...process.env, PGPASSWORD: this.dbPassword };
-      const args = ['-h', this.dbHost, '-p', String(this.dbPort), '-U', this.dbUser, '-d', this.dbName, '-tAc', sql];
+      const args = ['-X', '-h', this.dbHost, '-p', String(this.dbPort), '-U', this.dbUser, '-d', this.dbName, '-tAc', sql];
       execFile(this.psql, args, { env, windowsHide: true }, (err, stdout, stderr) => {
         if (err) reject(new Error(stderr || err.message));
         else resolve(stdout);
@@ -983,6 +989,7 @@ class BackupManager {
       fs.writeFileSync(tmpFile, sqlText, { mode: 0o600, flag: 'wx' });
       const env = { ...process.env, PGPASSWORD: this.dbPassword };
       const args = [
+        '-X',
         '-h', this.dbHost, '-p', String(this.dbPort),
         '-U', this.dbUser, '-d', this.dbName,
         '-f', tmpFile, '--single-transaction',
@@ -1061,9 +1068,11 @@ class BackupManager {
   _runAuthSql(sqlText) {
     return new Promise((resolve, reject) => {
       const tmpFile = this._tmpSqlPath('auth');
-      fs.writeFileSync(tmpFile, sqlText, { mode: 0o600, flag: 'wx' });
+      // (the COPY blocks in it come verbatim from a dump that already passed sqlGuard; psql's restricted mode wraps it as well)
+      fs.writeFileSync(tmpFile, sqlGuard.prepareDump(sqlText), { mode: 0o600, flag: 'wx' });
       const env = { ...process.env, PGPASSWORD: this.dbPassword };
       const args = [
+        '-X',
         '-h', this.dbHost, '-p', String(this.dbPort),
         '-U', this.dbUser, '-d', this.dbName,
         '-f', tmpFile, '--single-transaction',

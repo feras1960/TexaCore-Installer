@@ -119,3 +119,28 @@ test('safeUploadName refuses anything that is not a plain "<name>.tcdb"', () => 
     assert.equal(g.safeUploadName(n, { ext: '.tcdb' }), null, JSON.stringify(n));
   }
 });
+
+test('2.0.4 (S5): /config.js hands the admin secret only to a request that carries a same-origin signal - a bare loopback client (curl, another program) gets none', () => {
+  const ng = require('../src/net-guard');
+  const host = 'localhost:8080';
+  // browsers: a script of the page itself, or a typed address
+  assert.equal(ng.hasSameOriginSignal({ 'sec-fetch-site': 'same-origin' }, host), true);
+  assert.equal(ng.hasSameOriginSignal({ 'sec-fetch-site': 'none' }, host), true);
+  // another website's <script src="http://localhost:8080/config.js">, or a cross-origin fetch
+  assert.equal(ng.hasSameOriginSignal({ 'sec-fetch-site': 'cross-site' }, host), false);
+  assert.equal(ng.hasSameOriginSignal({ 'sec-fetch-site': 'same-site' }, host), false);
+  assert.equal(ng.hasSameOriginSignal({ origin: 'https://evil.example' }, host), false);
+  // a bare client: no header at all used to count as same-origin
+  assert.equal(ng.hasSameOriginSignal({}, host), false);
+  assert.equal(ng.hasSameOriginSignal({ 'user-agent': 'curl/8' }, host), false);
+  // a browser too old for Fetch Metadata: the page's own URL as Referer
+  assert.equal(ng.hasSameOriginSignal({ referer: 'http://localhost:8080/login' }, host), true);
+  assert.equal(ng.hasSameOriginSignal({ referer: 'http://localhost:9999/login' }, host), false);
+  assert.equal(ng.hasSameOriginSignal({ referer: 'https://evil.example/localhost:8080' }, host), false);
+  assert.equal(ng.hasSameOriginSignal({ referer: 'not a url' }, host), false);
+  assert.equal(ng.hasSameOriginSignal({ referer: 'http://localhost:8080/', origin: 'https://evil.example' }, host), false);
+  assert.equal(ng.hasSameOriginSignal(null, host), false);
+  const sm = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'service-manager.js'), 'utf8');
+  assert.match(sm, /const sameOrigin = netGuard\.hasSameOriginSignal\(req\.headers, host\);/);
+  assert.doesNotMatch(sm, /\(!site && !origin\)/);
+});
