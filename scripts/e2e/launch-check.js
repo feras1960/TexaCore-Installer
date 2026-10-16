@@ -66,12 +66,13 @@ async function main() {
   // 2.0.3: the folders POST /api/locate-picked-file may search in this run (it never scans the real profile): the checks below put their files here
   const LOCATE_ROOTS = [path.join(WORK, 'locate-a'), path.join(WORK, 'locate-b')];
   for (const d of LOCATE_ROOTS) fs.mkdirSync(d, { recursive: true });
+  fs.mkdirSync(path.join(WORK, 'home', 'Documents'), { recursive: true });   // 2.0.4: HOME of the app in this run (the audit's "~/Documents/TexaCore" lands here, never in the real home)
   for (const p of Object.values(PORTS)) if (!(await portFree(p))) { console.error(`port ${p} is in use — stop whatever holds it first`); process.exit(2); }
 
   console.log(`launch-check: license=${LICENSE} workdir=${WORK}`);
   const appBinary = APP ? path.join(path.resolve(APP), 'Contents', 'MacOS', path.basename(path.resolve(APP), '.app')) : '';
   if (APP && !fs.existsSync(appBinary)) { console.error(`no executable at ${appBinary}`); process.exit(2); }
-  const { child, ready } = startApp({ userData, license: LICENSE, logFile, appBinary, extraEnv: { TEXACORE_UI_SMOKE: '1', TEXACORE_E2E_LOCATE_ROOTS: LOCATE_ROOTS.join(path.delimiter), ...(TCDB_IN_COMPANY_FOLDER ? { TEXACORE_TCDB_DIR: path.join(WORK, 'rashid-folder') } : {}) } });
+  const { child, ready } = startApp({ userData, license: LICENSE, logFile, appBinary, extraEnv: { TEXACORE_UI_SMOKE: '1', HOME: path.join(WORK, 'home'), TEXACORE_E2E_LOCATE_ROOTS: LOCATE_ROOTS.join(path.delimiter), ...(TCDB_IN_COMPANY_FOLDER ? { TEXACORE_TCDB_DIR: path.join(WORK, 'rashid-folder') } : {}) } });
   let secrets = null;
   try {
     await R.check('1.1 first run: initdb → baseline → services up', async () => {
@@ -1657,6 +1658,84 @@ async function main() {
         if (has(cross) || has(origin) || has(refBad)) throw new Error(`cross-site=${has(cross)} origin=${has(origin)} referer=${has(refBad)}`);
         for (const r of [bare, same, cross]) if (!r.text.includes(secrets.anonKey)) throw new Error('the public anon key is missing from config.js');
         return 'bare -> no secret; same-origin / none / same-origin Referer -> secret; cross-site / foreign Origin / foreign Referer -> none; the anon key is always there';
+      });
+
+      // ═══ 2.0.4 launcher audit: the NEW COMPANY wizard in a real browser, with HOME pointing at a scratch folder (so "~/Documents/TexaCore" - the default - is the scratch one) ═══
+      const HOME_DIR = path.join(WORK, 'home');
+      const runAudit = (tag, extra) => {
+        const out = require('child_process').spawnSync('node', [path.join(__dirname, 'launcher-audit.cjs'), '--erp', ERP, '--ui', `http://localhost:${PORTS.ui}`, '--shots', path.join(WORK, 'shots-audit'), '--tag', tag, ...extra], { encoding: 'utf8', timeout: 300000 });
+        const line = (out.stdout || '').split('\n').find((l) => l.startsWith('AUDIT '));
+        if (!line) throw new Error(`audit step failed (exit ${out.status}): ${(out.stderr || out.stdout || '').slice(0, 500)}`);
+        return JSON.parse(line.slice('AUDIT '.length));
+      };
+      const hasAdmin = async (email) => (await pg("SELECT (SELECT count(*) FROM auth.users WHERE email = $1)::int u, (SELECT count(*) FROM public.tenants WHERE owner_email = $1)::int t, (SELECT count(*) FROM public.user_profiles WHERE email = $1 AND is_tenant_admin)::int p", [email])).rows[0];
+
+      await R.check('8.1 (2.0.4 audit) new company through the wizard UI: the default folder shown is ~/Documents/TexaCore, the five steps work (country Ukraine -> UAH), the admin is created and logged in, and the company file is where the page said (here the scratch HOME)', async () => {
+        fs.mkdirSync(path.join(HOME_DIR, 'Documents'), { recursive: true });
+        await simReset();
+        const a = runAudit('8-1', ['--name', 'Audit One', '--file-base', 'AuditOne', '--email', 'audit1@e2e.test']);
+        if (a.step1.storagePath !== '~/Documents/TexaCore') throw new Error(`default folder shown: ${a.step1.storagePath}`);
+        if (a.texts.length !== 5 || a.texts.some((t) => !t)) throw new Error(`step headings ${JSON.stringify(a.texts)}`);
+        if (!a.createAnswer || !a.createAnswer.success || a.createAnswer.tcdbPlacement !== 'chosen') throw new Error(`create answer ${JSON.stringify(a.createCalls)} alerts ${a.alerts.join('|')} toast ${JSON.stringify(a.toastText)}`);
+        const want = path.join(HOME_DIR, 'Documents', 'TexaCore', 'AuditOne.tcdb');
+        if (path.resolve(a.createAnswer.tcdbPath) !== path.resolve(want)) throw new Error(`company file ${a.createAnswer.tcdbPath}, expected ${want}`);
+        await waitFor(async () => fs.existsSync(want) && fs.readFileSync(want).subarray(0, 4).toString() === 'TCDB', 'the first company file to be written (TCDB magic)', 120000);
+        if (!a.loggedIn || !/^https?:\/\/[^/]+\/?$/.test(a.afterUrl) || !a.activeCompany || a.activeCompany.name !== 'Audit One' || !a.activeCompany.hasId) throw new Error(`after the wizard: ${JSON.stringify({ url: a.afterUrl, loggedIn: a.loggedIn, company: a.activeCompany })}`);
+        const adm = await hasAdmin('audit1@e2e.test');
+        if (adm.u !== 1 || adm.t !== 1 || adm.p !== 1) throw new Error(`admin rows ${JSON.stringify(adm)}`);
+        const cur = await pg("SELECT c.base_currency_code AS b FROM public.companies c WHERE c.name = 'Audit One' LIMIT 1").catch(() => ({ rows: [] }));
+        return `default folder «${a.step1.storagePath}»; headings ${a.texts.length}; created + logged in (${a.afterUrl}); file ${path.relative(WORK, want)} (TCDB magic); admin rows ${JSON.stringify(adm)}${cur.rows[0] ? `; base currency ${cur.rows[0].b}` : ''}`;
+      });
+
+      await R.check('8.2 (2.0.4 audit) new company when macOS has NOT allowed the Documents folder: nothing is created, the wizard shows the permission step with the «keep it in the program\'s folder» choice; choosing it creates the company with its file in the program\'s own folder', async () => {
+        const docs = path.join(HOME_DIR, 'Documents');
+        await simReset(); await sim({ kinds: { [docs]: 'documents' }, sim: { documents: { state: 'denied' } } });
+        const a = runAudit('8-2', ['--name', 'Audit Two', '--file-base', 'AuditTwo', '--email', 'audit2@e2e.test', '--perm-script', JSON.stringify([{ click: 'perm-program' }])]);
+        await simReset();
+        if (!a.permission.seen || a.permission.mode !== 'denied' || !a.permission.hasProgramButton) throw new Error(`permission step ${JSON.stringify(a.permission)}`);
+        if (!/Documents|المستندات|Документи|Документы/.test(a.permission.title)) throw new Error(`step title ${a.permission.title}`);
+        if (a.createCalls.length !== 2 || a.createCalls[0].code !== 'FOLDER_PERMISSION' || a.createCalls[0].area !== 'documents' || a.createCalls[1].success !== true || a.createCalls[1].fallback !== 'program' || a.createCalls[1].tcdbPlacement !== 'program-folder') throw new Error(`create calls ${JSON.stringify(a.createCalls)}`);
+        const progDir = path.join(userData, 'texacore-data', 'company-files');
+        if (path.resolve(path.dirname(a.createCalls[1].tcdbPath)) !== path.resolve(progDir)) throw new Error(`file at ${a.createCalls[1].tcdbPath}`);
+        const adm = await hasAdmin('audit2@e2e.test');
+        if (adm.u !== 1 || adm.t !== 1) throw new Error(`admin rows ${JSON.stringify(adm)} (the refused first attempt must have created nothing, the second exactly one)`);
+        if (fs.existsSync(path.join(docs, 'TexaCore', 'AuditTwo.tcdb'))) throw new Error('a file was written into the not-allowed Documents folder');
+        if (!a.loggedIn || !a.activeCompany || a.activeCompany.name !== 'Audit Two') throw new Error(`after: ${JSON.stringify({ loggedIn: a.loggedIn, company: a.activeCompany, url: a.afterUrl })}`);
+        return `step «${a.permission.title}» with the program-folder button; 1st create FOLDER_PERMISSION (nothing created), 2nd with fallback=program -> ${path.relative(WORK, a.createCalls[1].tcdbPath)}; logged in`;
+      });
+
+      await R.check('8.3 (2.0.4 audit) new company while macOS is still ASKING about Documents: the page waits («pending» step), continues by itself when the user allows, and the file lands in Documents/TexaCore', async () => {
+        const docs = path.join(HOME_DIR, 'Documents');
+        await simReset(); await sim({ kinds: { [docs]: 'documents' }, sim: { documents: { state: 'allowed', delayMs: 9000 } } });
+        const a = runAudit('8-3', ['--name', 'Audit Three', '--file-base', 'AuditThree', '--email', 'audit3@e2e.test']);
+        await simReset();
+        if (!a.permission.seen || a.permission.mode !== 'pending') throw new Error(`permission step ${JSON.stringify(a.permission)}`);
+        if (a.createCalls.length !== 2 || a.createCalls[0].code !== 'FOLDER_PERMISSION' || a.createCalls[0].state !== 'pending' || a.createCalls[1].success !== true || a.createCalls[1].tcdbPlacement !== 'chosen') throw new Error(`create calls ${JSON.stringify(a.createCalls)}`);
+        const want = path.join(docs, 'TexaCore', 'AuditThree.tcdb');
+        if (path.resolve(a.createCalls[1].tcdbPath) !== path.resolve(want)) throw new Error(`file at ${a.createCalls[1].tcdbPath}`);
+        if (!a.loggedIn || !a.activeCompany || a.activeCompany.name !== 'Audit Three') throw new Error(`after: ${JSON.stringify({ loggedIn: a.loggedIn, company: a.activeCompany })}`);
+        return `pending step «${a.permission.body.slice(0, 70)}…» -> allowed by itself -> created in ${path.relative(WORK, want)}; logged in`;
+      });
+
+      await R.check('8.4 (2.0.4 audit) a company file in a READ-ONLY folder / read-only file opens: the picked file is never written, the company file gets a free name in the TexaCore folder (here the scratch HOME), the rows are intact', async () => {
+        if (typeof process.getuid === 'function' && process.getuid() === 0) return 'skipped: running as root ignores read-only';
+        await simReset();
+        const dir = path.join(LA, 'readonly'); fs.mkdirSync(dir, { recursive: true });
+        const f = await exportTo(path.join(dir, 'Read Only.tcdb'));
+        const shaF = fileSha(f); const c0 = await counts4();
+        fs.chmodSync(f, 0o444); fs.chmodSync(dir, 0o555);
+        try {
+          const loc = (await locateApi(bodyOf(f))).json;
+          if (!loc.success) throw new Error(`locate -> ${JSON.stringify(loc).slice(0, 160)}`);
+          const r = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref });
+          if (r.status !== 200 || !r.json.success || r.json.inPlace !== false) throw new Error(`open -> ${r.status} ${r.text.slice(0, 240)}`);
+          const dflt = path.join(HOME_DIR, 'Documents', 'TexaCore');
+          if (path.resolve(path.dirname(r.json.tcdbPath)) !== path.resolve(dflt)) throw new Error(`the company file went to ${r.json.tcdbPath}, expected a free name in ${dflt}`);
+          if (fileSha(f) !== shaF) throw new Error('the read-only file changed');
+          if (walk(dir).join('|') !== 'Read Only.tcdb') throw new Error(`files beside: ${walk(dir).join(', ')}`);
+          if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the open changed the rows');
+          return `inPlace=false; company file ${path.relative(WORK, r.json.tcdbPath)}; the read-only file byte-identical, nothing beside it`;
+        } finally { fs.chmodSync(dir, 0o755); fs.chmodSync(f, 0o644); }
       });
     }
   } catch (e) {
