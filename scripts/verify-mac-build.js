@@ -12,6 +12,7 @@
 //   M3  Info.plist: version == package.json, arm64 Mach-O executable, bundle id
 //   M4  the dmg is mounted read-only: the same app is inside, its signature verifies, an /Applications link is present; the executable is
 //       byte-identical to the one in the zip
+//   M7  the signing identity (ad-hoc or a certificate; set TEXACORE_REQUIRE_STABLE_SIGNATURE=1 to fail on ad-hoc), the macOS folder-permission purpose strings in Info.plist + their ar/uk/ru/en localisations
 //   M6  the Cloud Access connector (cloudflared) is in the zip's app AND in the dmg's: the pinned file (sha256), still carrying Cloudflare's Developer ID signature, and it RUNS (`--version` = the pinned release).
 //       2.0.0 shipped without it: the public link answered Cloudflare error 1033 and the launcher still said «connected»
 //   M5  the app code inside the zip is byte-identical to the repo's src/ after obfuscation is accounted for (file list equals; no source maps,
@@ -120,6 +121,31 @@ const run = (cmd, args, opts = {}) => execFileSync(cmd, args, { encoding: 'utf8'
       if (bad.length) throw new Error(bad.join('; '));
       const v = run(cf, ['--version']).trim();
       return `${v}; sha256 ${pinMod.mac.sha256.slice(0, 16)}… = the pin; signed by ${pinMod.mac.authority}`;
+    });
+
+    await R.check('M7. the signing identity: which kind it is, whether the permission requirement survives an update, and the privacy purpose strings are in Info.plist (+ ar/uk/ru/en)', async () => {
+      const macSign = require('./lib/mac-sign');
+      const spawnSync = require('child_process').spawnSync;
+      const info = macSign.parseSignatureInfo(spawnSync('codesign', ['-dvv', zapp], { encoding: 'utf8' }).stderr);
+      const req = spawnSync('codesign', ['-d', '-r-', zapp], { encoding: 'utf8' });
+      const stable = macSign.requirementIsStable(`${req.stdout}\n${req.stderr}`);
+      if (process.env.TEXACORE_REQUIRE_STABLE_SIGNATURE === '1' && (!stable || info.adhoc)) throw new Error(`a stable signing identity was required (TEXACORE_REQUIRE_STABLE_SIGNATURE=1) but the app is ${info.adhoc ? 'ad-hoc' : 'signed with a requirement that changes per build'}`);
+      const plist = path.join(zapp, 'Contents', 'Info.plist');
+      const missing = [];
+      for (const k of ['NSDesktopFolderUsageDescription', 'NSDocumentsFolderUsageDescription', 'NSDownloadsFolderUsageDescription', 'NSRemovableVolumesUsageDescription', 'NSNetworkVolumesUsageDescription', 'NSFileProviderDomainUsageDescription']) {
+        let val = '';
+        try { val = run('/usr/libexec/PlistBuddy', ['-c', `Print :${k}`, plist]).trim(); } catch { val = ''; }
+        if (val.length < 20 || !/TexaCore/.test(val)) missing.push(k);
+      }
+      if (missing.length) throw new Error(`Info.plist lacks a purpose string for: ${missing.join(', ')}`);
+      const loc = [];
+      for (const l of ['en', 'ar', 'uk', 'ru']) {
+        const f = path.join(zapp, 'Contents', 'Resources', `${l}.lproj`, 'InfoPlist.strings');
+        if (!fs.existsSync(f)) throw new Error(`${l}.lproj/InfoPlist.strings is not in the app`);
+        try { run('plutil', ['-lint', f]); } catch (e) { throw new Error(`${l}.lproj/InfoPlist.strings is not valid: ${String(e.stdout || e.message).trim()}`); }
+        loc.push(l);
+      }
+      return `${info.adhoc ? 'AD-HOC (a code hash: macOS asks for folder access again after every update)' : `identity ${info.authority}`}; requirement ${stable ? 'stable across builds' : 'changes per build'}; 6 purpose strings; localised: ${loc.join(', ')}`;
     });
   } finally {
     cleanup();

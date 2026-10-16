@@ -11,8 +11,10 @@
 //   4. Verify sha512 (base64) — reject and delete on mismatch, then download again; a bad file is never staged.
 //   5. Stage the new "TexaCore ERP.app" (ditto -xk for zip / hdiutil for dmg).
 //   6. On quit, spawn a detached shell script that waits for our PID to exit,
-//      replaces the current bundle, ad-hoc re-signs it, clears quarantine,
-//      and relaunches the app.
+//      replaces the current bundle, keeps its signature when it is a valid non-ad-hoc one (2.0.4) or signs it ad-hoc
+//      (every older build), clears quarantine, and relaunches the app.
+//      NOTE: the script is written by the app that is RUNNING at quit time, so an update from a version before 2.0.4 is always finished by the OLD
+//      script (which signs ad-hoc whatever the new bundle carries); a stable signature takes effect from a fresh 2.0.4 install and for updates after it.
 // Windows uses electron-updater (src/win-updater.js adds the same resumable download in front of it).
 
 const path = require('path');
@@ -402,10 +404,10 @@ class MacUpdater {
 
   /**
    * Build the install script text. Exposed for testing.
-   * The script: waits for `pid` to exit → replaces the bundle → ad-hoc signs →
+   * The script: waits for `pid` to exit → replaces the bundle → keeps a valid non-ad-hoc signature (2.0.4) or signs ad-hoc →
    * clears quarantine → relaunches → removes the staging dir.
    */
-  buildInstallScript(appPath, stagedApp) {
+  buildInstallScript(appPath, stagedApp, { codesign = '/usr/bin/codesign', open = '/usr/bin/open' } = {}) {
     return `#!/bin/bash
 # TexaCore mac self-update installer (generated)
 PID="$1"
@@ -422,10 +424,19 @@ fi
 echo "replacing ${shq(appPath)}"
 rm -rf ${shq(appPath)}
 /usr/bin/ditto ${shq(stagedApp)} ${shq(appPath)}
-/usr/bin/codesign --force --deep --sign - ${shq(appPath)}
+# 2.0.4: a build signed with a real certificate keeps its signature - macOS ties the privacy permissions the user granted (Desktop / Documents /
+# Downloads) and the Keychain access to it, and re-signing ad-hoc would throw them away at every update. Only a bundle whose signature is missing,
+# broken or ad-hoc (every build before 2.0.4) is signed ad-hoc here, the way it always was, so it still opens on Apple Silicon.
+SIGINFO="$(${shq(codesign)} -dv ${shq(appPath)} 2>&1)"
+if ${shq(codesign)} --verify --deep --strict ${shq(appPath)} >/dev/null 2>&1 && ! printf '%s' "$SIGINFO" | grep -q 'Signature=adhoc' && ! printf '%s' "$SIGINFO" | grep -qi 'not signed'; then
+  echo "signature kept (valid, not ad-hoc): $(printf '%s' "$SIGINFO" | grep '^Authority=' | head -1)"
+else
+  echo "no stable signature (missing, broken or ad-hoc) — signing ad-hoc"
+  ${shq(codesign)} --force --deep --sign - ${shq(appPath)}
+fi
 /usr/bin/xattr -cr ${shq(appPath)} 2>/dev/null
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] installed — relaunching"
-/usr/bin/open ${shq(appPath)}
+${shq(open)} ${shq(appPath)}
 sleep 3
 rm -rf ${shq(this.updatesDir)}
 echo "[$(date '+%Y-%m-%d %H:%M:%S')] staging cleaned — done"

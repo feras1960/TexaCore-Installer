@@ -1,0 +1,6 @@
+"NSDesktopFolderUsageDescription" = "TexaCore needs access to your Desktop folder to find the company file you choose and to keep your company file beside it.";
+"NSDocumentsFolderUsageDescription" = "TexaCore needs access to your Documents folder to save your company file there (Documents/TexaCore) and to find a file you choose.";
+"NSDownloadsFolderUsageDescription" = "TexaCore needs access to your Downloads folder to find the company file you choose and to keep your company file beside it.";
+"NSRemovableVolumesUsageDescription" = "TexaCore needs access to removable drives to open a company file you choose on them and to keep your company file there.";
+"NSNetworkVolumesUsageDescription" = "TexaCore needs access to network drives to open a company file you choose on them and to keep your company file there.";
+"NSFileProviderDomainUsageDescription" = "TexaCore needs access to your cloud storage (iCloud Drive, OneDrive, ...) to find and open the company file you choose.";

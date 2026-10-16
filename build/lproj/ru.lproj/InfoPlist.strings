@@ -1,0 +1,6 @@
+"NSDesktopFolderUsageDescription" = "TexaCore нужен доступ к папке «Рабочий стол», чтобы найти выбранный вами файл компании и хранить файл вашей компании рядом с ним.";
+"NSDocumentsFolderUsageDescription" = "TexaCore нужен доступ к папке «Документы», чтобы хранить там файл вашей компании (Документы/TexaCore) и находить выбранный вами файл.";
+"NSDownloadsFolderUsageDescription" = "TexaCore нужен доступ к папке «Загрузки», чтобы найти выбранный вами файл компании и хранить файл вашей компании рядом с ним.";
+"NSRemovableVolumesUsageDescription" = "TexaCore нужен доступ к внешним дискам, чтобы открыть на них выбранный вами файл компании и хранить там файл вашей компании.";
+"NSNetworkVolumesUsageDescription" = "TexaCore нужен доступ к сетевым дискам, чтобы открыть на них выбранный вами файл компании и хранить там файл вашей компании.";
+"NSFileProviderDomainUsageDescription" = "TexaCore нужен доступ к вашему облачному хранилищу (iCloud Drive, OneDrive и др.), чтобы найти и открыть выбранный вами файл компании.";

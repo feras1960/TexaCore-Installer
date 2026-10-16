@@ -84,19 +84,26 @@ exports.default = async function afterPack(context) {
     }
   }
 
-  // macOS: ad-hoc sign the whole bundle so the *downloaded* app opens with
-  // "unidentified developer" (right-click → Open) instead of "damaged" on Apple
-  // Silicon (no Apple Developer cert). Runs here — before the dmg is built — so
-  // the dmg ships the signed app. No-op on Windows/Linux.
+  // macOS: sign the whole bundle. Without a certificate this is an AD-HOC signature (so the *downloaded* app opens with "unidentified developer" - right-click
+  // → Open - instead of "damaged" on Apple Silicon). 2.0.4: with TEXACORE_MAC_SIGN_IDENTITY (see scripts/lib/mac-sign.js) the bundle is signed with that
+  // certificate instead - a requirement that does not change from version to version, so macOS keeps the privacy permissions the user granted
+  // (Desktop / Documents / Downloads) and the Keychain keeps its access across updates. Runs here - before the dmg is built - so the dmg ships the signed app.
+  // electron-builder itself is told not to sign (build.mac.identity = null), so there is exactly one signature and it is this one. No-op on Windows/Linux.
   if (context.electronPlatformName === 'darwin') {
     const appPath = path.join(context.appOutDir, context.packager.appInfo.productFilename + '.app');
     const { execFileSync } = require('child_process');
-    console.log(`  • afterPack: ad-hoc signing ${appPath}`);
+    const macSign = require('./lib/mac-sign');
+    const signing = macSign.resolveSigning(process.env);
+    const entitlements = signing.hardened && fs.existsSync(macSign.defaultEntitlements()) ? macSign.defaultEntitlements() : null;
+    console.log(`  • afterPack: ${signing.mode === 'adhoc' ? 'ad-hoc' : `signing with the identity "${signing.identity}"${signing.hardened ? ' (hardened runtime)' : ''}`} - ${appPath}`);
     // macOS tags files it sees arriving with com.apple.provenance; codesign refuses a bundle with such "detritus" (xattr) — strip first
     try { execFileSync('/usr/bin/xattr', ['-cr', appPath], { stdio: 'ignore' }); } catch { /* nothing to strip */ }
     const sign = (bundle) => {
-      execFileSync('codesign', ['--force', '--deep', '--sign', '-', bundle], { stdio: 'inherit' });
+      execFileSync('codesign', macSign.codesignArgs(signing, bundle, { entitlements }), { stdio: 'inherit' });
       execFileSync('codesign', ['--verify', '--deep', '--strict', bundle], { stdio: 'inherit' });
+      // the result must be what was asked for: an ad-hoc bundle where an identity was requested would silently lose the permissions at the next update
+      const info = macSign.parseSignatureInfo(require('child_process').spawnSync('codesign', ['-dvv', bundle], { encoding: 'utf8' }).stderr);
+      if (!macSign.signatureMatches(signing, info)) throw new Error(`the bundle is not signed with ${signing.mode === 'adhoc' ? 'an ad-hoc signature' : `"${signing.identity}"`} (found: ${info.signed ? (info.adhoc ? 'ad-hoc' : info.authority) : 'unsigned'})`);
     };
     // A build whose signature is not valid must NOT be produced: on Apple Silicon the app would not open at all ("is damaged").
     try {
@@ -117,12 +124,12 @@ exports.default = async function afterPack(context) {
         execFileSync('/usr/bin/ditto', ['--noextattr', '--norsrc', copy, appPath], { stdio: 'inherit' });
         execFileSync('codesign', ['--verify', '--deep', '--strict', appPath], { stdio: 'inherit' });   // the bundle that ships must verify where it is
       } catch (e) {
-        throw new Error(`afterPack: ad-hoc signing failed — refusing to produce an app with an invalid signature: ${e.message}`);
+        throw new Error(`afterPack: signing failed — refusing to produce an app with an invalid signature: ${e.message}`);
       } finally {
         fs.rmSync(stage, { recursive: true, force: true });
       }
     }
-    console.log('  • afterPack: ad-hoc signature valid ✅');
+    console.log(`  • afterPack: ${signing.mode === 'adhoc' ? 'ad-hoc' : 'identity'} signature valid ✅`);
 
     // The Cloud Access connector must be IN the signed app, be the pinned file, and RUN from there (2.0.0 shipped without it: Cloudflare error 1033).
     // Signing must not have altered it (it keeps Cloudflare's own Developer ID signature; Resources/bin files are sealed, not re-signed).

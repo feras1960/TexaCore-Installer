@@ -1,7 +1,7 @@
 {
   "name": "texacore-installer",
-  "version": "2.0.3",
-  "buildDate": "2026-10-15",
+  "version": "2.0.4",
+  "buildDate": "2026-10-17",
   "description": "TexaCore ERP — Local Desktop Server (hybrid)",
   "main": "src/main.js",
   "author": "TexaCore <info@texacore.com>",
@@ -112,12 +112,16 @@
     ],
     "mac": {
       "category": "public.app-category.business",
+      "identity": null,
       "icon": "build/icon.icns",
       "extendInfo": {
         "CFBundleIconName": "TexaCore",
-        "NSDesktopFolderUsageDescription": "TexaCore looks for the company file you chose in your Desktop folder, so your company file can be kept beside it.",
-        "NSDocumentsFolderUsageDescription": "TexaCore looks for the company file you chose in your Documents folder, so your company file can be kept beside it.",
-        "NSDownloadsFolderUsageDescription": "TexaCore looks for the company file you chose in your Downloads folder, so your company file can be kept beside it."
+        "NSDesktopFolderUsageDescription": "TexaCore needs access to your Desktop folder to find the company file you choose and to keep your company file beside it.",
+        "NSDocumentsFolderUsageDescription": "TexaCore needs access to your Documents folder to save your company file there (Documents/TexaCore) and to find a file you choose.",
+        "NSDownloadsFolderUsageDescription": "TexaCore needs access to your Downloads folder to find the company file you choose and to keep your company file beside it.",
+        "NSRemovableVolumesUsageDescription": "TexaCore needs access to removable drives to open a company file you choose on them and to keep your company file there.",
+        "NSNetworkVolumesUsageDescription": "TexaCore needs access to network drives to open a company file you choose on them and to keep your company file there.",
+        "NSFileProviderDomainUsageDescription": "TexaCore needs access to your cloud storage (iCloud Drive, OneDrive, ...) to find and open the company file you choose."
       },
       "extraResources": [
         {
@@ -130,6 +134,34 @@
         {
           "from": "build/Assets.car",
           "to": "Assets.car"
+        },
+        {
+          "from": "build/lproj/en.lproj",
+          "to": "en.lproj",
+          "filter": [
+            "InfoPlist.strings"
+          ]
+        },
+        {
+          "from": "build/lproj/ar.lproj",
+          "to": "ar.lproj",
+          "filter": [
+            "InfoPlist.strings"
+          ]
+        },
+        {
+          "from": "build/lproj/uk.lproj",
+          "to": "uk.lproj",
+          "filter": [
+            "InfoPlist.strings"
+          ]
+        },
+        {
+          "from": "build/lproj/ru.lproj",
+          "to": "ru.lproj",
+          "filter": [
+            "InfoPlist.strings"
+          ]
         }
       ],
       "target": [

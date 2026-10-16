@@ -1,0 +1,6 @@
+"NSDesktopFolderUsageDescription" = "يحتاج TexaCore إلى الوصول إلى مجلد سطح المكتب ليجد ملف الشركة الذي تختاره ويحفظ ملف شركتك بجانبه.";
+"NSDocumentsFolderUsageDescription" = "يحتاج TexaCore إلى الوصول إلى مجلد المستندات ليحفظ ملف شركتك فيه (المستندات/TexaCore) وليجد الملف الذي تختاره.";
+"NSDownloadsFolderUsageDescription" = "يحتاج TexaCore إلى الوصول إلى مجلد التنزيلات ليجد ملف الشركة الذي تختاره ويحفظ ملف شركتك بجانبه.";
+"NSRemovableVolumesUsageDescription" = "يحتاج TexaCore إلى الوصول إلى الأقراص الخارجية ليفتح ملف الشركة الذي تختاره عليها ويحفظ ملف شركتك فيها.";
+"NSNetworkVolumesUsageDescription" = "يحتاج TexaCore إلى الوصول إلى أقراص الشبكة ليفتح ملف الشركة الذي تختاره عليها ويحفظ ملف شركتك فيها.";
+"NSFileProviderDomainUsageDescription" = "يحتاج TexaCore إلى الوصول إلى تخزينك السحابي (iCloud Drive وOneDrive وغيرهما) ليجد ملف الشركة الذي تختاره ويفتحه.";
