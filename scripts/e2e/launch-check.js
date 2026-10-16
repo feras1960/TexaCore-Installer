@@ -1172,12 +1172,16 @@ async function main() {
         const c0 = await counts4(); const st0 = fs.statSync(target); const sha0 = fileSha(target);
         const copiesBefore = walk(copyDir).filter((f) => /^Chooser Mine\.opened-\d{4}-\d{2}-\d{2}\.tcdb$/.test(f));
         const res = openInBrowser(target, '7-10a');
-        const rq = res.locateRequest;
-        if (!rq || JSON.stringify(rq.keys) !== JSON.stringify(['lastModified', 'name', 'sha256', 'size']) || rq.name !== 'Chooser Mine.tcdb' || rq.size !== st0.size || !rq.shaOk || !rq.lastModifiedIsNumber) throw new Error(`what the page sent: ${JSON.stringify(rq)}`);
+        const rq = res.start; const cq = res.confirm;
+        // 2.0.4: the page starts the search with name + size + modification time ONLY (no content hash yet) and proves possession with the digest at the end
+        if (!rq || JSON.stringify(rq.keys) !== JSON.stringify(['lastModified', 'name', 'size']) || rq.hasSha || rq.name !== 'Chooser Mine.tcdb' || rq.size !== st0.size || !rq.lastModifiedIsNumber) throw new Error(`what the page started with: ${JSON.stringify(rq)}`);
+        if (!cq || JSON.stringify(cq.keys) !== JSON.stringify(['job', 'sha256']) || !cq.shaOk) throw new Error(`what the page confirmed with: ${JSON.stringify(cq)}`);
+        if (res.order.indexOf('locate-start') !== 0 || res.order.indexOf('locate-confirm') < 1) throw new Error(`request order ${res.order.join(' > ')}`);
+        if (!res.phases.includes('ready')) throw new Error(`phases seen: ${res.phases.join(', ')}`);
         if (res.alerts.length) throw new Error(`the page alerted: ${res.alerts.join(' | ')}`);
         if (!res.located || res.located.success !== true || res.located.type !== 'tcdb' || !res.located.hasRef || path.resolve(res.located.filePath) !== path.resolve(target)) throw new Error(`located → ${JSON.stringify(res.located)}`);
         const routes = res.routes.map((r) => `${r.route}:${r.status}`);
-        if (!routes.includes('open-picked-tcdb:200') || routes.some((r) => r.startsWith('restore-tcdb') || r.startsWith('pick-company-file'))) throw new Error(`the page used ${routes.join(', ')}`);
+        if (!routes.includes('open-picked-tcdb:200') || routes.some((r) => r.startsWith('restore-tcdb') || r.startsWith('pick-company-file') || r.startsWith('locate-picked-file'))) throw new Error(`the page used ${routes.join(', ')}`);
         if (!res.note || res.note.testId !== 'live-company-file-note' || !res.note.text.includes(target) || !NOTE_INPLACE.test(res.note.text)) throw new Error(`login-view note → ${JSON.stringify(res.note)}`);
         if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the opened file changed the rows');
         await waitFor(async () => { const s_ = await status(); return s_.backupPath && path.resolve(s_.backupPath) === path.resolve(target); }, 'the chosen file as the live target');
@@ -1193,7 +1197,7 @@ async function main() {
         const snapDir = path.join(copyDir, 'snapshots'); const snaps = fs.existsSync(snapDir) ? fs.readdirSync(snapDir).length : 0;
         const copiesAfter = walk(copyDir).filter((f) => /^Chooser Mine\.opened-\d{4}-\d{2}-\d{2}\.tcdb$/.test(f));
         if (copiesAfter.length !== copiesBefore.length + 1 || sha(fs.readFileSync(path.join(copyDir, copiesAfter.filter((f) => !copiesBefore.includes(f))[0]))) !== sha0) throw new Error('the safety copy of the opened file is missing or differs');
-        return `page sent {name,size,lastModified,sha256} only; located ${path.basename(res.located.filePath)} in locate-a; open-picked-tcdb 200; the SAME file rewritten (mtime +${Math.round(st1.mtimeMs - st0.mtimeMs)} ms); folder = [${left.join(', ')}] (no restore/truncate/auth .sql, no snapshots folder; no temp SQL left in the temp folder; ${snaps} snapshot(s) in the program's backups folder); note "${res.note.text.slice(0, 60)}…"; status line(s) seen: ${JSON.stringify(res.statusTexts)}`;
+        return `page started with {name,size,lastModified} (no digest), confirmed with {job,sha256}; located ${path.basename(res.located.filePath)} in locate-a; open-picked-tcdb 200; the SAME file rewritten (mtime +${Math.round(st1.mtimeMs - st0.mtimeMs)} ms); folder = [${left.join(', ')}] (no restore/truncate/auth .sql, no snapshots folder; no temp SQL left in the temp folder; ${snaps} snapshot(s) in the program's backups folder); note "${res.note.text.slice(0, 60)}…"; status line(s) seen: ${JSON.stringify(res.statusTexts)}`;
       });
 
       await R.check('7.10b (2.0.3 browser chooser) a PROTECTED export chosen in the browser: the page asks for the phrase, nothing is overwritten - the company file is "<name> (2).tcdb" BESIDE it, the export stays byte-identical (and protected), the note says so', async () => {
@@ -1225,16 +1229,16 @@ async function main() {
           const dir = path.join(LA, sub); fs.mkdirSync(dir, { recursive: true });
           const target = path.join(dir, name); fs.copyFileSync(srcFile, target);
           const t0 = Date.now();
-          const res = openInBrowser(target, `7-10c-${sub}`, sub === 'rsf-real' ? ['--delay-locate', '1500'] : []);
+          const res = openInBrowser(target, `7-10c-${sub}`, sub === 'rsf-real' ? ['--delay-status', '1500'] : []);
           if (!res.located || res.located.success !== true || res.located.type !== 'rsf' || path.resolve(res.located.filePath) !== path.resolve(target)) throw new Error(`${sub}: located → ${JSON.stringify(res.located)}`);
           const planned = path.join(dir, name.replace(/\.rsf$/, '.tcdb'));
           if (res.located.companyFilePath !== planned) throw new Error(`${sub}: companyFilePath ${res.located.companyFilePath}`);
           if (!res.note || res.note.testId !== 'rsf-company-file-target' || !res.note.text.includes(planned) || !NOTE_BESIDE_RSF.test(res.note.text)) throw new Error(`${sub}: form note → ${JSON.stringify(res.note)}`);
-          if (res.locateRequest.size !== fs.statSync(target).size || !res.locateRequest.shaOk) throw new Error(`${sub}: request ${JSON.stringify(res.locateRequest)}`);
+          if (!res.start || res.start.size !== fs.statSync(target).size || res.start.hasSha || !res.confirm || !res.confirm.shaOk) throw new Error(`${sub}: requests ${JSON.stringify([res.start, res.confirm])}`);
           if (res.routes.some((r) => r.route === 'create-local-company' || r.route === 'pick-company-file')) throw new Error(`${sub}: unexpected route ${JSON.stringify(res.routes)}`);
           if (walk(dir).join('|') !== name) throw new Error(`${sub}: the search or the page wrote beside the Rashid file: ${walk(dir).join(', ')}`);
           if (sub === 'rsf-real' && !res.statusTexts.some((t) => /جارٍ تحديد مكان الملف|Locating the file|Визначення місця файлу|Определение места файла/.test(t))) throw new Error(`${sub}: the page did not show the «locating…» line while the app searched: ${JSON.stringify(res.statusTexts)}`);
-          ev.push(`${name}: ${res.locateRequest.size} bytes hashed in the page, located in locate-a, form «${res.note.text.slice(0, 60)}…», ${Date.now() - t0} ms incl. browser start, status line(s) seen ${JSON.stringify(res.statusTexts)}`);
+          ev.push(`${name}: ${res.start.size} bytes hashed in the page only after the app said ready, located in locate-a, form «${res.note.text.slice(0, 60)}…», ${Date.now() - t0} ms incl. browser start, status line(s) seen ${JSON.stringify(res.statusTexts)}`);
         }
         return ev.join(' | ');
       });
@@ -1273,13 +1277,13 @@ async function main() {
       await R.check('7.10e (2.0.3 fallback) a file OUTSIDE the searched folders is not found: a .tcdb falls back to the upload (a copy in the TexaCore folder - here the scratch one) and the login view says where; a .rsf shows the TexaCore-folder line in the form; neither crashes', async () => {
         const outRsf = path.join(OUTSIDE, 'Outside Rashid.rsf'); fs.copyFileSync(rsfFile, outRsf);
         const r1 = openInBrowser(outRsf, '7-10e-rsf');
-        if (!r1.located || r1.located.success !== false || r1.located.code !== 'NOT_FOUND' || r1.locateStatus !== 200) throw new Error(`rsf located → ${JSON.stringify(r1.located)} (${r1.locateStatus})`);
+        if (r1.located || !r1.phases.includes('not-found') || r1.confirm) throw new Error(`rsf: the job should end "not-found" without a confirm (phases ${r1.phases.join(', ')}; confirm ${JSON.stringify(r1.confirm)})`);
         const info = (await api('GET', '/api/backup-export-info')).json;
         if (!r1.note || r1.note.testId !== 'rsf-company-file-fallback' || !NOTE_NOT_LOCATED_RSF.test(r1.note.text) || !r1.note.text.includes(info.defaultDir)) throw new Error(`rsf note → ${JSON.stringify(r1.note)} (default ${info.defaultDir})`);
         const outTcdb = await exportTo(path.join(OUTSIDE, 'Outside.tcdb'));
         const c0 = await counts4(); const outSha = fileSha(outTcdb);
         const r2 = openInBrowser(outTcdb, '7-10e-tcdb');
-        if (!r2.located || r2.located.success !== false || r2.located.code !== 'NOT_FOUND') throw new Error(`tcdb located → ${JSON.stringify(r2.located)}`);
+        if (r2.located || !r2.phases.includes('not-found')) throw new Error(`tcdb: the job should end "not-found" (phases ${r2.phases.join(', ')}; located ${JSON.stringify(r2.located)})`);
         const routes = r2.routes.map((r) => `${r.route}:${r.status}`);
         if (!routes.includes('restore-tcdb:200') || routes.some((r) => r.startsWith('open-picked-tcdb'))) throw new Error(`fallback routes ${routes.join(', ')}`);
         const fallbackDir = TCDB_IN_COMPANY_FOLDER ? rashidDir : path.join(WORK, 'restore-tcdb');   // where the upload fallback writes in this run (TEXACORE_TCDB_DIR)
@@ -1288,7 +1292,7 @@ async function main() {
         if (!r2.note || r2.note.testId !== 'live-company-file-note' || !NOTE_NOT_LOCATED_TCDB.test(r2.note.text) || !r2.note.text.includes(copy)) throw new Error(`tcdb note → ${JSON.stringify(r2.note)}`);
         if (fileSha(outTcdb) !== outSha) throw new Error('the file outside was modified');
         if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the fallback restore changed the rows');
-        return `rsf: NOT_FOUND (HTTP 200) → form line with ${info.defaultDir}; tcdb: NOT_FOUND → upload fallback → ${copy}; the original untouched; notes shown`;
+        return `rsf: job ended not-found → form line with ${info.defaultDir}; tcdb: job ended not-found → upload fallback → ${copy}; the original untouched; notes shown`;
       });
 
       await R.check('7.10f (2.0.3 locate) the route is behind the same guards: no secret 401; a LAN Host refused; a foreign Origin refused; an older-style empty body is a 400, never a search', async () => {
@@ -1366,6 +1370,293 @@ async function main() {
         const ok = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref });
         if (ok.status !== 200 || !ok.json.success) throw new Error(`after the lock is gone the same file opens: ${ok.status} ${ok.text.slice(0, 200)}`);
         return `open failed (${first.status}: ${first.text.slice(0, 90)}…); second open 409 RESTORE_BUSY; picked file byte-identical, nothing beside it, no temp SQL; live target back to ${path.basename(prev)} and syncing (mtime +${Math.round(fs.statSync(prev).mtimeMs - prevMtime0)} ms); rows unchanged; the same file then opens fine`;
+      });
+
+      // ═══ 2.0.4: the macOS folder permission and iCloud placeholders, driven through the PACKAGED app with the harness hooks (POST /api/e2e-folder-access: pretend verdicts,
+      //     scratch folders standing in for Desktop/Documents, files that behave like cloud placeholders) - the real privacy settings are never touched ═══
+      const sim = (b) => api('POST', '/api/e2e-folder-access', b);
+      const simReset = () => sim({ reset: true });
+      const NOTE_WAIT = /بانتظار موافقتك|Waiting for your answer|Очікуємо вашу відповідь|Ждём вашего ответа/;
+      const NOTE_CLOUD = /iCloud/;
+      const NOTE_CLOUD_MB = /م\.ب|\bMB\b|МБ/;
+      const NOTE_CANCELLED = /أُلغي فتح الملف|was cancelled|скасовано|отменено/;
+      const NOTE_DL_FAILED = /تعذّر تنزيل الملف من iCloud|could not be downloaded from iCloud|Не вдалося завантажити файл з iCloud|Не удалось загрузить файл из iCloud/;
+      const AREA_DESKTOP = /سطح المكتب|Desktop|Робочий стіл|Рабочий стол/;
+      const SETTINGS_WORDS = /الملفات والمجلدات|Files & Folders|Файли й папки|Файлы и папки/;
+      const mk = async (sub, name) => { const dir = path.join(LA, sub); fs.mkdirSync(dir, { recursive: true }); return exportTo(path.join(dir, name)); };
+      const fallbackDirOf = () => (TCDB_IN_COMPANY_FOLDER ? rashidDir : path.join(WORK, 'restore-tcdb'));
+
+      await R.check('7.11a (2.0.4 iCloud) a file that is only a cloud placeholder: found by name+size+time WITHOUT being read, downloaded on request with progress shown on the page («جارٍ تنزيله (x من y م.ب)» + a bar), hashed only afterwards, then opened in place', async () => {
+        const target = await mk('cloud', 'Cloud Mine.tcdb');
+        await simReset(); await sim({ placeholders: { [target]: { steps: 8, msPerStep: 500 } } });
+        const c0 = await counts4(); const sha0 = fileSha(target);
+        const res = openInBrowser(target, '7-11a');
+        await simReset();
+        if (!res.start || res.start.hasSha || JSON.stringify(res.start.keys) !== JSON.stringify(['lastModified', 'name', 'size'])) throw new Error(`start ${JSON.stringify(res.start)}`);
+        if (!res.confirm || !res.confirm.shaOk) throw new Error(`confirm ${JSON.stringify(res.confirm)}`);
+        const o = res.order; if (!(o.indexOf('locate-start') === 0 && o.indexOf('locate-materialize') > 0 && o.indexOf('locate-confirm') > o.indexOf('locate-materialize'))) throw new Error(`request order ${o.join(' > ')}`);
+        if (!res.candidateStates.includes('placeholder')) throw new Error(`candidate states ${res.candidateStates.join(',')}`);
+        const dl = res.statusTexts.filter((t) => NOTE_CLOUD.test(t) && NOTE_CLOUD_MB.test(t));
+        if (dl.length < 2) throw new Error(`the download line was seen ${dl.length} time(s): ${JSON.stringify(res.statusTexts)}`);
+        if (res.progress.length < 2 || res.progress.some((v, i) => i && v < res.progress[i - 1]) || res.progress[res.progress.length - 1] < 50) throw new Error(`progress bar values ${JSON.stringify(res.progress)}`);
+        if (!res.located || res.located.success !== true || path.resolve(res.located.filePath) !== path.resolve(target)) throw new Error(`located ${JSON.stringify(res.located)}`);
+        if (!res.routes.some((r) => r.route === 'open-picked-tcdb' && r.status === 200)) throw new Error(`routes ${JSON.stringify(res.routes)}`);
+        if (!res.note || !res.note.text.includes(target) || !NOTE_INPLACE.test(res.note.text)) throw new Error(`note ${JSON.stringify(res.note)}`);
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the open changed the rows');
+        if (walk(path.dirname(target)).join('|') !== 'Cloud Mine.tcdb') throw new Error(`files beside: ${walk(path.dirname(target)).join(', ')}`);
+        void sha0;
+        return `start {name,size,time} only → ready (placeholder) → materialize → ${res.progress.length} progress values ${JSON.stringify(res.progress.slice(0, 8))}… → confirm(sha256) → open-picked-tcdb 200; download line: «${dl[dl.length - 1].slice(0, 90)}»`;
+      });
+
+      await R.check('7.11b (2.0.4 iCloud) cancelling the download: nothing is opened, the page says so, the file and the rows are untouched', async () => {
+        const target = await mk('cloud-cancel', 'Cloud Cancel.tcdb');
+        await simReset(); await sim({ placeholders: { [target]: { steps: 60, msPerStep: 400 } } });
+        const c0 = await counts4(); const sha0 = fileSha(target);
+        const res = openInBrowser(target, '7-11b', ['--click-cancel-at', '8']);
+        await simReset();
+        if (!res.cancelClicked) throw new Error(`the cancel button was never pressed (progress ${JSON.stringify(res.progress)})`);
+        if (!res.order.includes('locate-cancel')) throw new Error(`the app was not told to stop: ${res.order.join(' > ')}`);
+        if (res.routes.some((r) => /open-picked-tcdb|restore-tcdb|pick-company-file/.test(r.route)) || res.located) throw new Error(`something was opened: ${JSON.stringify(res.routes)}`);
+        if (!res.finalNotice || !NOTE_CANCELLED.test(res.finalNotice) || res.alerts.length) throw new Error(`final notice ${res.finalNotice} / alerts ${res.alerts.join('|')}`);
+        if (fileSha(target) !== sha0 || JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the file or the rows changed');
+        return `cancel pressed at ${res.progress[res.progress.length - 1]}%; locate-cancel sent; no open/restore; notice «${res.finalNotice}»`;
+      });
+
+      await R.check('7.11c (2.0.4 iCloud) a download that FAILS ends with an actionable message, not a spinner: nothing is opened', async () => {
+        const target = await mk('cloud-fail', 'Cloud Fail.tcdb');
+        await simReset(); await sim({ placeholders: { [target]: { fail: 'DOWNLOAD_STALLED' } } });
+        const res = openInBrowser(target, '7-11c');
+        await simReset();
+        if (!res.finalNotice || !NOTE_DL_FAILED.test(res.finalNotice)) throw new Error(`final notice ${JSON.stringify(res.finalNotice)} statusTexts ${JSON.stringify(res.statusTexts)}`);
+        if (res.routes.some((r) => /open-picked-tcdb|restore-tcdb/.test(r.route)) || res.located || res.alerts.length) throw new Error(`routes ${JSON.stringify(res.routes)} alerts ${res.alerts.join('|')}`);
+        return `message: «${res.finalNotice.slice(0, 110)}…»; no open`;
+      });
+
+      await R.check('7.11d (2.0.4 macOS permission) while the system prompt is up the page WAITS and says so (the area named); the moment the user allows, the search continues by itself and the file is opened in place', async () => {
+        const target = await mk('perm-pending', 'Perm Pending.tcdb');
+        await simReset(); await sim({ kinds: { [LA]: 'desktop' }, sim: { desktop: { state: 'allowed', delayMs: 5000 } } });
+        const c0 = await counts4();
+        const res = openInBrowser(target, '7-11d');
+        await simReset();
+        const waits = res.statusTexts.filter((t) => NOTE_WAIT.test(t) && AREA_DESKTOP.test(t));
+        if (!waits.length || !res.phases.includes('waiting-permission')) throw new Error(`waiting line not seen: texts ${JSON.stringify(res.statusTexts)} phases ${res.phases.join(',')}`);
+        if (!res.located || res.located.success !== true || path.resolve(res.located.filePath) !== path.resolve(target)) throw new Error(`located ${JSON.stringify(res.located)}`);
+        if (!res.note || !NOTE_INPLACE.test(res.note.text)) throw new Error(`note ${JSON.stringify(res.note)}`);
+        if (res.permission.seen) throw new Error('the permission step appeared although the answer was yes');
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the open changed the rows');
+        return `phases ${res.phases.join(' > ')}; waiting line «${waits[0].slice(0, 100)}…»; then located + opened in place`;
+      });
+
+      await R.check('7.11e (2.0.4 macOS permission) «Don\'t Allow»: the page shows the permission step (the area, where to switch it on, a button that makes the APP open System Settings, «أعد المحاولة»); «try again» while it is still off says so; after the user allows, «try again» finds and opens the file', async () => {
+        const target = await mk('perm-denied', 'Perm Denied.tcdb');
+        await simReset(); await sim({ kinds: { [LA]: 'desktop' }, sim: { desktop: { state: 'denied' } } });
+        const c0 = await counts4();
+        const res = openInBrowser(target, '7-11e', ['--perm-script', JSON.stringify([{ click: 'perm-open-settings' }, { click: 'perm-retry' }, { sim: { desktop: { state: 'allowed' } } }, { click: 'perm-retry' }])]);
+        const after = (await sim({})).json;
+        await simReset();
+        if (!res.permission.seen || res.permission.mode !== 'denied') throw new Error(`permission step ${JSON.stringify(res.permission)}`);
+        if (!AREA_DESKTOP.test(res.permission.title) || !SETTINGS_WORDS.test(res.permission.body)) throw new Error(`step text: ${res.permission.title} / ${res.permission.body}`);
+        if (!res.permission.still) throw new Error('«try again» while the permission is still off did not say so');
+        if (res.permission.actions.join(',') !== 'click:perm-open-settings,click:perm-retry,sim,click:perm-retry') throw new Error(`actions ${res.permission.actions.join(',')}`);
+        if (!res.routes.some((r) => r.route === 'open-privacy-settings' && r.status === 200) || after.settingsOpened !== 1) throw new Error(`the app was asked to open the settings ${after.settingsOpened} time(s); routes ${JSON.stringify(res.routes)}`);
+        if (!res.located || res.located.success !== true || path.resolve(res.located.filePath) !== path.resolve(target)) throw new Error(`located ${JSON.stringify(res.located)}`);
+        if (!res.note || !NOTE_INPLACE.test(res.note.text)) throw new Error(`note ${JSON.stringify(res.note)}`);
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the open changed the rows');
+        return `step «${res.permission.title}», still-off message «${res.permission.still.slice(0, 70)}…», settings opened ${after.settingsOpened}x by the app, then found + opened in place`;
+      });
+
+      await R.check('7.11f (2.0.4 macOS permission) «continue without locating»: denied + the user skips -> the usual fallback (a copy in the TexaCore folder, the login view says where); the chosen file is untouched', async () => {
+        const target = await mk('perm-skip', 'Perm Skip.tcdb');
+        await simReset(); await sim({ kinds: { [LA]: 'desktop' }, sim: { desktop: { state: 'denied' } } });
+        const sha0 = fileSha(target); const c0 = await counts4();
+        const res = openInBrowser(target, '7-11f', ['--perm-script', JSON.stringify([{ click: 'perm-skip' }])]);
+        await simReset();
+        if (!res.permission.seen) throw new Error('no permission step');
+        if (res.located || !res.routes.some((r) => r.route === 'restore-tcdb' && r.status === 200) || res.routes.some((r) => r.route === 'open-picked-tcdb')) throw new Error(`routes ${JSON.stringify(res.routes)}`);
+        const copy = path.join(fallbackDirOf(), 'Perm Skip.tcdb');
+        if (!fs.existsSync(copy) || !res.note || !NOTE_NOT_LOCATED_TCDB.test(res.note.text) || !res.note.text.includes(copy)) throw new Error(`copy ${fs.existsSync(copy)} note ${JSON.stringify(res.note)}`);
+        if (fileSha(target) !== sha0) throw new Error('the chosen file changed');
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the fallback restore changed the rows');
+        return `step shown, skipped -> upload fallback -> ${copy}; note shown; original untouched`;
+      });
+
+      await R.check('7.11g (2.0.4 macOS permission) the user does not want to wait for the prompt: «تابع بدون تحديد مكان الملف» on the waiting line goes straight to the fallback', async () => {
+        const target = await mk('perm-wait-skip', 'Perm Wait Skip.tcdb');
+        await simReset(); await sim({ kinds: { [LA]: 'desktop' }, sim: { desktop: { state: 'allowed', delayMs: 25000 } } });
+        const res = openInBrowser(target, '7-11g', ['--click-skip-when-waiting']);
+        await simReset();
+        if (!res.skipClicked) throw new Error(`the skip button was never there: texts ${JSON.stringify(res.statusTexts)}`);
+        const copy = path.join(fallbackDirOf(), 'Perm Wait Skip.tcdb');
+        if (res.located || !res.routes.some((r) => r.route === 'restore-tcdb' && r.status === 200) || !fs.existsSync(copy)) throw new Error(`routes ${JSON.stringify(res.routes)} copy ${fs.existsSync(copy)}`);
+        if (!res.note || !NOTE_NOT_LOCATED_TCDB.test(res.note.text)) throw new Error(`note ${JSON.stringify(res.note)}`);
+        return 'skipped while macOS was asking -> upload fallback, note shown';
+      });
+
+      await R.check('7.11h (2.0.4 company creation) the company file\'s folder is "Documents" and macOS has not allowed it: the app answers FOLDER_PERMISSION (403 shape: area + state) BEFORE creating anything - no tenant, no user, no company, no folder - and for a still-open prompt says "pending"', async () => {
+        const docs = path.join(LB, 'new-company-folder');
+        await simReset(); await sim({ kinds: { [docs]: 'documents' }, sim: { documents: { state: 'denied' } } });
+        const c0 = await counts4();
+        const r1 = await api('POST', '/api/create-local-company', body({ companyName: 'Perm Denied Co', adminEmail: 'perm@e2e.test', storagePath: docs, dbFileName: 'permco' }));
+        if (r1.json.success !== false || r1.json.code !== 'FOLDER_PERMISSION' || r1.json.area !== 'documents' || r1.json.state !== 'denied') throw new Error(`denied → ${r1.status} ${r1.text.slice(0, 220)}`);
+        await sim({ sim: { documents: { state: 'allowed', delayMs: 15000 } } });
+        const t0 = Date.now();
+        const r2 = await api('POST', '/api/create-local-company', body({ companyName: 'Perm Pending Co', adminEmail: 'perm2@e2e.test', storagePath: docs, dbFileName: 'permco2' }));
+        const waited = Date.now() - t0;
+        if (r2.json.code !== 'FOLDER_PERMISSION' || r2.json.state !== 'pending') throw new Error(`pending → ${r2.status} ${r2.text.slice(0, 220)}`);
+        if (waited > 12000) throw new Error(`the app waited ${waited} ms for the prompt (it must answer in a few seconds)`);
+        await simReset();
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('a refused creation left rows behind');
+        if (fs.existsSync(docs)) throw new Error('the folder was created although macOS had not allowed it');
+        const ns = await pg("SELECT count(*)::int n FROM auth.users WHERE email IN ('perm@e2e.test','perm2@e2e.test')");
+        if (ns.rows[0].n !== 0) throw new Error('an admin user was left behind');
+        return `denied -> FOLDER_PERMISSION {area: documents, state: denied}; pending -> FOLDER_PERMISSION {state: pending} after ${waited} ms; nothing created`;
+      });
+
+      await R.check('7.11i (2.0.4 company file in the program\'s folder) the .tcdb upload fallback with «folder=program»: a denied Documents folder -> 403 FOLDER_PERMISSION and NOTHING written; the user\'s «keep it in the program\'s folder» choice restores into <app data>/company-files with no macOS permission', async () => {
+        const dir = fallbackDirOf();
+        const src = await mk('upload-program', 'Upload Program.tcdb');
+        const c0 = await counts4();
+        await simReset(); await sim({ kinds: { [dir]: 'documents' }, sim: { documents: { state: 'denied' } } });
+        const before = walk(dir);
+        const m1 = multipart(fs.readFileSync(src), 'Upload Program.tcdb', {});
+        const r1 = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m1.ct }, body: m1.body });
+        const j1 = JSON.parse(r1.buf.toString('utf8'));
+        if (r1.status !== 403 || j1.code !== 'FOLDER_PERMISSION' || j1.area !== 'documents') throw new Error(`denied → ${r1.status} ${r1.buf.toString('utf8').slice(0, 200)}`);
+        if (walk(dir).join('|') !== before.join('|')) throw new Error('something was written although the folder was not allowed');
+        const m2 = multipart(fs.readFileSync(src), 'Upload Program.tcdb', { folder: 'program' });
+        const r2 = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m2.ct }, body: m2.body });
+        const j2 = JSON.parse(r2.buf.toString('utf8'));
+        const progDir = path.join(userData, 'texacore-data', 'company-files');
+        if (r2.status !== 200 || !j2.success || path.resolve(path.dirname(j2.tcdbPath)) !== path.resolve(progDir) || !fs.existsSync(j2.tcdbPath)) throw new Error(`program folder → ${r2.status} ${r2.buf.toString('utf8').slice(0, 220)}`);
+        await simReset();
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the restore changed the rows');
+        return `denied -> 403 FOLDER_PERMISSION, ${dir} untouched; folder=program -> ${j2.tcdbPath}`;
+      });
+
+      await R.check('7.11j (2.0.4 minute sync) the company file is in a folder macOS has stopped allowing (after an update the grant is gone): the sync does NOT write, does NOT freeze, and says why (no-permission + the area); when the permission is back the next sync writes', async () => {
+        const dir = path.join(LA, 'sync-perm'); fs.mkdirSync(dir, { recursive: true });
+        const target = await exportTo(path.join(dir, 'Sync Perm.tcdb'));
+        await simReset();
+        const loc = (await locateApi(bodyOf(target))).json;
+        const opened = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref });
+        if (opened.status !== 200) throw new Error(`open → ${opened.status} ${opened.text.slice(0, 160)}`);
+        await waitFor(async () => { const s_ = await status(); return s_.backupPath && path.resolve(s_.backupPath) === path.resolve(target); }, 'the file as the live target');
+        await api('POST', '/api/backup', {});
+        await sim({ kinds: { [LA]: 'desktop' }, sim: { desktop: { state: 'denied' } } });
+        const st0 = fs.statSync(target); const sha0 = fileSha(target);
+        await new Promise((r) => setTimeout(r, 1800));   // (the allowed verdict of the first tick is trusted for a short while; forget it)
+        const t0 = Date.now();
+        const blocked = await waitFor(async () => { await api('POST', '/api/backup', {}); const s_ = await status(); return s_.accessBlock ? s_ : null; }, 'the blocked state', 30000);
+        const took = Date.now() - t0;
+        if (blocked.accessBlock.state !== 'denied' || blocked.accessBlock.area !== 'desktop') throw new Error(`accessBlock ${JSON.stringify(blocked.accessBlock)}`);
+        const tgt = (blocked.targets || []).find((x) => x.role === 'primary');
+        if (!tgt || !tgt.error || tgt.error.reason !== 'no-permission' || tgt.state !== 'error') throw new Error(`primary target ${JSON.stringify(tgt)}`);
+        if (fileSha(target) !== sha0 || fs.statSync(target).mtimeMs !== st0.mtimeMs) throw new Error('the file was written although the permission was missing');
+        await sim({ sim: { desktop: { state: 'allowed' } } });
+        await waitFor(async () => { await api('POST', '/api/backup', {}); const s_ = await status(); return !s_.accessBlock && fs.statSync(target).mtimeMs > st0.mtimeMs; }, 'the sync writing again', 40000);
+        await simReset();
+        return `denied: accessBlock {desktop,denied}, target error no-permission, file untouched (answered in ${took} ms); allowed: the next sync wrote the file again`;
+      });
+
+      await R.check('7.12 (2.0.4 security S3) a crafted company file can NOT run a command: a psql meta-command after the SET lines, a "COPY … PROGRAM", a DO block - each is refused 422 TCDB_UNSAFE_SQL BEFORE anything is touched (rows, live target, file), nothing runs (no marker file), no temp SQL is left', async () => {
+        const BM = require('../../src/backup-manager');
+        const real = await mk('crafted', 'Crafted Source.tcdb');
+        const bm = new BM({ pgBinDir: '/x', encryptionKey: 'texacore-default-backup-key-2026', backupPath: real });
+        const dump = await bm._decompress(bm._decryptParsed(bm._parseTcdbFile(fs.readFileSync(real)), '').data);
+        const marker = path.join(WORK, 'S3-MARKER-SHOULD-NOT-EXIST');
+        const craft = async (name, inject) => {
+          const text = dump.toString('utf8');
+          const i = text.indexOf('SET client_encoding');
+          const evil = Buffer.from(text.slice(0, i) + inject + '\n' + text.slice(i), 'utf8');
+          const compressed = await bm._compress(evil);
+          const file = path.join(OUTSIDE, name);
+          fs.writeFileSync(file, bm._buildTcdbFile(bm._encrypt(compressed), evil.length, compressed.length));
+          return file;
+        };
+        const c0 = await counts4(); const st0 = await status();
+        const cases = [
+          ['meta.tcdb', `\\! touch "${marker}"`],
+          ['meta2.tcdb', `SELECT 1 \\gexec \\! touch "${marker}"`],
+          ['program.tcdb', `COPY public.companies FROM PROGRAM 'touch "${marker}"';`],
+          ['do.tcdb', `DO $$ BEGIN EXECUTE 'COPY (SELECT 1) TO PROGRAM ''touch ${marker}'''; END $$;`],
+        ];
+        const ev = [];
+        for (const [name, inject] of cases) {
+          const f = await craft(name, inject);
+          const m = multipart(fs.readFileSync(f), name, {});
+          const r = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m.ct }, body: m.body });
+          const j = JSON.parse(r.buf.toString('utf8'));
+          if (r.status !== 422 || j.code !== 'TCDB_UNSAFE_SQL') throw new Error(`${name}: ${r.status} ${r.buf.toString('utf8').slice(0, 200)}`);
+          if (j.error.includes(marker)) throw new Error(`${name}: the answer repeats the command`);
+          ev.push(`${name} 422`);
+        }
+        // the in-place route too
+        const f2 = await craft('meta-inplace.tcdb', `\\! touch "${marker}"`);
+        const loc = (await locateApi(bodyOf(f2))).json;
+        if (!loc.success) throw new Error(`could not locate the crafted file: ${JSON.stringify(loc).slice(0, 160)}`);
+        const op = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref });
+        if (op.status !== 422 || op.json.code !== 'TCDB_UNSAFE_SQL') throw new Error(`open-picked-tcdb → ${op.status} ${op.text.slice(0, 200)}`);
+        if (fs.existsSync(marker)) throw new Error('A COMMAND RAN: the marker file exists');
+        if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('a refused file changed the rows');
+        const st1 = await status();
+        if (path.resolve(st1.backupPath || '') !== path.resolve(st0.backupPath || '')) throw new Error(`the live target moved: ${st0.backupPath} -> ${st1.backupPath}`);
+        const tmpLeft = fs.readdirSync(os.tmpdir()).filter((x) => new RegExp(`^texacore-(restore|truncate|auth)-${child.pid}-[0-9a-f]+\\.sql$`).test(x));
+        if (tmpLeft.length) throw new Error(`temporary SQL left: ${tmpLeft.join(', ')}`);
+        const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
+        if (log.includes(marker)) throw new Error('the command text reached the log');
+        return `${ev.join(', ')}, open-picked-tcdb 422; no marker; rows + live target unchanged; no temp SQL; the command text is in no answer and no log`;
+      });
+
+      await R.check('7.13 (2.0.4) the new routes are behind the same guards and tell nothing they should not: no secret 401, wrong secret 401, a LAN Host refused, a foreign Origin refused; the job status never carries a path; the folder-access answer has the areas', async () => {
+        const target = await mk('guards204', 'Guards 204.tcdb');
+        const routes = [['POST', '/api/locate-start', { name: 'a.rsf', size: 10, lastModified: 1 }], ['GET', '/api/locate-status?job=x'], ['POST', '/api/locate-materialize', { job: 'x' }], ['POST', '/api/locate-cancel', { job: 'x' }],
+          ['POST', '/api/locate-confirm', { job: 'x', sha256: 'a'.repeat(64) }], ['GET', '/api/folder-access?kinds=desktop'], ['POST', '/api/open-privacy-settings', {}], ['POST', '/api/e2e-folder-access', {}]];
+        for (const [m, p_, b] of routes) {
+          const none = await request(m, `${ADMIN}${p_}`, { body: b });
+          if (none.status !== 401) throw new Error(`${p_} without the secret -> ${none.status}`);
+          const wrong = await request(m, `${ADMIN}${p_}`, { headers: { 'x-texacore-local-secret': 'nope' }, body: b });
+          if (wrong.status !== 401) throw new Error(`${p_} wrong secret -> ${wrong.status}`);
+          const lan = await request(m, `${ADMIN}${p_}`, { headers: { ...H, Host: '192.168.77.20:80' }, body: b });
+          if (lan.status !== 403) throw new Error(`${p_} LAN Host -> ${lan.status}`);
+          const foreign = await request(m, `${ADMIN}${p_}`, { headers: { ...H, Origin: 'https://evil.example' }, body: b });
+          if (foreign.status !== 403) throw new Error(`${p_} foreign Origin -> ${foreign.status}`);
+        }
+        const bad = await api('POST', '/api/locate-start', { name: '../x.rsf', size: 10, lastModified: 1 });
+        if (bad.status !== 400 || bad.json.code !== 'BAD_REQUEST') throw new Error(`a bad name -> ${bad.status} ${bad.text.slice(0, 120)}`);
+        const gone = await api('GET', '/api/locate-status?job=' + 'f'.repeat(24));
+        if (gone.status !== 404 || gone.json.code !== 'JOB_EXPIRED') throw new Error(`an unknown job -> ${gone.status} ${gone.text.slice(0, 120)}`);
+        const early = await api('POST', '/api/locate-confirm', { job: 'f'.repeat(24), sha256: 'a'.repeat(64) });
+        if (early.status !== 404) throw new Error(`confirm of an unknown job -> ${early.status}`);
+        // a real job: its status never reveals a path, a wrong digest finds nothing and answers no path
+        const st = await api('POST', '/api/locate-start', { name: path.basename(target), size: fs.statSync(target).size, lastModified: Math.round(fs.statSync(target).mtimeMs) });
+        if (!st.json.job) throw new Error(`start -> ${st.text.slice(0, 200)}`);
+        const done = await waitFor(async () => { const s_ = (await api('GET', `/api/locate-status?job=${st.json.job}`)).json; return s_.phase !== 'searching' && s_.phase !== 'waiting-permission' ? s_ : null; }, 'the job to finish', 60000);
+        const text = JSON.stringify(done);
+        if (text.includes(WORK) || text.includes(path.basename(path.dirname(target))) || /filePath|"dir"/.test(text)) throw new Error(`the status reveals a path: ${text.slice(0, 300)}`);
+        if (done.phase !== 'ready' || done.candidates.length !== 1 || done.candidates[0].state !== 'local') throw new Error(`status ${text.slice(0, 300)}`);
+        const wrongDigest = await api('POST', '/api/locate-confirm', { job: st.json.job, sha256: sha(Buffer.from('somebody else')) });
+        if (wrongDigest.status !== 200 || wrongDigest.json.success !== false || wrongDigest.json.code !== 'NOT_FOUND' || /filePath|"ref"/.test(wrongDigest.text)) throw new Error(`a wrong digest -> ${wrongDigest.status} ${wrongDigest.text.slice(0, 200)}`);
+        const right = await api('POST', '/api/locate-confirm', { job: st.json.job, sha256: fileSha(target) });
+        if (!right.json.success || path.resolve(right.json.filePath) !== path.resolve(target)) throw new Error(`the right digest -> ${right.text.slice(0, 200)}`);
+        const fa = (await api('GET', '/api/folder-access?kinds=desktop,documents,downloads')).json;
+        if (!fa.success || !fa.areas || !fa.areas.desktop || !fa.areas.documents || !fa.areas.downloads) throw new Error(`folder-access -> ${JSON.stringify(fa)}`);
+        return `${routes.length} routes x (no secret / wrong secret / LAN Host / foreign Origin) all refused; bad name 400; unknown job 404 JOB_EXPIRED; status = ${text.length} bytes without a path; wrong digest -> NOT_FOUND without a path; right digest -> the file; folder-access areas ${Object.keys(fa.areas).join(',')} (${Object.values(fa.areas).map((a) => a.state).join(',')})`;
+      });
+
+      await R.check('7.14 (2.0.4 security S5) /config.js hands the admin secret ONLY to a request that carries a same-origin signal: a bare loopback client (no Sec-Fetch-Site, no Origin, no Referer) gets none; Sec-Fetch-Site same-origin / none, or a same-origin Referer, does; cross-site / a foreign Origin / a foreign Referer does not', async () => {
+        const has = (r) => r.text.includes(secrets.localApiSecret);
+        const bare = await request('GET', `${UI}/config.js`, { headers: {} });
+        const same = await request('GET', `${UI}/config.js`, { headers: { 'Sec-Fetch-Site': 'same-origin' } });
+        const none = await request('GET', `${UI}/config.js`, { headers: { 'Sec-Fetch-Site': 'none' } });
+        const cross = await request('GET', `${UI}/config.js`, { headers: { 'Sec-Fetch-Site': 'cross-site' } });
+        const origin = await request('GET', `${UI}/config.js`, { headers: { Origin: 'https://evil.example' } });
+        const refOk = await request('GET', `${UI}/config.js`, { headers: { Referer: `${UI}/login` } });
+        const refBad = await request('GET', `${UI}/config.js`, { headers: { Referer: 'https://evil.example/login' } });
+        if (has(bare)) throw new Error('a bare loopback client received the admin secret');
+        if (!has(same) || !has(none) || !has(refOk)) throw new Error(`a same-origin page did not get it: same=${has(same)} none=${has(none)} referer=${has(refOk)}`);
+        if (has(cross) || has(origin) || has(refBad)) throw new Error(`cross-site=${has(cross)} origin=${has(origin)} referer=${has(refBad)}`);
+        for (const r of [bare, same, cross]) if (!r.text.includes(secrets.anonKey)) throw new Error('the public anon key is missing from config.js');
+        return 'bare -> no secret; same-origin / none / same-origin Referer -> secret; cross-site / foreign Origin / foreign Referer -> none; the anon key is always there';
       });
     }
   } catch (e) {
