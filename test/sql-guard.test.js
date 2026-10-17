@@ -223,6 +223,9 @@ test('BackupManager.restore refuses a crafted .tcdb with TCDB_UNSAFE_SQL: no tru
   assert.equal(bm.lastRestoreTouchedDb, false, 'the database was not touched (afterFailedRestore puts the previous company back)');
   assert.ok(fs.readFileSync(evilFile).equals(before), 'the file is unchanged');
   assert.equal(fs.existsSync('/tmp/should-never-exist-9f31'), false);
+  // a 1.x file (written by PostgreSQL < 17) that also carries a command: the clearer 1.x refusal comes first (both change nothing)
+  const legacyFile = await mk(`-- Dumped from database version 15.4\n${dump(GOOD_TABLE, '\\! touch /tmp/should-never-exist-9f31')}`);
+  await assert.rejects(() => bm.restore(legacyFile), (e) => e.code === 'LEGACY_TCDB');
   // a COPY … PROGRAM file too
   const prog = await mk(`-- Dumped from database version 17.6\n${dump(GOOD_TABLE, "COPY public.companies FROM PROGRAM 'touch /tmp/should-never-exist-9f31';")}`);
   await assert.rejects(() => bm.restore(prog), (e) => e.code === 'TCDB_UNSAFE_SQL');
@@ -231,13 +234,34 @@ test('BackupManager.restore refuses a crafted .tcdb with TCDB_UNSAFE_SQL: no tru
 
 test('the wiring: the guard sits between decompress and the first destructive step; every psql the restore starts reads no ~/.psqlrc (-X); the program\'s files are wrapped in psql\'s restricted mode', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'backup-manager.js'), 'utf8');
-  const decompress = src.indexOf('const sql = await this._decompress(compressed);');
-  const guard = src.indexOf('sqlGuard.assertSafeDump(sql);');
-  const truncate = src.indexOf('await this._truncatePublic(this._extractCopyTables(sqlStr));');
-  assert.ok(decompress > 0 && guard > decompress && truncate > guard, 'decompress → guard → truncate');
+  const rf = src.indexOf('async _restoreFile(');
+  const decompress = src.indexOf('const sql = await this._decompress(compressed);', rf);
+  const legacy = src.indexOf('throw BackupManager.legacyFileError(dumpedFrom);', rf);
+  const guard = src.indexOf('sqlGuard.assertSafeDump(sql);', rf);
+  const truncate = src.indexOf('await this._truncatePublic(this._extractCopyTables(sqlStr));', rf);
+  assert.ok(decompress > rf && legacy > decompress && guard > legacy && truncate > guard, 'decompress → 1.x check (its own clearer refusal) → guard → truncate');
   assert.equal((src.match(/'-X'/g) || []).length, 4, 'restore, scalar query, truncate, auth: all -X');
   assert.match(src, /sqlGuard\.prepareDump\(sqlBuffer, \{ before: "SET session_replication_role = 'replica';\\n"/);
   assert.match(src, /sqlGuard\.prepareDump\(sqlText\)/);
   const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   assert.match(main, /TCDB_UNSAFE_SQL: 422/);
+});
+
+test('preflightBuffer / peekDumpMajor: the upload and the open-in-place routes refuse an unsafe file BEFORE writing or re-pointing anything; a 1.x file just reports its major; a clean file reports 17', async () => {
+  const BackupManager = require('../src/backup-manager');
+  const { mkdtemp } = require('./helpers');
+  const dir = mkdtemp('tcx-sqlg-p-');
+  const bm = new BackupManager({ pgBinDir: path.join(dir, 'x'), encryptionKey: 'k-test-1234', backupPath: path.join(dir, 'x.tcdb'), dataDir: dir, onProgress: () => {}, onError: () => {} });
+  const mk = async (sql) => { const raw = Buffer.from(sql, 'utf8'); const c = await bm._compress(raw); return bm._buildTcdbFile(bm._encrypt(c), raw.length, c.length); };
+  assert.equal(await bm.preflightBuffer(await mk(`-- Dumped from database version 17.6\n${dump(GOOD_TABLE, GOOD_COPY)}`)), 17);
+  const unsafeBuf = await mk(`-- Dumped from database version 17.6\n${dump('\\! touch /tmp/x')}`);
+  await assert.rejects(() => bm.preflightBuffer(unsafeBuf), (e) => e.code === 'TCDB_UNSAFE_SQL');
+  assert.equal(await bm.preflightBuffer(await mk(`-- Dumped from database version 15.4\n${dump('\\! touch /tmp/x')}`)), 15, 'a 1.x file reports its major (the caller refuses it with the 1.x text)');
+  const f = path.join(dir, 'p.tcdb'); fs.writeFileSync(f, await mk(`-- Dumped from database version 17.6\n${dump('COPY public.companies FROM PROGRAM \'id\';')}`));
+  await assert.rejects(() => bm.peekDumpMajor(f), (e) => e.code === 'TCDB_UNSAFE_SQL');
+  const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
+  assert.match(main, /const major = await pm\.preflightBuffer\(fileData, \{ passphrase \}\);\s*if \(major !== null && major < 17\) throw BackupManager\.legacyFileError\(major\);/);
+  const peek = main.indexOf('await backupManager.peekDumpMajor(selectedPath, { passphrase })');
+  const repoint = main.indexOf('backupManager.backupPath = liveTarget;');
+  assert.ok(peek > 0 && repoint > peek, 'the open-in-place route reads the file for commands before it re-points the manager');
 });

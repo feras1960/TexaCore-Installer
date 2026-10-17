@@ -1593,7 +1593,8 @@ async function main() {
         }
         // the in-place route too
         const f2 = await craft('meta-inplace.tcdb', `\\! touch "${marker}"`);
-        const loc = (await locateApi(bodyOf(f2))).json;
+        const f2in = path.join(LA, 'crafted', 'meta-inplace.tcdb'); fs.mkdirSync(path.dirname(f2in), { recursive: true }); fs.copyFileSync(f2, f2in);   // (inside a searched folder, so the app can locate it)
+        const loc = (await locateApi(bodyOf(f2in))).json;
         if (!loc.success) throw new Error(`could not locate the crafted file: ${JSON.stringify(loc).slice(0, 160)}`);
         const op = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref });
         if (op.status !== 422 || op.json.code !== 'TCDB_UNSAFE_SQL') throw new Error(`open-picked-tcdb → ${op.status} ${op.text.slice(0, 200)}`);

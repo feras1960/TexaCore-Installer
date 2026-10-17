@@ -3269,9 +3269,13 @@ const httpServer = http.createServer(async (req, res) => {
           }
         }
         try {
-          newBackupManager().probeAccess(fileData, { passphrase });
+          const pm = newBackupManager();
+          pm.probeAccess(fileData, { passphrase });
+          // 2.0.4: a 1.x file and a file that carries commands TexaCore never writes (S3) are refused BEFORE anything is written to the TexaCore folder
+          const major = await pm.preflightBuffer(fileData, { passphrase });
+          if (major !== null && major < 17) throw BackupManager.legacyFileError(major);
         } catch (probeErr) {
-          if (probeErr && /^TCDB_/.test(String(probeErr.code))) {
+          if (probeErr && (/^TCDB_/.test(String(probeErr.code)) || probeErr.code === 'LEGACY_TCDB')) {
             res.writeHead(fileErrorStatus(probeErr.code), { 'Content-Type': 'application/json' });
             res.end(JSON.stringify({ success: false, code: probeErr.code, error: probeErr.message }));
             return;

@@ -634,11 +634,22 @@ class BackupManager {
     return e;
   }
 
-  /** Read + decrypt + decompress just far enough to learn which PostgreSQL wrote the file (nothing is executed). */
+  /**
+   * Read + decrypt + decompress just far enough to learn which PostgreSQL wrote the file (nothing is executed).
+   * 2.0.4: a file written by 17 or later (the only kind that can be opened) is also read for commands TexaCore never writes (sql-guard.js) - TCDB_UNSAFE_SQL - so a
+   * refusal comes BEFORE the manager is re-pointed at the file or anything is written. A 1.x file just reports its major (the caller refuses it with the 1.x text).
+   */
   async peekDumpMajor(filePath, { passphrase = '' } = {}) {
-    const parsed = this._parseTcdbFile(fs.readFileSync(filePath));
+    return this.preflightBuffer(fs.readFileSync(filePath), { passphrase });
+  }
+
+  /** peekDumpMajor() for bytes already in memory (an upload, before it is written to disk). */
+  async preflightBuffer(buffer, { passphrase = '' } = {}) {
+    const parsed = this._parseTcdbFile(buffer);
     const sql = await this._decompress(this._decryptParsed(parsed, passphrase).data);
-    return BackupManager.dumpedFromMajor(sql.subarray(0, 4000).toString('utf8'));
+    const major = BackupManager.dumpedFromMajor(sql.subarray(0, 4000).toString('utf8'));
+    if (major === null || major >= 17) sqlGuard.assertSafeDump(sql);
+    return major;
   }
 
   /**
@@ -727,11 +738,6 @@ class BackupManager {
       this.onProgress('decompress', 'فك ضغط البيانات...');
       const sql = await this._decompress(compressed);
 
-      // 2.0.4 (security S3): the default key of a company file is public, so the dump may have been written by anyone. Before ANYTHING is touched it is read the way psql
-      // reads it: a psql meta-command (\! shell, \copy … program, \i, \o, \gexec …), COPY … PROGRAM, ALTER SYSTEM, an unshipped extension or language, file /
-      // large-object functions, role changes … refuse the file (TCDB_UNSAFE_SQL). The refusal changes nothing: no truncate, no restore.
-      sqlGuard.assertSafeDump(sql);
-
       // Step 5: Execute SQL via psql.
       // Replace-not-merge: clear the existing public data BEFORE loading the
       // snapshot. The dump has no --clean, and COPY into a populated table fails
@@ -748,6 +754,12 @@ class BackupManager {
       // truncated what 2.0 held. The file itself is untouched; nothing is written to the database.
       const dumpedFrom = BackupManager.dumpedFromMajor(sqlStr);
       if (dumpedFrom !== null && dumpedFrom < 17) throw BackupManager.legacyFileError(dumpedFrom);
+
+      // 2.0.4 (security S3): the default key of a company file is public, so the dump may have been written by anyone. Before ANYTHING is touched it is read the way psql
+      // reads it: a psql meta-command (\! shell, \copy … program, \i, \o, \gexec …), COPY … PROGRAM, ALTER SYSTEM, an unshipped extension or language, file /
+      // large-object functions, role changes … refuse the file (TCDB_UNSAFE_SQL). The refusal changes nothing: no truncate, no restore. (After the 1.x check: a 1.x file
+      // keeps its own, clearer refusal.)
+      sqlGuard.assertSafeDump(sql);
 
       this.onProgress('restore', 'تهيئة الاستبدال...');
       await this._truncatePublic(this._extractCopyTables(sqlStr));
