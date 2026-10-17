@@ -23,11 +23,14 @@ test('baseline/MIGRATIONS_PIN.json exists, is valid and tied to the PINNED basel
   assert.equal(pin.baselineSha256, pinSha);
 });
 
-test('2.0.3 ships the 16 migrations production received after the 2026-10-13T13:21Z cut that matter locally, in PRODUCTION\'s apply order (s and t before r and u; v; then x, 20270211a, y - NOT alphabetical: y was applied after 11a); 20270210l is production-only data and is NOT shipped', () => {
-  assert.deepEqual(pin.migrations.map((x) => x.name.replace(/^2027021[01]([a-z]).*/, '$1')), ['i', 'j', 'k', 'q', 'm', 'n', 'o', 'p', 's', 't', 'r', 'u', 'v', 'x', 'a', 'y']);
-  assert.deepEqual(pin.migrations.map((x) => x.name.slice(0, 9)), ['20270210i', '20270210j', '20270210k', '20270210q', '20270210m', '20270210n', '20270210o', '20270210p', '20270210s', '20270210t', '20270210r', '20270210u', '20270210v', '20270210x', '20270211a', '20270210y']);
-  assert.deepEqual(pin.migrations.map((x) => x.order), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+test('2.0.4 ships the 19 migrations production received after the 2026-10-13T13:21Z cut that matter locally, in PRODUCTION\'s apply order (s and t before r and u; v; then x, 20270211a, y - NOT alphabetical: y was applied after 11a - and finally 20270211b, c, d of 16-10); 20270210l is production-only data and is NOT shipped', () => {
+  assert.deepEqual(pin.migrations.map((x) => x.name.replace(/^2027021[01]([a-z]).*/, '$1')), ['i', 'j', 'k', 'q', 'm', 'n', 'o', 'p', 's', 't', 'r', 'u', 'v', 'x', 'a', 'y', 'b', 'c', 'd']);
+  assert.deepEqual(pin.migrations.slice(0, 16).map((x) => x.name.slice(0, 9)), ['20270210i', '20270210j', '20270210k', '20270210q', '20270210m', '20270210n', '20270210o', '20270210p', '20270210s', '20270210t', '20270210r', '20270210u', '20270210v', '20270210x', '20270211a', '20270210y']);
+  assert.deepEqual(pin.migrations.slice(16).map((x) => x.name), ['20270211b_campaign_trial_links', '20270211c_mfg_round2_guards', '20270211d_mfg_round3_quality_costing']);
+  assert.deepEqual(pin.migrations.map((x) => x.order), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
   assert.ok(!pin.migrations.some((x) => /20270210l/.test(x.name)));
+  // the first 16 are exactly what 2.0.3 shipped (same names, same sha256): the upgrade from 2.0.3 applies ONLY b, c, d
+  assert.equal(require('crypto').createHash('sha256').update(JSON.stringify(pin.migrations.slice(0, 16).map((x) => [x.name, x.sha256]))).digest('hex'), 'f7ba5616c9674ef39d91c1b232396731293cdf07da459304e7985980c6b106d3', 'the first 16 entries (name + sha256) are byte-for-byte what 2.0.3 pinned');
 });
 
 test('the pin holds names, order, sha256 and sizes ONLY: no SQL, no tenant id, no function body (the repo is public)', () => {
@@ -108,7 +111,7 @@ test('the measured inventory delta (baseline/migrations.inventory.json, private)
   assert.deepEqual(r.problems, []);
   assert.ok(r.inventory.catalogDelta && r.inventory.functions);
   assert.ok(Object.keys(r.inventory.functions).length > 50);
-  assert.equal(r.inventory.catalogDelta.tables, 1, 'the only new table is the runner\'s own bookkeeping table');
+  assert.equal(r.inventory.catalogDelta.tables, 3, 'the runner\'s own bookkeeping table + the two tables 20270211b / 20270211c add');
   for (const sig of Object.keys(r.inventory.functions)) assert.match(sig, /^public\.[a-z_0-9]+\(.*\)$/, sig);
 });
 
