@@ -211,6 +211,8 @@ function safeUploadName(name, { ext = null, maxLen = 120 } = {}) {
  * (2.0.4, security S5) Does this request carry a same-origin signal? A browser loading its own page's script says Sec-Fetch-Site: same-origin (or none for a
  * typed address); a browser too old for Fetch Metadata sends the page's URL as Referer. A bare client (curl, another program) sends neither and is NOT same-origin:
  * "no header" proves nothing. `headers` = req.headers (lower-cased names), `host` = the Host the request was made to.
+ * LIMIT (review F2): the answer is only as good as the sender. A browser cannot be made to forge Sec-Fetch-Site, so a cross-origin page is refused for certain; a native program
+ * can send any header it likes, so this keeps out naive clients, not a hostile program of the same user (which can read the same user's secrets.json anyway).
  */
 function hasSameOriginSignal(headers, host) {
   const site = String((headers && headers['sec-fetch-site']) || '');

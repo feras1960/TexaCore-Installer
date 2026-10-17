@@ -152,7 +152,7 @@ test('prepareDump: the file author\'s own \\restrict / \\unrestrict lines are go
 // ── psql itself, on a throw-away cluster made with the bundled binaries (macOS arm64 development machines only) ──
 const PG = path.join(__dirname, '..', 'bin', 'macos-arm64', 'pg', 'bin');
 const haveBundledPg = process.platform === 'darwin' && process.arch === 'arm64' && fs.existsSync(path.join(PG, 'initdb')) && fs.existsSync(path.join(PG, 'psql'));
-test('end to end with the bundled psql 17.6: a crafted dump cannot run a command - the guard refuses it AND psql\'s own restricted mode would; a good dump loads through the program\'s wrapper', { skip: !haveBundledPg && 'needs the bundled macOS PostgreSQL', timeout: 120000 }, async () => {
+test('end to end with the bundled psql 17.6: a crafted dump with a meta-command does not run it - the guard refuses it AND psql\'s own restricted mode would; a good dump loads through the program\'s wrapper', { skip: !haveBundledPg && 'needs the bundled macOS PostgreSQL', timeout: 120000 }, async () => {
   const { execFileSync, spawn } = require('child_process');
   const { mkdtemp } = require('./helpers');
   const dir = mkdtemp('tcx-sqlg-');
@@ -232,17 +232,28 @@ test('BackupManager.restore refuses a crafted .tcdb with TCDB_UNSAFE_SQL: no tru
   assert.equal(truncated, 0);
 });
 
-test('the wiring: the guard sits between decompress and the first destructive step; every psql the restore starts reads no ~/.psqlrc (-X); the program\'s files are wrapped in psql\'s restricted mode', () => {
+test('the wiring: the guard sits between decompress and the first destructive step; the restore runs ONLY the data-only script it built (F1); every psql the restore starts reads no ~/.psqlrc (-X); the program\'s files are wrapped in psql\'s restricted mode', () => {
   const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'backup-manager.js'), 'utf8');
   const rf = src.indexOf('async _restoreFile(');
   const decompress = src.indexOf('const sql = await this._decompress(compressed);', rf);
   const legacy = src.indexOf('throw BackupManager.legacyFileError(dumpedFrom);', rf);
   const guard = src.indexOf('sqlGuard.assertSafeDump(sql);', rf);
-  const truncate = src.indexOf('await this._truncatePublic(this._extractCopyTables(sqlStr));', rf);
-  assert.ok(decompress > rf && legacy > decompress && guard > legacy && truncate > guard, 'decompress → 1.x check (its own clearer refusal) → guard → truncate');
+  const plan = src.indexOf('const plan = sqlGuard.planDataRestore(sql);', rf);
+  const live = src.indexOf('const live = await this._liveTables();', rf);
+  const render = src.indexOf('const data = sqlGuard.renderDataScript(plan, { known: live,', rf);
+  const truncate = src.indexOf('await this._truncatePublic(data.tables);', rf);
+  const exec = src.indexOf('await this._executeSql(data.script);', rf);
+  const auth = src.indexOf('await this._restoreAuthData(data.auth);', rf);
+  assert.ok(decompress > rf && legacy > decompress && guard > legacy && plan > guard && live > plan && render > live && truncate > render && exec > truncate && auth > exec,
+    'decompress → 1.x check (its own clearer refusal) → guard → plan → live tables → render → truncate → data script → logins');
+  // the file's own text reaches psql nowhere else: no call hands `sql` / `sqlStr` to a psql-running method
+  assert.doesNotMatch(src, /_executeSql\((?:sql|sqlStr|sqlBuffer)\)/);
+  assert.doesNotMatch(src, /_restoreAuthData\((?:sql|sqlStr)\)/);
+  assert.doesNotMatch(src, /_extractCopy(?:Tables|Block)/, 'the regex-based extractors are gone');
   assert.equal((src.match(/'-X'/g) || []).length, 4, 'restore, scalar query, truncate, auth: all -X');
-  assert.match(src, /sqlGuard\.prepareDump\(sqlBuffer, \{ before: "SET session_replication_role = 'replica';\\n"/);
-  assert.match(src, /sqlGuard\.prepareDump\(sqlText\)/);
+  assert.match(src, /sqlGuard\.prepareDump\(script, \{ strip: false \}\)/);
+  assert.match(src, /sqlGuard\.prepareDump\(sqlText, \{ strip: false \}\)/);
+  assert.match(src, /before: "SET session_replication_role = 'replica';\\n"/);
   const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   assert.match(main, /TCDB_UNSAFE_SQL: 422/);
 });

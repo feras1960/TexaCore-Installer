@@ -121,6 +121,7 @@ test('restore() asks for the phrase up front: nothing is executed without it (th
   const dir = mkdtemp();
   const m = mgr(dir);
   const out = await m.exportTo(path.join(dir, 'r.tcdb'), { passphrase: 'correct horse' });
+  m._liveTables = async () => new Set(['public.companies', 'public.a']);   // (2.0.4: the restore asks the database which tables it has - the file's DDL is never run)
   m._executeSql = async () => { throw new Error('psql must not run'); };
   m._truncatePublic = async () => { throw new Error('truncate must not run'); };
   await assert.rejects(m.restore(out.path), (e) => e.code === 'TCDB_PASSPHRASE_REQUIRED');

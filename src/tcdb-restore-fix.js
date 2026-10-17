@@ -63,9 +63,11 @@ async function main() {
   if (!fs.existsSync(tmpDir)) fs.mkdirSync(tmpDir, { recursive: true });
   const tmpFile = path.join(tmpDir, 'restore_temp.sql');
   
-  // Wrap with FK constraint disable (and psql's restricted mode); a file with commands TexaCore never writes is refused here too
+  // A file with commands TexaCore never writes is refused here too; and (2.0.4, F1) only the file's DATA is run - the COPY blocks and the sequence values, in a script built
+  // here (the database already has its schema), with the foreign keys off and psql's restricted mode around it. None of the file's functions / triggers is ever created.
   sqlGuard.assertSafeDump(sql);
-  fs.writeFileSync(tmpFile, sqlGuard.prepareDump(sql, { before: "SET session_replication_role = 'replica';\n", after: "\nSET session_replication_role = 'origin';\n" }));
+  const data = sqlGuard.renderDataScript(sqlGuard.planDataRestore(sql), { known: null, before: "SET session_replication_role = 'replica';\n", after: "\nSET session_replication_role = 'origin';\n" });
+  fs.writeFileSync(tmpFile, sqlGuard.prepareDump(data.script, { strip: false }));
   
   try {
     execFileSync(path.join(PG_BIN, 'psql'), [

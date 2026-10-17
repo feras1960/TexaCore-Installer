@@ -1,22 +1,21 @@
 'use strict';
 // ════════════════════════════════════════════════════════════════
-// sql-guard — nothing a company file carries may run a command on the user's computer (2.0.4, security finding S3).
+// sql-guard - what a company file may make the program's database do (2.0.4, security findings S3 and F1).
 //
-// A .tcdb is a (decrypted, decompressed) pg_dump that the program feeds to `psql -f` as the database superuser. The default encryption key of a company
-// file is public (this repository is), so a file made by someone else can carry anything. Two ways a plain-SQL script runs programs on the machine:
-//   1. psql META-COMMANDS - a backslash outside a quoted string: `\! cmd` (a shell), `\o |cmd`, `\copy … to program`, `\i`, `\gexec`, `\set`…  They can
-//      follow SQL on the same line (`SELECT 1 \! touch x`) and come right after a COPY data block (`\.` ends the data, the next line is a command again).
-//   2. SQL the superuser may run - COPY … FROM/TO PROGRAM '…', COPY from/to a server file, ALTER SYSTEM, CREATE EXTENSION of something that was not shipped,
-//      untrusted procedural languages, foreign servers / dblink, the file and large-object functions, replication / role changes…
-//
-// What this module does (before anything touches the database; a refusal changes nothing):
-//   • lexes the dump the way psql does - single-quoted, E'' (backslash escapes), dollar-quoted, "identifiers", -- and nested /* */ comments - and finds every
-//     backslash that is OUTSIDE them (a backslash inside a string, as in the regex patterns of function bodies, is just data);
-//   • follows `COPY … FROM stdin;` data blocks exactly (the data ends at a line that is exactly `\.`; a line that merely STARTS with `\.` is refused as ambiguous);
-//   • refuses the statement kinds above, and the settings that change how the lexer must read the text (standard_conforming_strings, client_encoding);
-//   • removes the dump's own `\restrict` / `\unrestrict` lines (pg_dump 17.6+ writes them; the key inside is the FILE AUTHOR's, so it protects nothing) and wraps
-//     the script in the program's own random pair - psql's restricted mode then refuses every other meta-command even if one slipped through.
-// Findings carry the line number and the kind only - never the text. Pure, no dependencies; the restore calls assertSafeDump()/prepareDump() before it truncates.
+// A .tcdb is a (decrypted, decompressed) pg_dump. The default encryption key of a company file is public (this repository is), so a file made by someone else can
+// carry anything, and the program used to feed it to `psql -f` as the database superuser. Three layers now stand between a file and the machine:
+//   1. THE SCAN (this file's lexer + statement allowlist): a psql META-COMMAND (`\! cmd`, `\copy … program`, `\i`, `\o`, `\gexec` … - a backslash outside a quoted
+//      string, also right after a COPY data block), COPY … PROGRAM / to a file, ALTER SYSTEM, an unshipped extension or language, file / large-object functions,
+//      role changes … refuse the file (TCDB_UNSAFE_SQL) before anything is touched. The meta-command class is closed twice: by this lexer and by psql's own
+//      restricted mode (`\restrict <random key> … \unrestrict`, the program's key, the file author's pair is dropped).
+//      WHAT THE SCAN CANNOT DO: tell a harmless function body from a harmful one. A real file legitimately carries thousands of functions (most of them
+//      SECURITY DEFINER) and triggers, and a statement built from pieces inside such a body ('COPY x TO PROG'||'RAM') is invisible to any word scan.
+//   2. DATA-ONLY RESTORE (planDataRestore / renderDataScript, below): the restore does not run the file's DDL at all. It takes the COPY data of the tables the
+//      database already has and the sequence values, nothing else, and psql is given a script BUILT by the program. No function, trigger, view or policy of
+//      a file ever exists in the database, so no file-supplied code runs - not during the restore and not later.
+//   3. psql's restricted mode around that script (defence in depth for layer 2).
+// What remains open is NOT in this file: data that a SHIPPED function later mistrusts too little (an ordinary bug class, as for any data), and the superuser
+// the restore runs as (a non-superuser restore is planned). Findings carry the line number and the kind only - never the text. Pure, no dependencies.
 // ════════════════════════════════════════════════════════════════
 const crypto = require('crypto');
 
@@ -38,6 +37,7 @@ const KIND_TEXT = {
   'setting': 'a setting that changes how the script is read or what it may do',
   'unterminated': 'a string, comment or statement that never ends',
   'restrict-misplaced': 'a \\restrict / \\unrestrict line with an unexpected key',
+  'trigger-state': 'ALTER TABLE … ENABLE / DISABLE ALWAYS | REPLICA TRIGGER (a trigger that fires even while a file is being loaded)',
 };
 
 /** Extensions the program's database ships and its dumps may name. Anything else is refused. */
@@ -81,6 +81,8 @@ function lex(text) {
   let started = false;
   let atLineStart = true;
   let pendingCopy = false;   // a `COPY … FROM stdin;` ended on this line: its data starts on the NEXT line (the rest of THIS line is still script)
+  let pendingCopyStmt = -1;  // the index (in `statements`) of that COPY statement
+  const copies = [];         // [{ stmt, start, end, line }]: the data of each COPY block is text.slice(start, end) (whole lines; `end` = where the `\.` line starts)
 
   const begin = () => { if (!started) { started = true; stmtLine = line; } };
   const flush = (withSemicolon) => {
@@ -89,21 +91,23 @@ function lex(text) {
   };
 
   /** `p` = the index just after the newline that ends the COPY line. Returns the index after the line that is exactly `\.` (the end of the data). */
+  let lastDataEnd = -1;
   const readCopyData = (p) => {
     let curLine = line;
     while (p <= n) {
-      if (p >= n) { add('copy-unterminated', curLine); line = curLine; return n; }
+      if (p >= n) { add('copy-unterminated', curLine); line = curLine; lastDataEnd = -1; return n; }
       let e = text.indexOf('\n', p);
       if (e === -1) e = n;
       let l = text.slice(p, e);
       if (l.endsWith('\r')) l = l.slice(0, -1);
-      if (l === '\\.') { line = curLine + 1; return e >= n ? n : e + 1; }
+      if (l === '\\.') { lastDataEnd = p; line = curLine + 1; return e >= n ? n : e + 1; }
       if (l.startsWith('\\.')) add('copy-ambiguous-end', curLine);
-      if (e >= n) { add('copy-unterminated', curLine); line = curLine; return n; }
+      if (e >= n) { add('copy-unterminated', curLine); line = curLine; lastDataEnd = -1; return n; }
       p = e + 1; curLine += 1;
     }
     add('copy-unterminated', curLine);
     line = curLine;
+    lastDataEnd = -1;
     return n;
   };
 
@@ -112,7 +116,12 @@ function lex(text) {
     const c2 = text[i + 1];
     if (c === '\n') {
       line++; raw += c; code += c; i++;
-      if (pendingCopy) { pendingCopy = false; copyBlocks++; i = readCopyData(i); }
+      if (pendingCopy) {
+        pendingCopy = false; copyBlocks++;
+        const dataStart = i; const dataLine = line;
+        i = readCopyData(i);
+        if (lastDataEnd >= 0) copies.push({ stmt: pendingCopyStmt, start: dataStart, end: lastDataEnd, line: dataLine });
+      }
       atLineStart = true;
       continue;
     }
@@ -187,14 +196,14 @@ function lex(text) {
       raw += c; code += c; i++;
       const head = code.trim().toLowerCase().replace(/\s+/g, ' ');
       flush(true);
-      if (/^copy\b/.test(head) && /\bfrom stdin\b/.test(head) && !/\bprogram\b/.test(head)) pendingCopy = true;
+      if (/^copy\b/.test(head) && /\bfrom stdin\b/.test(head) && !/\bprogram\b/.test(head)) { pendingCopy = true; pendingCopyStmt = statements.length - 1; }
       continue;
     }
     raw += c; code += c.toLowerCase(); i++;
   }
   if (started && code.trim()) flush(false);   // a statement without its final ';' - psql runs it at the end of the file
   if (pendingCopy) add('copy-unterminated', line);
-  return { statements, findings, copyBlocks };
+  return { statements, findings, copyBlocks, copies };
 }
 
 // What a TexaCore dump (pg_dump --schema=public --schema=auth --no-owner --no-acl, plain) is made of. Any other statement is refused: a DO block, a plain
@@ -233,6 +242,9 @@ function checkStatement(st) {
   // COPY … PROGRAM written inside a function / trigger body or a string (it would run later, as the database superuser)
   if (/\bcopy\b[^;]*\bprogram\b/i.test(raw) && !/^copy\b/.test(code)) add('copy-program');
   if (/^alter system\b/.test(code)) add('alter-system');
+  // 2.0.4 (F1): a trigger set ALWAYS / REPLICA fires during the restore even under session_replication_role = replica. No real dump says that (measured on the real files: none),
+  // and the restore no longer runs a file's DDL anyway (planDataRestore) - refusing it is the second lock on the same door.
+  if (/^alter table\b/.test(code) && /\b(?:enable|disable) (?:always|replica) (?:trigger|rule)\b/.test(code)) add('trigger-state');
   if (/^create (?:or replace )?(?:trusted )?(?:procedural )?language\b/.test(code)) add('language');
   if (/^create (?:or replace )?(?:function|procedure)\b/.test(code) || /^do\b/.test(code)) {
     // the LANGUAGE clause of a function (after its signature) / of a DO block
@@ -296,11 +308,139 @@ function assertSafeDump(input) {
  * The script to give psql for a dump that passed assertSafeDump(): the dump's own \restrict / \unrestrict lines are removed (their key is the file author's) and
  * the program's own random pair wraps everything. `before` / `after` (statements of the program's own) go inside the wrap.
  */
-function prepareDump(input, { before = '', after = '', key = crypto.randomBytes(24).toString('hex') } = {}) {
+function prepareDump(input, { before = '', after = '', key = crypto.randomBytes(24).toString('hex'), strip = true } = {}) {
   // byte for byte: the dump is read as latin1 (one char per byte) so no byte of it is ever re-encoded; only whole lines of the two \restrict kinds are dropped
+  // (strip:false = not even those: the script is the program's own, built by renderDataScript(), and its COPY data is passed on exactly as it came)
   const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input), 'utf8');
-  const body = buf.toString('latin1').split('\n').filter((l) => !/^\\(restrict|unrestrict) [A-Za-z0-9]{8,200}\r?$/.test(l)).join('\n');
+  const body = strip ? buf.toString('latin1').split('\n').filter((l) => !/^\\(restrict|unrestrict) [A-Za-z0-9]{8,200}\r?$/.test(l)).join('\n') : buf.toString('latin1');
   return Buffer.concat([Buffer.from(`\\restrict ${key}\n${before}`, 'latin1'), Buffer.from(body, 'latin1'), Buffer.from(`${after}\n\\unrestrict ${key}\n`, 'latin1')]);
 }
 
-module.exports = { scanDump, assertSafeDump, prepareDump, lex, checkStatement, KIND_TEXT, SAFE_EXTENSIONS };
+
+// ════════════════════════════════════════════════════════════════
+// DATA-ONLY RESTORE (2.0.4, security finding F1)
+//
+// The guard above refuses what a dump should never say. What it cannot refuse is what a dump LEGITIMATELY says: a real company file carries the whole schema -
+// measured on the real files: ~2,280 functions (~1,910 of them SECURITY DEFINER), ~1,300 triggers, one constraint trigger, policies, views - and psql runs it as the
+// database superuser. A file written by someone else could therefore add a trigger function (it runs when the app next touches that table) or replace a shipped
+// SECURITY DEFINER function with its own (it runs as the superuser the next time the program calls it) and no word scan can tell that from the real thing.
+//
+// So nothing of that is run any more. A company file is DATA: the program's own database already has its schema (the baseline and the migrations the program
+// ships), the restore takes from the file only
+//   • the COPY data of the tables the database already has (public.*, and auth.users / auth.identities for the logins), and
+//   • the sequence values (`SELECT pg_catalog.setval('public.x_seq', n, true)`, literals only),
+// and every other statement - CREATE FUNCTION / TRIGGER / VIEW / POLICY / TABLE / INDEX, ALTER, GRANT, COMMENT, SET … - is skipped. The script psql gets is BUILT here:
+// each COPY header is rebuilt from the table and column names it was parsed into (no byte of the file's own header text reaches psql), the data lines follow
+// unchanged up to the `\.` line, and the program's own settings come first. No function, trigger, view or policy of the file ever exists in the database, and
+// nothing of the file but data is executed. (Side effect for the better: an older file no longer REPLACES the shipped functions with its own, older bodies.)
+// ════════════════════════════════════════════════════════════════
+const IDENT_SRC = '(?:[A-Za-z_\\x80-\\xff][A-Za-z0-9_$\\x80-\\xff]*|"[^"]+")';   // an unquoted identifier, or a double-quoted one without an embedded quote
+const sticky = (src) => new RegExp(src, 'y');
+const IDENT_RE = sticky(IDENT_SRC);
+
+/** `COPY [schema.]table [(col, …)] FROM stdin;` -> { schemaTok, tableTok, columnToks } (the identifier tokens exactly as written), or null for any other shape. */
+function parseCopyHeader(raw) {
+  const s = String(raw);
+  let p = 0;
+  const ws = () => { while (p < s.length && ' \t\r\n'.includes(s[p])) p++; };
+  const word = (w) => {
+    ws();
+    if (s.slice(p, p + w.length).toLowerCase() !== w) return false;
+    if (/[A-Za-z0-9_$\x80-\xff]/.test(s[p + w.length] || ' ')) return false;
+    p += w.length; return true;
+  };
+  const ident = () => { ws(); IDENT_RE.lastIndex = p; const m = IDENT_RE.exec(s); if (!m) return null; p += m[0].length; return m[0]; };
+  const ch = (c) => { ws(); if (s[p] !== c) return false; p++; return true; };
+  if (!word('copy')) return null;
+  let schemaTok = null; let tableTok = ident();
+  if (!tableTok) return null;
+  if (ch('.')) { schemaTok = tableTok; tableTok = ident(); if (!tableTok) return null; }
+  let columnToks = null;
+  if (ch('(')) {
+    columnToks = [];
+    for (;;) {
+      const c = ident(); if (!c) return null;
+      columnToks.push(c);
+      if (ch(',')) continue;
+      if (ch(')')) break;
+      return null;
+    }
+  }
+  if (!word('from') || !word('stdin')) return null;
+  ch(';'); ws();
+  if (p !== s.length) return null;
+  return { schemaTok, tableTok, columnToks };
+}
+
+/** The name an identifier token stands for (unquoted = folded to lower case, quoted = as written), as text (the bytes of the file are latin1 chars here: decode as UTF-8). */
+function identName(tok) {
+  const t = tok.startsWith('"') ? tok.slice(1, -1) : tok.toLowerCase();
+  return Buffer.from(t, 'latin1').toString('utf8');
+}
+
+/**
+ * Read a dump as DATA. Never throws on content. Returns
+ *   { blocks: [{ schema, table, qualified, copyLine, columns, start, end, line }], setvals: [text], ignored: { total, kinds: { 'create function': n, … } }, bytes }
+ * `start`/`end` are BYTE offsets of the block's data lines in the input. Run assertSafeDump() first; this only decides what is taken.
+ */
+function planDataRestore(input) {
+  const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input), 'utf8');
+  const text = buf.toString('latin1');                 // one char per byte: every offset below is a byte offset
+  const { statements, copies } = lex(text);
+  const copyOf = new Map(copies.map((c) => [c.stmt, c]));
+  const blocks = []; const setvals = []; const kinds = {}; let ignoredTotal = 0;
+  const skip = (code) => {
+    ignoredTotal++;
+    const k = code.replace(/\s+/g, ' ').trim().toLowerCase().split(' ').slice(0, 2).join(' ').slice(0, 40) || '(empty)';
+    kinds[k] = (kinds[k] || 0) + 1;
+  };
+  statements.forEach((st, idx) => {
+    const code = st.code;
+    if (/^\s*copy\b/i.test(code)) {
+      const data = copyOf.get(idx);
+      const h = data ? parseCopyHeader(st.raw.trim()) : null;
+      if (!h) { skip('copy (not a plain COPY … FROM stdin)'); return; }
+      const schemaTok = h.schemaTok || 'public';
+      const copyLine = `COPY ${schemaTok}.${h.tableTok}${h.columnToks ? ` (${h.columnToks.join(', ')})` : ''} FROM stdin;\n`;
+      blocks.push({ schema: identName(schemaTok), table: identName(h.tableTok), qualified: `${identName(schemaTok)}.${identName(h.tableTok)}`, truncateName: `${schemaTok}.${h.tableTok}`, copyLine, columns: h.columnToks ? h.columnToks.map(identName) : null, start: data.start, end: data.end, line: data.line });
+      return;
+    }
+    const rawN = st.raw.replace(/\s+/g, ' ').trim().toLowerCase();
+    const sv = /^select pg_catalog\.setval\('((?:public|auth)\.[a-z0-9_]+)'(?:::regclass)?, (-?\d{1,19}), (true|false)\) ?;?$/.exec(rawN);
+    if (sv) { setvals.push(`SELECT pg_catalog.setval('${sv[1]}', ${sv[2]}, ${sv[3]});\n`); return; }
+    skip(code);
+  });
+  return { blocks, setvals, ignored: { total: ignoredTotal, kinds }, bytes: buf };
+}
+
+/**
+ * The script for psql, built from a plan. `known` = a Set of 'schema.table' names the database already has (null = take every public table).
+ * Takes public.* tables that exist, the sequence values, and (separately, for the login step) auth.users / auth.identities.
+ * Returns { script: Buffer, tables: [truncate names], auth: { users: Buffer|null, identities: Buffer|null }, skipped: [{ table, why }], loaded: n }
+ */
+function renderDataScript(plan, { known = null, before = '', after = '' } = {}) {
+  const buf = plan.bytes;
+  const parts = [];
+  const tables = []; const skipped = []; const seen = new Set();
+  const auth = { users: null, identities: null };
+  const piece = (b) => Buffer.concat([Buffer.from(b.copyLine, 'latin1'), buf.subarray(b.start, b.end), Buffer.from('\\.\n', 'latin1')]);
+  let loaded = 0;
+  for (const b of plan.blocks) {
+    if (b.schema === 'auth' && (b.table === 'users' || b.table === 'identities')) {
+      if (!auth[b.table] && (!known || known.has(b.qualified))) auth[b.table] = piece(b);   // the first block of each, like the previous restore
+      continue;
+    }
+    if (b.schema === 'auth') { skipped.push({ table: b.qualified, why: 'auth-other' }); continue; }   // GoTrue's own bookkeeping (sessions, tokens, audit log, its migrations): never carried between installs
+    if (b.schema !== 'public') { skipped.push({ table: b.qualified, why: 'schema' }); continue; }
+    if (known && !known.has(b.qualified)) { skipped.push({ table: b.qualified, why: 'unknown-table' }); continue; }
+    parts.push(piece(b)); tables.push(b.truncateName); loaded++; seen.add(b.qualified);
+  }
+  const seq = plan.setvals.map((t) => Buffer.from(t, 'latin1'));
+  const head = Buffer.from(
+    // what the dump's own first lines used to set, now the program's: UTF-8 data, no time limits on a long COPY, replica role (foreign keys / user triggers off, as before)
+    `SET client_encoding = 'UTF8';\nSET standard_conforming_strings = on;\nSET statement_timeout = 0;\nSET lock_timeout = 0;\nSET idle_in_transaction_session_timeout = 0;\n${before}`, 'latin1');
+  const script = Buffer.concat([head, ...parts, ...seq.map((x) => x), Buffer.from(`${after}`, 'latin1')]);
+  return { script, tables, auth, skipped, loaded };
+}
+
+module.exports = { scanDump, assertSafeDump, prepareDump, planDataRestore, renderDataScript, parseCopyHeader, lex, checkStatement, KIND_TEXT, SAFE_EXTENSIONS };

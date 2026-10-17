@@ -1327,6 +1327,9 @@ class ServiceManager {
         const origin = String(req.headers['origin'] || '');
         // 2.0.4 (security S5): "no Sec-Fetch-Site and no Origin" used to count as same-origin, so ANY loopback client without those headers (another program, another
         // user's `curl`, an old tool) was handed the admin secret. A same-origin signal is now required (net-guard.hasSameOriginSignal).
+        // WHAT THIS IS, honestly: it stops naive loopback clients and EVERY cross-origin web page (a browser sets Sec-Fetch-Site itself and a page cannot forge it). It is not a
+        // boundary against a native program on the same machine: that can send the same headers (`Sec-Fetch-Site: none`, a Referer) - and could read secrets.json (0600, the same
+        // user's file) directly anyway. The browser is the boundary that can be enforced here, and it is.
         const sameOrigin = netGuard.hasSameOriginSignal(req.headers, host);
         const adminBits = (isLocal && sameOrigin)
           ? `

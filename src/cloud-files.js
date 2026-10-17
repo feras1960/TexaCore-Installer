@@ -43,10 +43,26 @@ function windowsAttribOffline(output) {
   return m[1].split(/\s+/).filter(Boolean).includes('O');
 }
 
+// 2.0.4 (review F3): attrib and cmd.exe have no `--` end-of-options marker. What stands in for it on Windows: only an absolute drive path (C:\…) or UNC path (\\server\…) is ever
+// passed - it can never start with "/" or "-" and so can never be read as a switch.
+const WIN_ABSOLUTE = /^(?:[A-Za-z]:\\|\\\\)/;
+
 function winAttrib(filePath, { execFile = childProcess.execFile, timeoutMs = STAT_TIMEOUT_MS } = {}) {
   return new Promise((resolve) => {
+    if (!WIN_ABSOLUTE.test(String(filePath))) return resolve(null);
     try { execFile('attrib', [filePath], { timeout: timeoutMs, windowsHide: true }, (err, stdout) => resolve(err ? null : String(stdout || ''))); } catch { resolve(null); }
   });
+}
+
+/**
+ * Can this path be handed to `cmd.exe /c copy` as ONE argument? cmd.exe (unlike a program started directly) re-reads its command line: an "&" in a path that Node does not quote
+ * (a path without a space) would start a second command. No whitespace = no quotes from Node, so "&", "^" and "%" are refused then; a path with whitespace is quoted by Node.
+ */
+function windowsCopyPathOk(filePath) {
+  const p = String(filePath);
+  if (!WIN_ABSOLUTE.test(p)) return false;
+  if (/[\x00-\x1f"<>|]/.test(p)) return false;
+  return /\s/.test(p) || !/[&^%]/.test(p);
 }
 
 /**
@@ -70,12 +86,13 @@ async function cloudState(filePath, { platform = process.platform, st = null, ex
 
 /** Which command makes the system deliver the bytes of a placeholder, as { cmd, args } lists. */
 function materializeCommands(filePath, { platform = process.platform, icloud = false } = {}) {
+  // `--` ends the options (2.0.4, review F3): cat and brctl both honour it (tested on macOS), so a path can never be read as a flag. A Windows path that cmd.exe could not take as one argument gets no command (the caller reports UNSAFE_NAME).
   if (platform === 'darwin') {
-    const reader = { cmd: '/bin/cat', args: [filePath], role: 'read' };
-    return icloud ? [{ cmd: '/usr/bin/brctl', args: ['download', filePath], role: 'request' }, reader] : [reader];
+    const reader = { cmd: '/bin/cat', args: ['--', filePath], role: 'read' };
+    return icloud ? [{ cmd: '/usr/bin/brctl', args: ['download', '--', filePath], role: 'request' }, reader] : [reader];
   }
-  if (platform === 'win32') return [{ cmd: 'cmd.exe', args: ['/d', '/c', 'copy', '/b', filePath, 'NUL'], role: 'read' }];
-  return [{ cmd: '/bin/cat', args: [filePath], role: 'read' }];
+  if (platform === 'win32') return windowsCopyPathOk(filePath) ? [{ cmd: 'cmd.exe', args: ['/d', '/c', 'copy', '/b', filePath, 'NUL'], role: 'read' }] : [];
+  return [{ cmd: '/bin/cat', args: ['--', filePath], role: 'read' }];
 }
 
 /**
@@ -111,6 +128,7 @@ function startMaterialize(filePath, {
   };
 
   const cmds = materializeCommands(filePath, { platform, icloud });
+  if (!cmds.length) { finish('failed', 'UNSAFE_NAME'); return { snapshot, cancel: () => {}, done }; }
   let readers = 0;
   let readerDone = 0;
   for (const c of cmds) {

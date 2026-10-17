@@ -37,9 +37,32 @@ test('cloudState (Windows): the offline attribute O in attrib\'s output; Linux a
 test('materializeCommands: iCloud gets brctl + a reading child; any other provider just the read; Windows a binary copy to NUL', () => {
   const mac = cf.materializeCommands('/Users/a/Desktop/x.rsf', { platform: 'darwin', icloud: true });
   assert.deepEqual(mac.map((c) => [c.cmd, c.role]), [['/usr/bin/brctl', 'request'], ['/bin/cat', 'read']]);
-  assert.deepEqual(mac[0].args, ['download', '/Users/a/Desktop/x.rsf']);
+  assert.deepEqual(mac[0].args, ['download', '--', '/Users/a/Desktop/x.rsf'], '`--` ends the options: a path is never read as a flag (review F3)');
+  assert.deepEqual(mac[1].args, ['--', '/Users/a/Desktop/x.rsf']);
   assert.deepEqual(cf.materializeCommands('/p/x', { platform: 'darwin' }).map((c) => c.cmd), ['/bin/cat']);
   assert.deepEqual(cf.materializeCommands('C:\\x.rsf', { platform: 'win32' })[0].args, ['/d', '/c', 'copy', '/b', 'C:\\x.rsf', 'NUL']);
+  assert.deepEqual(cf.materializeCommands('/p/x', { platform: 'linux' })[0].args, ['--', '/p/x']);
+});
+
+test('Windows (review F3): attrib and cmd.exe have no `--`, so only an absolute drive / UNC path is ever passed, and cmd.exe never gets a path it would re-read as a second command', async () => {
+  const win = (p) => cf.materializeCommands(p, { platform: 'win32' });
+  assert.equal(win('C:\\Users\\a\\x.rsf').length, 1);
+  assert.equal(win('\\\\server\\share\\x.rsf').length, 1);
+  assert.equal(win('C:\\Smith & Sons\\x.rsf').length, 1, 'with a space Node quotes the argument: the "&" is literal');
+  assert.equal(win('C:\\a(2)\\x (2).rsf').length, 1, 'parentheses are ordinary');
+  for (const bad of ['-x.rsf', '/c', 'x.rsf', '..\\x.rsf', 'C:\\R&D\\x.rsf', 'C:\\100%\\x.rsf', 'C:\\a^b\\x.rsf', 'C:\\a"b\\x.rsf', 'C:\\a|b.rsf', 'C:\\a\nb.rsf']) assert.deepEqual(win(bad), [], `${JSON.stringify(bad)} gets no cmd.exe command`);
+  // the materialize job fails cleanly instead of running anything
+  const { spawn, kids } = fakeSpawn();
+  const m = cf.startMaterialize('C:\\R&D\\x.rsf', { size: 1000, platform: 'win32', spawn });
+  assert.deepEqual({ state: (await m.done).state, code: (await m.done).code }, { state: 'failed', code: 'UNSAFE_NAME' });
+  assert.equal(kids.length, 0, 'no process was started');
+  // attrib is only asked about an absolute path; anything else is judged local without running it
+  const ex = fakeExec('');
+  fakeExec.last = undefined;
+  assert.equal(await cf.cloudState('/c', { platform: 'win32', execFile: ex }), 'local');
+  assert.equal(fakeExec.last, undefined, 'attrib was not run for a path that could be read as a switch');
+  assert.equal(await cf.cloudState('C:\\a.rsf', { platform: 'win32', execFile: ex }), 'local');
+  assert.equal(fakeExec.last.cmd, 'attrib');
 });
 
 function fakeSpawn() {

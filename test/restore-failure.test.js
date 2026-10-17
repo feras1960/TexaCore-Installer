@@ -25,6 +25,7 @@ function mgr(dir, backupPath) {
   const m = new BackupManager({ pgBinDir: '/nonexistent', dbPassword: 'x', backupPath, encryptionKey: 'texacore-default-backup-key-2026', onProgress: () => {}, onError: () => {} });
   m.truncateRetryDelaysMs = [1];
   m._restoreAuthData = async () => {}; m._resetAuthSessions = async () => {}; m._queryScalar = async () => '1';
+  m._liveTables = async () => new Set(['public.companies']);   // 2.0.4: the restore loads only the tables the database already has (the file's DDL is never run)
   m._rotateDailySnapshot = () => {};
   return m;
 }

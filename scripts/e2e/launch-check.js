@@ -1579,7 +1579,7 @@ async function main() {
         return `denied: accessBlock {desktop,denied}, target error macos-permission, file untouched (answered in ${took} ms); allowed: the next sync wrote the file again`;
       });
 
-      await R.check('7.12 (2.0.4 security S3) a crafted company file can NOT run a command: a psql meta-command after the SET lines, a "COPY … PROGRAM", a DO block - each is refused 422 TCDB_UNSAFE_SQL BEFORE anything is touched (rows, live target, file), nothing runs (no marker file), no temp SQL is left', async () => {
+      await R.check('7.12 (2.0.4 security S3) a crafted company file with a psql meta-command / COPY PROGRAM / DO block is refused: a psql meta-command after the SET lines, a "COPY … PROGRAM", a DO block - each is refused 422 TCDB_UNSAFE_SQL BEFORE anything is touched (rows, live target, file), nothing runs (no marker file), no temp SQL is left', async () => {
         const BM = require('../../src/backup-manager');
         const real = await mk('crafted', 'Crafted Source.tcdb');
         const bm = new BM({ pgBinDir: '/x', encryptionKey: 'texacore-default-backup-key-2026', backupPath: real });
@@ -1627,6 +1627,68 @@ async function main() {
         const log = fs.existsSync(logFile) ? fs.readFileSync(logFile, 'utf8') : '';
         if (log.includes(marker)) throw new Error('the command text reached the log');
         return `${ev.join(', ')}, open-picked-tcdb 422; no marker; rows + live target unchanged; no temp SQL; the command text is in no answer and no log`;
+      });
+
+      await R.check('7.12b (2.0.4 security F1) a company file is restored as DATA: a guard-clean file that plants a trigger on a real table, a function that builds a dangerous statement from pieces and a replacement of a shipped SECURITY DEFINER function is restored for real (200) - and none of it exists afterwards (no function, no trigger, no table, no marker, the shipped function byte-identical); the same file with ENABLE ALWAYS is refused 422; every table of the file comes back with exactly the rows the file holds', async () => {
+        const BM = require('../../src/backup-manager');
+        const sg = require('../../src/sql-guard');
+        const real = await mk('crafted-f1', 'F1 Source.tcdb');
+        const bm = new BM({ pgBinDir: '/x', encryptionKey: 'texacore-default-backup-key-2026', backupPath: real });
+        const dump = await bm._decompress(bm._decryptParsed(bm._parseTcdbFile(fs.readFileSync(real)), '').data);
+        const marker = path.join(WORK, 'F1-MARKER-SHOULD-NOT-EXIST');
+        const shipped = (await pg("SELECT p.proname, md5(p.prosrc) AS m FROM pg_proc p WHERE p.pronamespace = 'public'::regnamespace AND p.prosecdef AND p.pronargs = 0 AND p.prorettype = 'void'::regtype ORDER BY 1 LIMIT 1")).rows[0];
+        if (!shipped) throw new Error('no shipped SECURITY DEFINER function to replace');
+        const planted = [
+          'CREATE TABLE public.f1_marker (note text);',
+          "CREATE FUNCTION public.f1_evil() RETURNS trigger LANGUAGE plpgsql AS $x$ BEGIN INSERT INTO public.f1_marker VALUES ('ran as ' || current_user); RETURN NEW; END $x$;",
+          `CREATE FUNCTION public.f1_split() RETURNS trigger LANGUAGE plpgsql SECURITY DEFINER AS $x$ BEGIN EXECUTE 'COPY (SELECT 1) TO PROG' || 'RAM ''touch ${marker}'''; RETURN NEW; END $x$;`,
+          'CREATE TRIGGER f1_trg BEFORE INSERT OR UPDATE ON public.companies FOR EACH ROW EXECUTE FUNCTION public.f1_evil();',
+          'CREATE TRIGGER f1_trg2 BEFORE INSERT OR UPDATE ON public.companies FOR EACH ROW EXECUTE FUNCTION public.f1_split();',
+          `CREATE OR REPLACE FUNCTION public.${shipped.proname}() RETURNS void LANGUAGE sql SECURITY DEFINER AS $x$ SELECT 1 $x$;`,
+        ].join('\n') + '\n';
+        const craft = async (name, extra) => {
+          const text = dump.toString('utf8');
+          const i = text.lastIndexOf('\\unrestrict');
+          const evil = Buffer.from(text.slice(0, i) + planted + extra + text.slice(i), 'utf8');
+          const compressed = await bm._compress(evil);
+          const file = path.join(OUTSIDE, name);
+          fs.writeFileSync(file, bm._buildTcdbFile(bm._encrypt(compressed), evil.length, compressed.length));
+          return { file, evil };
+        };
+        const upload = async (file, name) => {
+          const m = multipart(fs.readFileSync(file), name, {});
+          const r = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m.ct }, body: m.body });
+          return { status: r.status, json: JSON.parse(r.buf.toString('utf8')) };
+        };
+        // the scan alone sees nothing wrong with the planted code (a real file is full of functions and triggers) - this is why the restore must not run it
+        const clean = await craft('f1-clean.tcdb', '');
+        const rep = sg.scanDump(clean.evil);
+        if (rep.findings.length) throw new Error(`the planted file is expected to be guard-clean, findings ${JSON.stringify(rep.findings.slice(0, 3))}`);
+        // ENABLE ALWAYS is refused outright
+        const always = await craft('f1-always.tcdb', 'ALTER TABLE public.companies ENABLE ALWAYS TRIGGER f1_trg;\n');
+        const refused = await upload(always.file, 'f1-always.tcdb');
+        if (refused.status !== 422 || refused.json.code !== 'TCDB_UNSAFE_SQL') throw new Error(`ENABLE ALWAYS -> ${refused.status} ${JSON.stringify(refused.json).slice(0, 200)}`);
+        // the guard-clean file IS restored - as data
+        const up = await upload(clean.file, 'f1-clean.tcdb');
+        if (up.status !== 200 || !up.json.success) throw new Error(`restore -> ${up.status} ${JSON.stringify(up.json).slice(0, 300)}`);
+        const left = (await pg("SELECT (SELECT count(*) FROM pg_proc WHERE proname IN ('f1_evil', 'f1_split'))::int fns, (SELECT count(*) FROM pg_trigger WHERE tgname IN ('f1_trg', 'f1_trg2'))::int trg, (SELECT to_regclass('public.f1_marker') IS NOT NULL) tbl, (SELECT md5(prosrc) FROM pg_proc WHERE oid = to_regprocedure($1)) m", [`public.${shipped.proname}()`])).rows[0];
+        if (left.fns !== 0 || left.trg !== 0 || left.tbl) throw new Error(`planted objects exist: ${JSON.stringify(left)}`);
+        if (left.m !== shipped.m) throw new Error(`the shipped function ${shipped.proname} was replaced`);
+        if (fs.existsSync(marker)) throw new Error('A COMMAND RAN: the marker file exists');
+        // every table of the file has exactly the rows the file holds (the restore replaced the data: nothing lost, nothing extra)
+        const plan = sg.planDataRestore(clean.evil);
+        const rows = (b) => { let n = 0; for (let k = b.start; k < b.end; k++) if (clean.evil[k] === 0x0a) n++; return n; };
+        const bad = []; let checked = 0; let total = 0;
+        for (const b of plan.blocks.filter((x) => x.schema === 'public')) {
+          const q = `SELECT count(*)::int n FROM "${b.table.replace(/"/g, '""')}"`;
+          let n; try { n = (await pg(q)).rows[0].n; } catch (e) { bad.push(`${b.table}: ${String(e.message).slice(0, 60)}`); continue; }
+          checked++; total += rows(b);
+          if (n !== rows(b)) bad.push(`${b.table}: db ${n} vs file ${rows(b)}`);
+        }
+        const tolerated = /^(activity_log|audit_logs|sync_|notifications|license|app_settings|user_sessions)/;
+        const real_bad = bad.filter((x) => !tolerated.test(x));
+        if (real_bad.length) throw new Error(`row counts differ from the file: ${real_bad.slice(0, 8).join('; ')} (${bad.length} total)`);
+        return `ENABLE ALWAYS refused 422; the guard-clean planted file restored 200 as data: no function, no trigger, no table, no marker, ${shipped.proname}() byte-identical; ${checked} tables / ${total} rows equal to the file${bad.length ? ` (${bad.length} app-written tables tolerated: ${bad.slice(0, 4).join('; ')})` : ''}; ${up.json.dataOnly ? `dataOnly ${JSON.stringify(up.json.dataOnly).slice(0, 160)}` : ''}`;
       });
 
       await R.check('7.13 (2.0.4) the new routes are behind the same guards and tell nothing they should not: no secret 401, wrong secret 401, a LAN Host refused, a foreign Origin refused; the job status never carries a path; the folder-access answer has the areas', async () => {

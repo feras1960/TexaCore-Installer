@@ -11,7 +11,7 @@ const { execFile, spawn } = require('child_process');
 const zlib = require('zlib');
 const os = require('os');
 const companyFile = require('./company-file');
-const sqlGuard = require('./sql-guard');   // 2.0.4: nothing a company file carries may run a command on the user's computer
+const sqlGuard = require('./sql-guard');   // 2.0.4: a company file is scanned for commands (S3) and restored as DATA only (F1) - see sql-guard.js for exactly what that closes and what it does not
 
 // ─── Encryption Constants ────────────────────────────────────
 const ENCRYPTION_ALGORITHM = 'aes-256-gcm';
@@ -209,6 +209,12 @@ class BackupManager {
         let secTemp = null;
         try {
           const secDir = path.dirname(secondary);
+          // 2.0.4 (review F4): the second copy's folder is asked about too when it is not the company file's own (a protected folder whose permission is missing would block the write)
+          if (this.accessGuard && secDir !== path.dirname(target)) {
+            let g2 = null;
+            try { g2 = await this.accessGuard(secDir); } catch { g2 = null; }
+            if (g2 && g2.ok === false) throw Object.assign(new Error(g2.state === 'pending' ? 'macOS is still asking for permission to use the folder of the second copy' : 'macOS has not allowed TexaCore to use the folder of the second copy'), { code: 'FOLDER_PERMISSION' });
+          }
           if (!fs.existsSync(secDir)) fs.mkdirSync(secDir, { recursive: true });
           secTemp = secondary + '.tmp';
           fs.copyFileSync(target, secTemp);
@@ -761,11 +767,27 @@ class BackupManager {
       // keeps its own, clearer refusal.)
       sqlGuard.assertSafeDump(sql);
 
+      // 2.0.4 (security F1): a company file is DATA. A real file also carries ~2,300 functions and ~1,300 triggers, and the scan above cannot tell a harmless body from a
+      // harmful one - so none of the file's DDL is run. The database already has its schema (the baseline + the migrations the program ships); from the file only the COPY
+      // data of the tables that exist and the sequence values are taken, in a script BUILT here (sql-guard planDataRestore / renderDataScript). No function, trigger, view or
+      // policy of a file ever exists in the database. (A table the file has and this version does not is skipped and reported; an older file no longer replaces the shipped functions.)
       this.onProgress('restore', 'تهيئة الاستبدال...');
-      await this._truncatePublic(this._extractCopyTables(sqlStr));
+      const plan = sqlGuard.planDataRestore(sql);
+      const live = await this._liveTables();
+      if (!live.size) throw BackupManager.restoreError('TCDB_NO_SCHEMA', 'قاعدة البيانات المحلية غير مهيّأة بعد (لا جداول) — أعد تشغيل البرنامج ثم افتح الملف | The local database has no tables yet - restart the program and open the file again.');
+      const data = sqlGuard.renderDataScript(plan, { known: live, before: "SET session_replication_role = 'replica';\n", after: "\nSET session_replication_role = 'origin';\n" });
+      if (!data.loaded) throw BackupManager.restoreError('TCDB_NO_DATA', 'لا يحتوي الملف بيانات شركة يعرفها هذا الإصدار من TexaCore فلم يتغيّر شيء | This file holds no company data this version of TexaCore knows; nothing was changed.');
+      const unknownTables = data.skipped.filter((x) => x.why === 'unknown-table');
+      const foreignSchema = data.skipped.filter((x) => x.why === 'schema');
+      if (unknownTables.length) {
+        console.warn(`[BackupManager] ${unknownTables.length} table(s) of the file are not in this version's database and were not loaded: ${unknownTables.slice(0, 20).map((x) => x.table).join(', ')}`);
+        this.onProgress('restore', `⚠️ ${unknownTables.length} جدول في الملف غير معروف لهذا الإصدار فلم يُحمَّل`);
+      }
+      if (foreignSchema.length) console.warn(`[BackupManager] ${foreignSchema.length} COPY block(s) of the file name a schema the program never dumps and were ignored: ${foreignSchema.slice(0, 10).map((x) => x.table).join(', ')}`);
+      await this._truncatePublic(data.tables);
       this.lastRestoreTouchedDb = true;   // from here on the database is no longer the previous company's (afterFailedRestore)
       this.onProgress('restore', 'استعادة قاعدة البيانات...');
-      const execRes = await this._executeSql(sql);
+      const execRes = await this._executeSql(data.script);
 
       // 2.0.2 (20270210v): a file written before that migration has no fabric_materials.tracking_mode and the load above ran with the user triggers OFF (replica role),
       // so every card came back with the column's net default 'quantity' (a fabric must be 'roll'). The server's own repair puts them right. Only for a file that LACKS the column.
@@ -786,7 +808,7 @@ class BackupManager {
       // restored; we warn rather than undo it if this step fails.
       this.onProgress('restore', 'استعادة حسابات الدخول...');
       try {
-        await this._restoreAuthData(sqlStr);
+        await this._restoreAuthData(data.auth);
         await this._resetAuthSessions();
       } catch (e) {
         console.warn('[BackupManager] ⚠️ auth restore step failed:', e.message);
@@ -813,7 +835,8 @@ class BackupManager {
       const duration = Date.now() - startTime;
       this.onProgress('done', `✅ تمت الاستعادة (${(sql.length / 1024 / 1024).toFixed(1)} MB) في ${(duration / 1000).toFixed(1)}s`);
 
-      return { duration, sqlSize: sql.length, copyErrors: (execRes && execRes.copyErrors ? execRes.copyErrors.length : 0), copyErrorsLog: (execRes && execRes.copyErrors && execRes.copyErrors.length) ? this._restoreErrorsLogPath() : null, dumpedFromMajor: dumpedFrom };
+      return { duration, sqlSize: sql.length, copyErrors: (execRes && execRes.copyErrors ? execRes.copyErrors.length : 0), copyErrorsLog: (execRes && execRes.copyErrors && execRes.copyErrors.length) ? this._restoreErrorsLogPath() : null, dumpedFromMajor: dumpedFrom,
+        dataOnly: { tables: data.loaded, skippedTables: unknownTables.slice(0, 50).map((x) => x.table), skippedCount: unknownTables.length, ignoredStatements: plan.ignored.total } };
     } catch (error) {
       this.onProgress('error', `❌ فشل الاستعادة: ${error.message}`);
       throw error;
@@ -867,15 +890,14 @@ class BackupManager {
   }
 
   /**
-   * Execute SQL dump via psql
+   * Run the restore script via psql. `script` is NOT the file's text: it is what sql-guard renderDataScript() built (the program's own settings, the COPY data of the tables
+   * that exist, the sequence values - 2.0.4, F1). It is wrapped in psql's restricted mode as well (a meta-command could not run even if one had slipped through).
    */
-  _executeSql(sqlBuffer) {
+  _executeSql(script) {
     return new Promise((resolve, reject) => {
       const tmpFile = this._tmpSqlPath('restore');
-      // Wrap SQL with FK constraint disable/enable for reliable restoration
-      // Without this, COPY statements fail due to FK ordering issues
-      // 2.0.4: ... and with psql's own restricted mode (\restrict <random key> … \unrestrict): even a meta-command the scanner missed cannot run
-      fs.writeFileSync(tmpFile, sqlGuard.prepareDump(sqlBuffer, { before: "SET session_replication_role = 'replica';\n", after: "\nSET session_replication_role = 'origin';\n" }), { mode: 0o600, flag: 'wx' });
+      // (the replica role - foreign keys and user triggers off - is part of the script; there is NO --single-transaction, see below)
+      fs.writeFileSync(tmpFile, sqlGuard.prepareDump(script, { strip: false }), { mode: 0o600, flag: 'wx' });
 
       const env = {
         ...process.env,
@@ -945,20 +967,18 @@ class BackupManager {
   }
 
   /**
-   * Collect every `public.<table>` that the dump will COPY into. pg_dump emits a
-   * COPY block for EVERY table (empty ones too), so this is effectively the full
-   * public table set of the snapshot. Used to truncate-before-load so the restore
-   * replaces rather than merges. auth.* is excluded on purpose (owned by
-   * _restoreAuthData). Quoted identifiers (public."Weird Name") are preserved
-   * verbatim so to_regclass / TRUNCATE parse them correctly.
+   * The tables the local database already has (public.* and auth.users / auth.identities), as a Set of 'schema.table'. A company file is restored INTO this schema
+   * (2.0.4, F1): only the data of a table that is in this set is loaded; the file's own CREATE statements are never run.
    */
-  _extractCopyTables(sql) {
-    const tables = [];
-    const re = /^COPY (public\.(?:"[^"]+"|[^ ]+)) \(/gm;
-    let m;
-    while ((m = re.exec(sql)) !== null) tables.push(m[1]);
-    return tables;
+  async _liveTables() {
+    const out = await this._queryScalar(
+      "SELECT n.nspname || '.' || c.relname FROM pg_class c JOIN pg_namespace n ON n.oid = c.relnamespace " +
+      "WHERE c.relkind IN ('r', 'p') AND (n.nspname = 'public' OR (n.nspname = 'auth' AND c.relname IN ('users', 'identities')))");
+    return new Set(String(out || '').split('\n').map((l) => l.trim()).filter(Boolean));
   }
+
+  /** An Error with a machine-readable code (the callers show .message). */
+  static restoreError(code, message) { const e = new Error(message); e.code = code; return e; }
 
   /**
    * Clear the snapshot's public tables in one atomic transaction before the bulk
@@ -1016,18 +1036,6 @@ class BackupManager {
   }
 
   /**
-   * Extract one `COPY <table> (...) FROM stdin; ... \.` block verbatim from a
-   * plain-text pg_dump. Returns null if the table/data block isn't present.
-   */
-  _extractCopyBlock(sql, table) {
-    const m = new RegExp('^COPY ' + table.replace(/\./g, '\\.') + ' \\([^)]*\\) FROM stdin;$', 'm').exec(sql);
-    if (!m) return null;
-    const end = sql.indexOf('\n\\.', m.index);
-    if (end < 0) return null;
-    return sql.slice(m.index, end + 3); // include the closing "\n\."
-  }
-
-  /**
    * Reliably restore the auth accounts (auth.users + auth.identities) from a
    * decrypted dump. The bulk restore runs in ONE transaction that aborts on the
    * first "already exists" error (GoTrue pre-creates its auth tables on start),
@@ -1040,19 +1048,17 @@ class BackupManager {
    * signed by the local install's secret → the original passwords work on every
    * install regardless of license. See [[local-hybrid-schema-sync]] #6.
    */
-  _restoreAuthData(sql) {
-    const users = this._extractCopyBlock(sql, 'auth.users');
-    if (!users) return Promise.resolve(); // very old file without auth → skip
-    const identities = this._extractCopyBlock(sql, 'auth.identities');
+  _restoreAuthData(auth) {
+    // `auth` = { users, identities }: the COPY blocks sql-guard renderDataScript() built from the file (headers rebuilt by the program, data lines unchanged)
+    if (!auth || !auth.users) return Promise.resolve(); // very old file without auth → skip
+    const L = (t) => Buffer.from(t, 'latin1');
     const parts = [
-      "SET session_replication_role = 'replica';",
-      'DELETE FROM auth.identities;',
-      'DELETE FROM auth.users;',
-      users,
+      L("SET client_encoding = 'UTF8';\nSET session_replication_role = 'replica';\nDELETE FROM auth.identities;\nDELETE FROM auth.users;\n"),
+      auth.users,
     ];
-    if (identities) parts.push(identities);
-    parts.push("SET session_replication_role = 'origin';");
-    return this._runAuthSql(parts.join('\n') + '\n');
+    if (auth.identities) parts.push(auth.identities);
+    parts.push(L("SET session_replication_role = 'origin';\n"));
+    return this._runAuthSql(Buffer.concat(parts));
   }
 
   /**
@@ -1080,8 +1086,8 @@ class BackupManager {
   _runAuthSql(sqlText) {
     return new Promise((resolve, reject) => {
       const tmpFile = this._tmpSqlPath('auth');
-      // (the COPY blocks in it come verbatim from a dump that already passed sqlGuard; psql's restricted mode wraps it as well)
-      fs.writeFileSync(tmpFile, sqlGuard.prepareDump(sqlText), { mode: 0o600, flag: 'wx' });
+      // (the COPY blocks in it were built by sql-guard renderDataScript(): headers rebuilt by the program, data lines unchanged; psql's restricted mode wraps it as well)
+      fs.writeFileSync(tmpFile, sqlGuard.prepareDump(sqlText, { strip: false }), { mode: 0o600, flag: 'wx' });
       const env = { ...process.env, PGPASSWORD: this.dbPassword };
       const args = [
         '-X',

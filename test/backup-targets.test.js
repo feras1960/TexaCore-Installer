@@ -187,6 +187,28 @@ test('macOS has not allowed the company file\'s folder (the grant is gone after 
   assert.ok(fs.statSync(target).mtimeMs > mtime0);
 });
 
+test('review F4: the program\'s second copy in ANOTHER folder is guarded too - a blocked folder gets no write and no mkdir, the company file itself is still written, and the copy goes through once allowed', async () => {
+  const dir = mkdtemp(); const other = path.join(mkdtemp(), 'later', 'made');
+  const target = path.join(dir, 'Acme.tcdb'); const copy = path.join(other, 'Acme.tcdb');
+  let verdict = { ok: false, state: 'denied', area: 'documents', code: 'FOLDER_PERMISSION' };
+  const asked = [];
+  const m = mgr({ backupPath: target, secondaryBackupPath: copy, accessGuard: async (d) => { asked.push(d); return d === other ? verdict : { ok: true }; } });
+  assert.ok(await m.syncNow(), 'the company file is written');
+  assert.deepEqual(asked, [dir, other], 'asked about the company folder, then the second copy\'s folder');
+  assert.equal(fs.existsSync(path.dirname(other)), false, 'the blocked folder was not even created');
+  const copyT = m.getStatus().targets.find((t) => t.role === 'copy');
+  assert.equal(copyT.state, 'error'); assert.equal(copyT.error.reason, 'macos-permission');
+  verdict = { ok: true };
+  await m.syncNow();
+  assert.equal(fs.existsSync(copy), true, 'allowed: the copy is written');
+  assert.equal(m.getStatus().targets.find((t) => t.role === 'copy').state, 'ok');
+  // the same folder as the company file is asked about once
+  const same = path.join(dir, 'Copy.tcdb'); const asked2 = [];
+  const m2 = mgr({ backupPath: path.join(dir, 'B.tcdb'), secondaryBackupPath: same, accessGuard: async (d) => { asked2.push(d); return { ok: true }; } });
+  await m2.syncNow();
+  assert.deepEqual(asked2, [dir]);
+});
+
 test('classifyFsError: FOLDER_PERMISSION is its own reason, distinct from a plain EACCES (the page tells where to switch it on)', () => {
   assert.deepEqual(cf.classifyFsError({ code: 'FOLDER_PERMISSION' }), { code: 'FOLDER_PERMISSION', reason: 'macos-permission' });
   assert.equal(cf.classifyFsError({ code: 'EACCES' }).reason, 'no-permission');
