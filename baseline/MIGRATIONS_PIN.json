@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "2e3687c8d0cb46dd435c037d647791c043e24035",
+  "erpCommit": "7dcb21e5415276b8ae43b3e2fff5fa3d75dc8b2c",
   "migrations": [
     {
       "order": 1,
@@ -115,11 +115,32 @@
       "file": "20270210y_mfg_audit_fixes.sql",
       "sha256": "2bd5c6a007265db06fcc7f976bb4b11348c5b7d5c637402256ddf71be1a8dfe6",
       "bytes": 203884
+    },
+    {
+      "order": 17,
+      "name": "20270211b_campaign_trial_links",
+      "file": "20270211b_campaign_trial_links.sql",
+      "sha256": "58285b24a2987046636b25208b88a636dd615562b6c4d3e2d22a82ceb743dfbd",
+      "bytes": 84613
+    },
+    {
+      "order": 18,
+      "name": "20270211c_mfg_round2_guards",
+      "file": "20270211c_mfg_round2_guards.sql",
+      "sha256": "9792ec64c882fa40287429c6d464005b1c1b0bf0ec8fb26d1a25ccc1dfea57c5",
+      "bytes": 123182
+    },
+    {
+      "order": 19,
+      "name": "20270211d_mfg_round3_quality_costing",
+      "file": "20270211d_mfg_round3_quality_costing.sql",
+      "sha256": "3f1b0a4815c7021a22ff8d8f59daf58fcaecac269bf8ce07f83fa8124c3bdd1a",
+      "bytes": 176230
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "caed1f2c96083a595ac2eb89d05ceeda77d61cecf15c8f420e137948fbc7060c",
-    "bytes": 12988
+    "sha256": "82af87391c2c1032f912ec7c7e2e2bb7d220208ee64206be88630d67849d65c8",
+    "bytes": 17037
   }
 }
