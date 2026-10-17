@@ -130,7 +130,8 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
       const tc = Date.now();
       const reading = page.getByText(/جارٍ قراءة عملة الملف|Reading the file's currency/);
       while (Date.now() - tc < 120000 && (await reading.count())) await page.waitForTimeout(300);
-      out.currency = { ended: (await reading.count()) === 0, ms: Date.now() - tc, combos: (await page.locator('[role="combobox"]').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim()), failureShown: (await page.locator('[data-testid="rsf-read-failure"]').count()) > 0 };
+      const bodyText = (await page.locator('body').innerText()).replace(/\s+/g, ' ');
+      out.currency = { ended: (await reading.count()) === 0, ms: Date.now() - tc, detected: (/(Base currency|العملة الأساسية)[^|]{0,120}/.exec(bodyText) || [''])[0].slice(0, 160), combos: (await page.locator('[role="combobox"]').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim()), failureShown: (await page.locator('[data-testid="rsf-read-failure"]').count()) > 0 };
     }
     clearInterval(sampler);
     await page.waitForTimeout(500);

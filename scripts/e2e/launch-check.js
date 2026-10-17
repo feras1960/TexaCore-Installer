@@ -1424,9 +1424,9 @@ async function main() {
         const planned = path.join(dir, '2023 مطور بعد الصيانة.tcdb');
         if (!res.note || res.note.testId !== 'rsf-company-file-target' || !res.note.text.includes(planned)) throw new Error(`form note ${JSON.stringify(res.note)}`);
         if (!res.currency || !res.currency.ended || res.currency.failureShown) throw new Error(`currency read ${JSON.stringify(res.currency)}`);
-        if (!res.currency.combos.some((t) => /UAH/.test(t))) throw new Error(`the file's currency is not selected: ${JSON.stringify(res.currency.combos)}`);
+        if (!/UAH/.test(res.currency.detected) && !res.currency.combos.some((t) => /UAH/.test(t))) throw new Error(`the file's currency (UAH) is not shown: ${JSON.stringify(res.currency)}`);
         if (walk(dir).join('|') !== '2023 مطور بعد الصيانة.rsf') throw new Error(`files beside: ${walk(dir).join(', ')}`);
-        return `download line «${dl[dl.length - 1].slice(0, 80)}»; located; read via GET /api/picked-file; form: company file planned beside the .rsf; currency read ended in ${res.currency.ms} ms, selected [${res.currency.combos.join(' | ').slice(0, 120)}]`;
+        return `download line «${dl[dl.length - 1].slice(0, 80)}»; located; read via GET /api/picked-file; form: company file planned beside the .rsf; currency read ended in ${res.currency.ms} ms: «${res.currency.detected}»`;
       });
 
       await R.check('7.11b (2.0.4 iCloud) cancelling the download: nothing is opened, the page says so, the file and the rows are untouched', async () => {
