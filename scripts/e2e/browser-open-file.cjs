@@ -10,6 +10,7 @@
 //                                          | {sim:{desktop:{state:'allowed'}}} (POST /api/e2e-folder-access from the page, with its own secret) | {wait:ms}
 //        [--click-skip-when-waiting]       press «تابع بدون تحديد مكان الملف» as soon as the page waits for macOS' prompt
 //        [--click-cancel-at <percent>]     press «إلغاء» when the download bar reaches that percent
+//        [--wait-currency]                 (.rsf) after the form appears, wait for «جارٍ قراءة عملة الملف…» to END and report the selected currency / country
 // Result: { start:{keys,name,size,lastModifiedIsNumber,hasSha}|null, confirm:{keys,shaOk}|null, located:<the locate-confirm answer: success/type/code/reason/ref-present/filePath/dir/companyFilePath>|null,
 //           phases:[...], candidateStates:[...], progress:[percent...], statusTexts:[...], note:{testId,text}|null, finalNotice, prompt, permission:{seen,mode,title,body,still,actions:[...]},
 //           alerts:[...], routes:[{route,status}], cancelClicked, skipClicked, order:[request order] }
@@ -22,6 +23,7 @@ const DELAY_STATUS = Number(arg('delay-status', '0')) || 0;   // hold the app's 
 const PERM_SCRIPT = (() => { try { return JSON.parse(arg('perm-script', '[]')); } catch { return []; } })();
 const CLICK_SKIP = has('click-skip-when-waiting');
 const CANCEL_AT = arg('click-cancel-at', '') === '' ? null : Number(arg('click-cancel-at'));
+const WAIT_CURRENCY = has('wait-currency');
 const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
 
 (async () => {
@@ -45,9 +47,10 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
       if (m[1] === 'locate-confirm') out.confirm = { keys: Object.keys(b).sort(), shaOk: /^[0-9a-f]{64}$/.test(String(b.sha256 || '')) };
     });
     page.on('response', async (r) => {
-      const m = /\/api\/(locate-start|locate-status|locate-confirm|locate-materialize|locate-cancel|open-picked-tcdb|restore-tcdb|create-local-company|pick-company-file|open-privacy-settings)(\?.*)?$/.exec(r.url());
+      const m = /\/api\/(locate-start|locate-status|locate-confirm|locate-materialize|locate-cancel|open-picked-tcdb|restore-tcdb|create-local-company|pick-company-file|open-privacy-settings|picked-file)(\?.*)?$/.exec(r.url());
       if (!m) return;
       const method = r.request().method();
+      if (m[1] === 'picked-file') { out.routes.push({ route: 'picked-file', status: r.status() }); return; }
       let body = null; try { body = await r.json(); } catch { /* not json */ }
       if (m[1] === 'locate-status' || m[1] === 'locate-start' || m[1] === 'locate-materialize') {
         if (body && body.phase && out.phases[out.phases.length - 1] !== body.phase) out.phases.push(body.phase);
@@ -121,6 +124,13 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
         if (!(await page.locator('[data-testid="locate-panel"]').count()) && !(await page.locator(noteSel).count())) break;
       }
       await page.waitForTimeout(300);
+    }
+    if (WAIT_CURRENCY && !isTcdb) {
+      // the form's currency read must END (the 2.0.3 spinner never did on an iCloud placeholder) with the file's currency selected
+      const tc = Date.now();
+      const reading = page.getByText(/جارٍ قراءة عملة الملف|Reading the file's currency/);
+      while (Date.now() - tc < 120000 && (await reading.count())) await page.waitForTimeout(300);
+      out.currency = { ended: (await reading.count()) === 0, ms: Date.now() - tc, combos: (await page.locator('[role="combobox"]').allInnerTexts()).map((t) => t.replace(/\s+/g, ' ').trim()), failureShown: (await page.locator('[data-testid="rsf-read-failure"]').count()) > 0 };
     }
     clearInterval(sampler);
     await page.waitForTimeout(500);

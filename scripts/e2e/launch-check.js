@@ -1409,6 +1409,26 @@ async function main() {
         return `start {name,size,time} only → ready (placeholder) → materialize → ${res.progress.length} progress values ${JSON.stringify(res.progress.slice(0, 8))}… → confirm(sha256) → open-picked-tcdb 200; download line: «${dl[dl.length - 1].slice(0, 90)}»`;
       });
 
+      await R.check('7.11k (2.0.4 iCloud + Rashid) the REAL 25 MB Rashid file as an iCloud placeholder: located without being read, downloaded with progress, read FROM DISK through the app (not a second browser read), the company file is planned beside it, and the form\'s «جارٍ قراءة عملة الملف…» ENDS with the file\'s currency (UAH) selected - no read-failure box', async () => {
+        const dir = path.join(LA, 'rsf-cloud'); fs.mkdirSync(dir, { recursive: true });
+        const target = path.join(dir, '2023 مطور بعد الصيانة.rsf'); fs.copyFileSync(RSF, target);
+        await simReset(); await sim({ placeholders: { [target]: { steps: 6, msPerStep: 400 } } });
+        const res = openInBrowser(target, '7-11k', ['--wait-currency']);
+        await simReset();
+        if (!res.start || res.start.hasSha || res.start.size !== fs.statSync(target).size) throw new Error(`start ${JSON.stringify(res.start)}`);
+        if (!res.candidateStates.includes('placeholder') || !res.order.includes('locate-materialize')) throw new Error(`states ${res.candidateStates.join(',')} order ${res.order.join('>')}`);
+        const dl = res.statusTexts.filter((t) => NOTE_CLOUD.test(t) && NOTE_CLOUD_MB.test(t));
+        if (!dl.length || !dl.some((t) => /24\.\d|23\.\d|\b2[34]\b/.test(t))) throw new Error(`download lines ${JSON.stringify(res.statusTexts)}`);
+        if (!res.located || res.located.success !== true || res.located.type !== 'rsf' || path.resolve(res.located.filePath) !== path.resolve(target)) throw new Error(`located ${JSON.stringify(res.located)}`);
+        if (!res.routes.some((r) => r.route === 'picked-file' && r.status === 200)) throw new Error(`the page did not read the located file through the app: ${JSON.stringify(res.routes)}`);
+        const planned = path.join(dir, '2023 مطور بعد الصيانة.tcdb');
+        if (!res.note || res.note.testId !== 'rsf-company-file-target' || !res.note.text.includes(planned)) throw new Error(`form note ${JSON.stringify(res.note)}`);
+        if (!res.currency || !res.currency.ended || res.currency.failureShown) throw new Error(`currency read ${JSON.stringify(res.currency)}`);
+        if (!res.currency.combos.some((t) => /UAH/.test(t))) throw new Error(`the file's currency is not selected: ${JSON.stringify(res.currency.combos)}`);
+        if (walk(dir).join('|') !== '2023 مطور بعد الصيانة.rsf') throw new Error(`files beside: ${walk(dir).join(', ')}`);
+        return `download line «${dl[dl.length - 1].slice(0, 80)}»; located; read via GET /api/picked-file; form: company file planned beside the .rsf; currency read ended in ${res.currency.ms} ms, selected [${res.currency.combos.join(' | ').slice(0, 120)}]`;
+      });
+
       await R.check('7.11b (2.0.4 iCloud) cancelling the download: nothing is opened, the page says so, the file and the rows are untouched', async () => {
         const target = await mk('cloud-cancel', 'Cloud Cancel.tcdb');
         await simReset(); await sim({ placeholders: { [target]: { steps: 60, msPerStep: 400 } } });
