@@ -1571,12 +1571,12 @@ async function main() {
         const took = Date.now() - t0;
         if (blocked.accessBlock.state !== 'denied' || blocked.accessBlock.area !== 'desktop') throw new Error(`accessBlock ${JSON.stringify(blocked.accessBlock)}`);
         const tgt = (blocked.targets || []).find((x) => x.role === 'primary');
-        if (!tgt || !tgt.error || tgt.error.reason !== 'no-permission' || tgt.state !== 'error') throw new Error(`primary target ${JSON.stringify(tgt)}`);
+        if (!tgt || !tgt.error || tgt.error.reason !== 'macos-permission' || tgt.state !== 'error') throw new Error(`primary target ${JSON.stringify(tgt)}`);
         if (fileSha(target) !== sha0 || fs.statSync(target).mtimeMs !== st0.mtimeMs) throw new Error('the file was written although the permission was missing');
         await sim({ sim: { desktop: { state: 'allowed' } } });
         await waitFor(async () => { await api('POST', '/api/backup', {}); const s_ = await status(); return !s_.accessBlock && fs.statSync(target).mtimeMs > st0.mtimeMs; }, 'the sync writing again', 40000);
         await simReset();
-        return `denied: accessBlock {desktop,denied}, target error no-permission, file untouched (answered in ${took} ms); allowed: the next sync wrote the file again`;
+        return `denied: accessBlock {desktop,denied}, target error macos-permission, file untouched (answered in ${took} ms); allowed: the next sync wrote the file again`;
       });
 
       await R.check('7.12 (2.0.4 security S3) a crafted company file can NOT run a command: a psql meta-command after the SET lines, a "COPY … PROGRAM", a DO block - each is refused 422 TCDB_UNSAFE_SQL BEFORE anything is touched (rows, live target, file), nothing runs (no marker file), no temp SQL is left', async () => {

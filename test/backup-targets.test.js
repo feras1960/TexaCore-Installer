@@ -148,3 +148,53 @@ test('programCopyPath: <app data>/backups/<same name>, a free name each time', (
   assert.equal(cf.programCopyPath(app, '/Users/x/Desktop/Acme.tcdb'), path.join(app, 'backups', 'Acme (2).tcdb'));
   assert.equal(fs.readFileSync(a, 'utf8'), 'another company\'s copy');
 });
+
+// ── 2.0.4: the minute sync and macOS' folder permission ──
+test('macOS has not allowed the company file\'s folder (the grant is gone after an update): the sync does NOT write, does NOT touch the folder, says "macos-permission" + the area, and writes again once the permission is back', async () => {
+  const dir = mkdtemp();
+  const target = path.join(dir, 'Acme.tcdb');
+  let verdict = { ok: true };
+  const guardCalls = [];
+  const m = mgr({ backupPath: target, accessGuard: async (d) => { guardCalls.push(d); return verdict; } });
+  assert.ok(await m.syncNow(), 'allowed: the first run writes');
+  const mtime0 = fs.statSync(target).mtimeMs; const bytes0 = fs.readFileSync(target);
+  assert.deepEqual(guardCalls, [dir], 'the guard is asked about the company file\'s folder');
+  verdict = { ok: false, state: 'denied', area: 'documents', code: 'FOLDER_PERMISSION' };
+  const statCalls = []; const realStat = fs.statSync;
+  fs.statSync = (...a) => { if (String(a[0]).startsWith(dir)) statCalls.push(String(a[0])); return realStat(...a); };
+  try {
+    assert.equal(await m.syncNow(), null, 'blocked: nothing written');
+    const st = m.getStatus();
+    assert.equal(st.state, 'error');
+    assert.equal(st.lastError.reason, 'macos-permission'); assert.equal(st.lastError.code, 'FOLDER_PERMISSION');
+    assert.deepEqual({ state: st.accessBlock.state, area: st.accessBlock.area }, { state: 'denied', area: 'documents' });
+    assert.equal(st.targets[0].state, 'error'); assert.equal(st.targets[0].error.reason, 'macos-permission');
+    assert.deepEqual(statCalls, [], 'the status itself never stats a folder macOS has not allowed (it would wait for the prompt)');
+  } finally { fs.statSync = realStat; }
+  assert.ok(fs.readFileSync(target).equals(bytes0) && fs.statSync(target).mtimeMs === mtime0, 'the file was not touched');
+  await m.syncNow();
+  assert.equal(m.getStatus().consecutiveFailures, 2, 'repeated failures count up (the page turns the dot red)');
+  // pending (the prompt is still on screen) is the same refusal, worded as waiting
+  verdict = { ok: false, state: 'pending', area: 'documents', code: 'FOLDER_PERMISSION' };
+  await m.syncNow();
+  assert.equal(m.getStatus().accessBlock.state, 'pending');
+  assert.match(m.getStatus().lastError.message, /still asking/);
+  // allowed again: the next run writes and the block is gone
+  verdict = { ok: true };
+  assert.ok(await m.syncNow());
+  const ok = m.getStatus();
+  assert.equal(ok.state, 'ok'); assert.equal(ok.accessBlock, null); assert.equal(ok.targets[0].error, null);
+  assert.ok(fs.statSync(target).mtimeMs > mtime0);
+});
+
+test('classifyFsError: FOLDER_PERMISSION is its own reason, distinct from a plain EACCES (the page tells where to switch it on)', () => {
+  assert.deepEqual(cf.classifyFsError({ code: 'FOLDER_PERMISSION' }), { code: 'FOLDER_PERMISSION', reason: 'macos-permission' });
+  assert.equal(cf.classifyFsError({ code: 'EACCES' }).reason, 'no-permission');
+});
+
+test('with no guard (Windows / Linux / an older caller) the sync behaves exactly as before', async () => {
+  const dir = mkdtemp();
+  const m = mgr({ backupPath: path.join(dir, 'Plain.tcdb') });
+  assert.ok(await m.syncNow());
+  assert.equal(m.getStatus().accessBlock, null);
+});

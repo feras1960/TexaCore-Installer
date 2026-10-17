@@ -159,7 +159,7 @@ class BackupManager {
       try { g = await this.accessGuard(path.dirname(this.backupPath)); } catch { g = null; }
       if (g && g.ok === false) {
         this._running = false;
-        this._markFail('primary', Object.assign(new Error(g.state === 'pending' ? 'macOS is still asking for permission to use the folder' : 'No permission to use the company file folder'), { code: 'EPERM' }), 'write');
+        this._markFail('primary', Object.assign(new Error(g.state === 'pending' ? 'macOS is still asking for permission to use the folder' : 'macOS has not allowed TexaCore to use the company file folder'), { code: 'FOLDER_PERMISSION' }), 'write');
         this._lastAccessBlock = { state: g.state || 'denied', area: g.area || null, at: new Date().toISOString() };
         this.onProgress('error', `⛔ لا إذن للمجلد (${g.area || ''}) | no permission for the folder (${g.area || ''})`);
         return null;
