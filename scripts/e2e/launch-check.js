@@ -258,6 +258,24 @@ async function main() {
       if (r.default_currency !== 'UAH' || r.base_currency !== 'UAH') throw new Error(`currency ${r.default_currency}/${r.base_currency}`);
       return `owner_email ok, is_tenant_admin t, ${r.default_currency}/${r.base_currency} ${r.sc}`;
     });
+    // 2.0.4 re-cut guard (the ERP's 20270222a / 20270222c): a company the installer provisions must come with the standard unit set and the Russian / Ukrainian names of the standard chart. Conditional on the
+    // pin: it asks only once production has applied those migrations and the pinned list (baseline/MIGRATIONS_PIN.json) carries them, so today's 2.0.4 build is unaffected.
+    await R.check('3.2b a new local company owns the standard unit set and the ru / uk chart names (once the pin carries 20270222a / 20270222c)', async () => {
+      const pin = JSON.parse(fs.readFileSync(path.join(ROOT, 'baseline', 'MIGRATIONS_PIN.json'), 'utf8'));
+      const pinned = new Set((pin.migrations || []).map((m) => m.name));
+      const notes = [];
+      if (pinned.has('20270222a_standard_units_seed')) {
+        const u = (await pg(`SELECT count(*)::int n, count(*) FILTER (WHERE is_base_unit)::int bases, count(*) FILTER (WHERE NOT is_base_unit AND base_unit_id IS NULL)::int unlinked FROM units_of_measure WHERE tenant_id=$1`, [A.tenantId])).rows[0];
+        if (u.n !== 36 || u.bases !== 5 || u.unlinked !== 0) throw new Error(`units of a new tenant: ${JSON.stringify(u)} (expected 36 units, 5 base units, 0 unlinked)`);
+        notes.push(`${u.n} units, ${u.bases} base, all linked`);
+      } else notes.push('units: skipped (20270222a is not pinned yet)');
+      if (pinned.has('20270222c_standard_chart_names_ru_uk')) {
+        const c = (await pg(`SELECT count(*)::int n, count(*) FILTER (WHERE name_ru IS NOT NULL AND name_uk IS NOT NULL)::int named FROM chart_of_accounts WHERE company_id=$1`, [A.companyId])).rows[0];
+        if (c.n < 100 || c.named !== c.n) throw new Error(`chart of a new company: ${c.named} of ${c.n} accounts carry name_ru and name_uk`);
+        notes.push(`${c.named}/${c.n} accounts with ru + uk names`);
+      } else notes.push('chart names: skipped (20270222c is not pinned yet)');
+      return notes.join('; ');
+    });
     await R.check('3.3 healTenantOwners repairs a tenant that lost owner_email / the admin flag', async () => {
       await pg(`UPDATE tenants SET owner_email = NULL WHERE id=$1`, [A.tenantId]);
       await pg(`UPDATE user_profiles SET is_tenant_admin = false WHERE id=$1`, [A.adminUserId || (await pg('SELECT id FROM user_profiles WHERE tenant_id=$1', [A.tenantId])).rows[0].id]);
