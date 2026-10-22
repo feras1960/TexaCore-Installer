@@ -20,6 +20,7 @@ const { openBaselineStore } = require('./baseline-store');
 const { openMigrationsStore } = require('./migrations-store');
 const { TunnelMonitor, redact } = require('./tunnel-monitor');
 const tunnelRoute = require('./tunnel-route');
+const portalSession = require('./portal-session');
 
 // ─── Ports (defaults — TEXACORE_PORT_BASE moves the whole block; see ports.js) ───
 const PG_PORT = PORTS.pg;
@@ -1408,6 +1409,18 @@ window.__TEXACORE_CONFIG__ = {
         proxyRequest(req, res);
       });
 
+      // 2.0.4 (portal): the admin-portal («بوابة الإدارة») session, held HERE. A page from the office network or the tunnel cannot use the local-only /api/* below, so
+      // after the manager enters the portal password the company list comes from /portal-api/companies - only with a valid session, id + name only, nothing else.
+      // See portal-session.js. Registered BEFORE /api/*; it relaxes no loopback / Host / proxy check (net-guard is untouched, /api/* below is unchanged).
+      if (!this.portalSessions) this.portalSessions = portalSession.createPortalSessions();
+      const portalRoutes = portalSession.createPortalRoutes({
+        sessions: this.portalSessions,
+        verifyPassword: (pw) => this.verifyAdminPortalPassword(pw),
+        listCompanies: () => this.listCompaniesForPortal(),
+        log: (m) => console.log(m),
+      });
+      app.all('/portal-api/*', (req, res, next) => { portalRoutes.handle(req, res).then((done) => { if (!done) next(); }, next); });
+
       // Admin API proxy (/api/companies, /api/delete-company, etc.)
       // These are served by the Electron admin server (main.js, PORTS.admin). The installer's admin API is a LOCAL
       // control surface (create/delete companies, backups, restores, tunnel control). This front-end server listens on
@@ -2038,6 +2051,25 @@ window.__TEXACORE_CONFIG__ = {
     finally { try { await client.end(); } catch { /* ignore */ } }
   }
 
+  // The portal's password check, for /portal-api/login: the SAME database function the page used to call (it throttles: 5 wrong guesses lock the gate for a growing
+  // 1-15 minutes), with the password as a bound parameter - never in SQL text, never logged. Resolves true only for a definite yes.
+  async verifyAdminPortalPassword(plain) {
+    const pw = String(plain == null ? '' : plain);
+    if (!pw || pw.length > 256) return false;
+    return this._withPgClient(async (client) => {
+      const r = await client.query('SELECT public.verify_admin_password($1) AS ok', [pw]);
+      return !!(r.rows[0] && r.rows[0].ok === true);
+    });
+  }
+
+  // The company list the portal shows after a successful portal login: id + name, nothing else.
+  async listCompaniesForPortal() {
+    return this._withPgClient(async (client) => {
+      const r = await client.query('SELECT id, name FROM public.companies ORDER BY created_at DESC LIMIT 500');
+      return r.rows;
+    });
+  }
+
   // Set a new admin-portal password: hash it (bcrypt via pgcrypto), store the
   // hash in both config (source of truth, survives restore) and the DB. No old
   // password required — physical control of the installer is the authority.
@@ -2057,6 +2089,7 @@ window.__TEXACORE_CONFIG__ = {
       const cfg = this._readConfig();
       cfg.adminPasswordHash = hash;
       this._writeConfig(cfg);
+      if (this.portalSessions) this.portalSessions.clear();   // every portal session opened with the OLD password ends now
       console.log('[ServiceManager] 🔑 Admin portal password updated.');
       return true;
     });
@@ -2092,6 +2125,7 @@ window.__TEXACORE_CONFIG__ = {
         }
         try { await client.query(`NOTIFY pgrst, 'reload schema'`); } catch { /* ignore */ }
       });
+      if (this.portalSessions) this.portalSessions.clear();   // a restore / start re-pushed the password: sessions from before it do not carry over
       console.log(`[ServiceManager] 🔐 Admin portal password synced (${cfg.adminPasswordHash ? 'custom' : defaultAdminPasswordFor(cfg.licenseKey) ? 'default = license key' : 'none — portal locked until the manager sets a password'}).`);
     } catch (e) {
       console.warn('[ServiceManager] syncAdminPassword failed (non-fatal):', e.message);
