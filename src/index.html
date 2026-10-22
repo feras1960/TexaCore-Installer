@@ -117,6 +117,18 @@
         <button type="button" class="btn btn-ghost" id="upgrade-open-folder"><svg class="icon icon-16" aria-hidden="true" focusable="false"><use href="#i-folder-open"></use></svg><span data-i18n="upgrade.openFolder">فتح المجلد</span></button>
         <button type="button" class="btn btn-ghost" id="upgrade-dismiss" data-i18n="upgrade.dismiss">فهمت، إغلاق</button>
       </div>
+      <!-- 2.0.5: opening a company file REPLACES every company of this computer - asked here (no native dialog), «إلغاء» is the default -->
+      <div class="stop-confirm replace-confirm" id="replace-confirm" role="alertdialog" aria-labelledby="replace-confirm-title" aria-describedby="replace-confirm-text" style="display:none;">
+        <strong class="replace-confirm-title" id="replace-confirm-title" data-i18n="replace.title">استبدال كل الشركات؟</strong>
+        <div class="stop-confirm-text" id="replace-confirm-text"></div>
+        <div class="replace-confirm-companies" id="replace-confirm-companies-title"></div>
+        <ul class="replace-confirm-list" id="replace-confirm-list"></ul>
+        <div class="replace-confirm-sessions" id="replace-confirm-sessions"></div>
+        <div class="stop-confirm-actions">
+          <button type="button" class="btn btn-ghost" id="btn-replace-cancel" data-i18n="replace.cancel">إلغاء</button>
+          <button type="button" class="btn btn-danger-solid" id="btn-replace-yes" data-i18n="replace.confirm">نعم، استبدل</button>
+        </div>
+      </div>
       <div class="upgrade-status" id="upgrade-status" role="status" aria-live="polite"></div>
     </div>
 
@@ -175,6 +187,18 @@
           <code id="support-code" style="font-size:14px; font-weight:600; letter-spacing:1px; font-family:monospace; color:#e6e9ef; user-select:all; white-space:nowrap; overflow:hidden; text-overflow:ellipsis;">—</code>
         </div>
         <button class="btn btn-ghost" id="btn-copy-key" style="padding:4px 10px; font-size:12px; height:auto; min-height:auto; white-space:nowrap;" onclick="copySupportCode()"><svg class="icon icon-16" aria-hidden="true" focusable="false"><use href="#i-copy"></use></svg><span data-i18n="common.copy">نسخ</span></button>
+      </div>
+
+      <!-- Where everything is saved (2.0.5): the ONE live company file the whole database is written to every minute - read-only, with «show in Finder».
+           Hidden until a file is known. «All companies (N) are saved in one file» when there are several. -->
+      <div class="live-file" id="live-file-row" style="display:none;">
+        <div class="live-file-body">
+          <div class="live-file-title"><svg class="icon icon-16 icon-lead" aria-hidden="true" focusable="false"><use href="#i-database"></use></svg><span data-i18n="live.title">مكان حفظ بياناتك</span></div>
+          <div class="live-file-label" id="live-file-label"></div>
+          <code class="live-file-path" id="live-file-path" dir="ltr"></code>
+          <div class="live-file-note" id="live-file-note" style="display:none;"></div>
+        </div>
+        <button type="button" class="btn btn-ghost live-file-show" id="btn-live-file-show"><svg class="icon icon-16" aria-hidden="true" focusable="false"><use href="#i-folder-open"></use></svg><span id="live-file-show-label"></span></button>
       </div>
 
       <div class="control-actions">

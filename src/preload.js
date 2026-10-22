@@ -64,13 +64,13 @@ contextBridge.exposeInMainWorld('texacore', {
   getUpgradeNotice: () => ipcRenderer.invoke('upgrade-notice-get'),
   dismissUpgradeNotice: () => ipcRenderer.invoke('upgrade-notice-dismiss'),
   openUpgradeFolder: () => ipcRenderer.invoke('upgrade-notice-open-folder'),
-  openUpgradeTcdb: (filePath) => ipcRenderer.invoke('upgrade-notice-open-tcdb', filePath),
+  openUpgradeTcdb: (filePath, opts) => ipcRenderer.invoke('upgrade-notice-open-tcdb', filePath, opts),   // 2.0.5: opts = { confirmReplaceAll:true } after the window asked
 
   // Browser
   openBrowser: (port) => ipcRenderer.invoke('open-browser', port),
 
   // Backup
-  restoreBackup: (filePath) => ipcRenderer.invoke('backup-restore', filePath),
+  restoreBackup: (filePath, opts) => ipcRenderer.invoke('backup-restore', filePath, opts),   // 2.0.5: refused (REPLACE_ALL_CONFIRM_REQUIRED) unless opts.confirmReplaceAll === true
   backupStatus: () => ipcRenderer.invoke('backup-status'),
   backupNow: () => ipcRenderer.invoke('backup-now'),
   revealBackup: (filePath) => ipcRenderer.invoke('reveal-backup', filePath),

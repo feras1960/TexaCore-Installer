@@ -792,6 +792,40 @@ async function refreshEmployeesBox(state) {
 // folder that is not downloaded) - plus "sync now" and "show in Finder". Text only goes in through textContent (a path is data, never markup).
 let _bkRefreshing = false;
 let _bkBusy = false;
+// ─── «Where is my data» (2.0.5): the ONE live company file, read-only, with «show in Finder» ───────────────────────────
+// The whole database of this install (every company) is written to ONE file every minute. This line is always on the main screen so the owner sees where
+// everything is saved - and, when several companies exist, that they all share it. Text goes in through textContent only (a path is data, never markup).
+function liveFileView(st, companyCount) {
+  const live = st && typeof st.liveFile === 'string' && st.liveFile ? st.liveFile : '';
+  if (!live) return null;
+  const primary = ((st && st.targets) || []).find((x) => x.role === 'primary') || null;
+  const n = Number.isFinite(companyCount) ? companyCount : 0;
+  const planned = Number(st && st.plannedCompanies) || 0;
+  return {
+    path: live,
+    label: n > 1 ? t('live.many').replace('{n}', String(n)) : t('live.single'),
+    note: planned > 0 ? t('live.planned').replace('{n}', String(planned)) : (primary && primary.exists === false && !primary.lastSuccess ? t('live.notYet') : ''),
+    canReveal: !!(primary && primary.exists),
+  };
+}
+function renderLiveFile(st) {
+  const row = document.getElementById('live-file-row');
+  if (!row) return;
+  const v = liveFileView(st, typeof _empCompanies !== 'undefined' ? _empCompanies.length : 0);
+  if (!v) { row.style.display = 'none'; return; }
+  row.style.display = 'flex';
+  document.getElementById('live-file-label').textContent = v.label;
+  const pathEl = document.getElementById('live-file-path');
+  pathEl.textContent = v.path; pathEl.title = v.path;
+  const note = document.getElementById('live-file-note');
+  note.textContent = v.note; note.style.display = v.note ? 'block' : 'none';
+  const btn = document.getElementById('btn-live-file-show');
+  document.getElementById('live-file-show-label').textContent = bkRevealLabel();
+  btn.disabled = !v.canReveal;
+  btn.onclick = () => { window.texacore.revealBackup(v.path); };
+}
+document.addEventListener('i18n-applied', () => { try { if (typeof _lastBackupStatus !== 'undefined' && _lastBackupStatus) renderLiveFile(_lastBackupStatus); } catch { /* ignore */ } });
+let _lastBackupStatus = null;
 function bkAgo(iso) {
   if (!iso) return t('bk.never');
   const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
@@ -809,6 +843,8 @@ async function refreshBackupsBox() {
   _bkRefreshing = true;
   try {
     const st = await window.texacore.backupStatus();
+    _lastBackupStatus = st;
+    renderLiveFile(st);
     const targets = (st && st.targets) || [];
     if (!targets.length) { box.style.display = 'none'; return; }
     box.style.display = 'block';
@@ -1391,6 +1427,44 @@ document.addEventListener('keydown', (e) => {
 
 
 // ─── One-time upgrade notice ──────────────────────────────────
+// ─── Replace-all confirmation (2.0.5) ───────────────────────────────────────────────────────────────────────────────────────
+// Opening a company file REPLACES every company of this computer, for every user. The main process refuses (REPLACE_ALL_CONFIRM_REQUIRED + the list + the connected
+// sessions) until the window has asked; «Cancel» is the focused default and Escape. Resolves true only on the explicit «Yes, replace».
+function replaceConfirmView(info) {
+  const cs = info && Array.isArray(info.companies) ? info.companies : null;
+  const sessions = info && Number.isFinite(info.sessions) ? info.sessions : null;
+  return {
+    text: t('replace.warn'),
+    companiesTitle: cs === null ? t('replace.unknown') : (cs.length ? t('replace.companies').replace('{n}', String(cs.length)) : ''),
+    names: cs === null ? [] : cs.slice(0, 12).map((c) => String(c.name || c.id || '')),
+    more: cs && cs.length > 12 ? cs.length - 12 : 0,
+    sessions: sessions && sessions > 0 ? t('replace.sessions').replace('{n}', String(sessions)) : '',
+  };
+}
+function askReplaceAll(info) {
+  return new Promise((resolve) => {
+    const box = document.getElementById('replace-confirm');
+    if (!box) { resolve(false); return; }
+    const v = replaceConfirmView(info);
+    document.getElementById('replace-confirm-text').textContent = v.text;
+    document.getElementById('replace-confirm-companies-title').textContent = v.companiesTitle;
+    const ul = document.getElementById('replace-confirm-list');
+    ul.textContent = '';
+    for (const name of v.names) { const li = document.createElement('li'); li.textContent = name; ul.appendChild(li); }
+    if (v.more) { const li = document.createElement('li'); li.textContent = '+' + v.more; ul.appendChild(li); }
+    document.getElementById('replace-confirm-sessions').textContent = v.sessions;
+    const yes = document.getElementById('btn-replace-yes');
+    const no = document.getElementById('btn-replace-cancel');
+    const done = (answer) => { box.style.display = 'none'; yes.onclick = null; no.onclick = null; document.removeEventListener('keydown', onKey, true); resolve(answer); };
+    const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); done(false); } };
+    yes.onclick = () => done(true);
+    no.onclick = () => done(false);
+    document.addEventListener('keydown', onKey, true);
+    box.style.display = 'block';
+    try { no.focus(); } catch { /* not focusable yet */ }
+  });
+}
+
 // After an upgrade over a 1.x install the main process leaves <data dir>/upgrade-notice.json: where the previous data is kept and the company
 // files (.tcdb) the old settings named. Shown until dismissed (or until a file is restored through it); every action goes through the main process,
 // which only acts on what the notice itself lists.
@@ -1439,12 +1513,19 @@ document.addEventListener('keydown', (e) => {
     note = null; result = null; render();
   }
 
-  async function openFile(p) {
+  async function openFile(p, confirmed) {
     if (busy) return;
     busy = true; result = null; render();
     let r;
-    try { r = await window.texacore.openUpgradeTcdb(p); } catch (e) { r = { success: false, error: e.message }; }
+    try { r = await window.texacore.openUpgradeTcdb(p, confirmed ? { confirmReplaceAll: true } : undefined); } catch (e) { r = { success: false, error: e.message }; }
     busy = false;
+    if (r && !r.success && r.code === 'REPLACE_ALL_CONFIRM_REQUIRED') {
+      // 2.0.5: the database already holds companies - nothing was touched; ask, and only on an explicit yes open the file (the main process then saves a backup first)
+      render();
+      if (await askReplaceAll(r)) return openFile(p, true);
+      result = null; render();
+      return;
+    }
     if (r && r.success) {
       const n = r.copyErrors || 0;
       result = { ok: true, text: n ? t('upgrade.doneWithErrors').replace('{n}', n).replace('{f}', r.copyErrorsLog || '') : t('upgrade.done').replace('{c}', r.companyName || '') };

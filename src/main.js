@@ -18,6 +18,7 @@ const netGuard = require('./net-guard');
 const cloudClient = require('./cloud-client');
 const BackupManager = require('./backup-manager');
 const companyFile = require('./company-file');
+const livePolicy = require('./live-file-policy');   // 2.0.5: replace-all needs an explicit yes + a pre-open backup; the live file never changes owner by itself
 const locateFile = require('./locate-file');
 const folderAccessMod = require('./folder-access');   // 2.0.4: macOS «Files and Folders» permission - probed in a child process, never in the main loop
 const locateJobMod = require('./locate-job');
@@ -1161,20 +1162,21 @@ ipcMain.handle('upgrade-notice-open-folder', async () => {
   const err = await shell.openPath(n.folder);
   return err ? { success: false, error: err } : { success: true, folder: n.folder };
 });
-ipcMain.handle('upgrade-notice-open-tcdb', async (_, filePath) => {
+ipcMain.handle('upgrade-notice-open-tcdb', async (_, filePath, opts) => {
   const n = upgradeBootstrap.readUpgradeNotice(DATA_DIR);
   const listed = n && n.tcdb.find((t) => t.path === filePath);
   if (!listed) return { success: false, error: 'this file is not one the notice lists' };
   if (!listed.exists) return { success: false, error: 'الملف غير موجود في مكانه — ' + filePath };
   try {
-    const out = await restoreTcdbFromPath(filePath);
+    // 2.0.5: the window asks the user (REPLACE_ALL_CONFIRM_REQUIRED + the list) and calls again with { confirmReplaceAll:true }
+    const out = await restoreTcdbFromPath(filePath, { confirmReplaceAll: livePolicy.isConfirmed(opts && opts.confirmReplaceAll) });
     fileLog('[OpenTCDB] (from the upgrade notice) result:', JSON.stringify({ success: out && out.success, companyName: out && out.companyName, users: out && out.users, integrity: out && out.integrity,
       copyErrors: out && out.copyErrors, copyErrorsLog: out && out.copyErrorsLog, dumpedFromMajor: out && out.dumpedFromMajor }));
     if (out && out.success) upgradeBootstrap.dismissUpgradeNotice(DATA_DIR);        // the data is back: the notice has done its job
     return out;
   } catch (e) {
     fileLog('[OpenTCDB] ❌ (from the upgrade notice)', e.message);
-    return { success: false, error: e.message, code: e.code || null };
+    return { success: false, error: e.message, code: e.code || null, ...(e && e.replaceAll ? e.replaceAll : {}) };
   }
 });
 
@@ -1490,6 +1492,11 @@ async function handleCreateLocalCompany(companyData) {
       }
     }
 
+    // ── 0b. (2.0.5) the companies already in this database and the file that holds them: a company created NEXT TO others must not take the live file away ──
+    let companiesBefore = [];
+    try { companiesBefore = await listLocalCompanies(); } catch (e) { fileLog('[TexaCore] could not list the existing companies before creating one:', e.message); }
+    const liveBefore = liveCompanyFile();
+
     // ── 1. Create tenant, owner, company (server functions, as the admin) ──
     const result = await provisioning.createLocalCompany(provisioningDeps(), companyData);
     if (!result.success) {
@@ -1499,6 +1506,8 @@ async function handleCreateLocalCompany(companyData) {
     const { tenantId, companyId, adminEmail, accessToken, refreshToken } = result;
     const anonKey = svcManager.anonKey;
     fileLog('[TexaCore] Tenant, admin and company created:', companyId);
+    // 2.0.5: the live file belongs to the WHOLE database. Other companies exist and a file is already syncing them ⇒ it stays (see step 2).
+    const filePlan = livePolicy.planNewCompanyFile({ existingCompanyCount: companiesBefore.length, liveFilePath: liveBefore });
 
     // ── 2. Where the .tcdb backup file lives + remember the company for backup auto-resume ──
     // 2.0.2: a company made from a Rashid file picked in the native dialog (rsfSourceRef) keeps its file BESIDE that Rashid file, named after it
@@ -1532,8 +1541,10 @@ async function handleCreateLocalCompany(companyData) {
         tcdbPlacement = tcdbFallbackReason ? 'fallback-default' : 'default';
       }
       if (dir) {
-        if (!fs.existsSync(dir)) fs.mkdirSync(dir, { recursive: true });
-        tcdbFilePath = companyFile.uniqueTcdbPath(dir, base);
+        if (!fs.existsSync(dir) && !filePlan.keepLive) fs.mkdirSync(dir, { recursive: true });   // (a file that is only recorded does not need its folder created yet)
+        // a name another company already planned counts as taken too (two recorded files must never be the same path)
+        const takenByConfig = new Set([...(config.companies || []).map((co) => co && co.plannedTcdbPath), filePlan.keepLive ? filePlan.liveFilePath : null].filter(Boolean).map((x) => path.resolve(x)));
+        tcdbFilePath = companyFile.uniqueTcdbPath(dir, base, (cand) => fs.existsSync(cand) || takenByConfig.has(path.resolve(cand)));
         storageDir = dir;
         fileLog('[TexaCore] Backup file path:', tcdbFilePath, '(' + tcdbPlacement + ')');
       }
@@ -1543,12 +1554,23 @@ async function handleCreateLocalCompany(companyData) {
     // A company made from a Rashid file keeps TWO copies in step: the one beside the Rashid file and one in the program's own backup folder
     // (<app data>/backups/<same name>) - the user's folder may be a USB stick, a cloud folder or deleted; the program's copy is always there.
     let tcdbCopyPath = null;
-    if (tcdbFilePath && (pickedSource || companyData.purpose === 'rsf_import')) {
+    if (tcdbFilePath && !filePlan.keepLive && (pickedSource || companyData.purpose === 'rsf_import')) {
       try { tcdbCopyPath = companyFile.programCopyPath(DATA_DIR, tcdbFilePath); } catch (err) { console.warn('[TexaCore] Could not choose the program copy path:', err.message); }
     }
-    config.storagePath = storageDir;
-    config.companies = [{ name: companyData.companyName, tcdbPath: tcdbFilePath, storagePath: storageDir, ...(tcdbCopyPath ? { copyPath: tcdbCopyPath } : {}) }];
-    saveConfig(config);
+    // 2.0.5: the live file stays ⇒ this company's chosen file is only RECORDED (a planned entry - the per-company mode of a later round) and the answer says where the data really is.
+    if (filePlan.keepLive) {
+      config.companies = livePolicy.recordPlannedCompany(config.companies, {
+        name: companyData.companyName, companyId, tenantId,
+        plannedTcdbPath: tcdbFilePath, plannedStoragePath: storageDir, placement: tcdbPlacement,
+      }, filePlan.liveFilePath);
+      saveConfig(config);
+      tcdbCopyPath = null;   // the program's second copy belongs to the live file's own company
+      fileLog('[TexaCore] The live company file stays', filePlan.liveFilePath, '- this company\'s chosen file is only recorded:', tcdbFilePath);
+    } else {
+      config.storagePath = storageDir;
+      config.companies = [{ name: companyData.companyName, tcdbPath: tcdbFilePath, storagePath: storageDir, ...(tcdbCopyPath ? { copyPath: tcdbCopyPath } : {}) }];
+      saveConfig(config);
+    }
     if (companyData.rsfSourceRef) pickedFiles.drop(companyData.rsfSourceRef);
 
     // ── 3. Vendor support account (vendor's own machine only) ──
@@ -1564,8 +1586,8 @@ async function handleCreateLocalCompany(companyData) {
       console.warn('[TexaCore] Support account setup skipped:', saErr.message); // never blocks company creation
     }
 
-    // ── 4. Real-time backup sync ──
-    if (tcdbFilePath) {
+    // ── 4. Real-time backup sync ── (2.0.5: only when this company's file IS the live file; otherwise the existing manager keeps syncing the whole database)
+    if (tcdbFilePath && !filePlan.keepLive) {
       try {
         // 2.0.2: this company replaces the previous one in config.companies - its manager must stop writing to the previous company's files
         if (backupManager) { try { backupManager.stopSync(); } catch { /* already stopped */ } }
@@ -1621,9 +1643,11 @@ async function handleCreateLocalCompany(companyData) {
       provisioningKey: result.provisioningKey || undefined,
       createdSource: result.createdSource || undefined,
       // 2.0.2: where this company's .tcdb is (null = no file was set up) and why there
-      tcdbPath: tcdbFilePath, tcdbPlacement, tcdbFallbackReason: tcdbFallbackReason || undefined,
+      // 2.0.5: when the live file stayed (sharedLiveFile) `tcdbPath` is the file the data REALLY goes to (the live one) and the file the company chose is `plannedTcdbPath`
+      tcdbPath: filePlan.keepLive ? filePlan.liveFilePath : tcdbFilePath, tcdbPlacement, tcdbFallbackReason: tcdbFallbackReason || undefined,
       tcdbCopyPath: tcdbCopyPath || undefined,
-      cloudFolder: (tcdbFilePath && companyFile.detectCloudFolder(path.dirname(tcdbFilePath))) || undefined,
+      ...(filePlan.keepLive ? { sharedLiveFile: true, liveFilePath: filePlan.liveFilePath, plannedTcdbPath: tcdbFilePath || undefined, companiesInFile: companiesBefore.length + 1 } : {}),
+      cloudFolder: ((filePlan.keepLive ? filePlan.liveFilePath : tcdbFilePath) && companyFile.detectCloudFolder(path.dirname(filePlan.keepLive ? filePlan.liveFilePath : tcdbFilePath))) || undefined,
       // The SPA talks to the unified API gateway (routes /auth + /rest + adds CORS), NOT GoTrue directly.
       supabaseUrl: `http://localhost:${svcManager.activeApiPort}`
     };
@@ -1657,13 +1681,19 @@ ipcMain.handle('reveal-backup', async (_, filePath) => {
 });
 
 ipcMain.handle('backup-status', async () => {
-  if (!backupManager) return { syncing: false, running: false, targets: [] };
-  return backupManager.getStatus();
+  // 2.0.5: + the live file (also when no manager is running yet) and how many companies recorded a file of their own, for the read-only «where is my data» line of the main screen
+  let planned = 0;
+  try { planned = (loadConfig().companies || []).filter((c) => c && c.planned === true).length; } catch { planned = 0; }
+  const base = backupManager ? backupManager.getStatus() : { syncing: false, running: false, targets: [] };
+  return { ...base, liveFile: liveCompanyFile(), plannedCompanies: planned };
 });
 
-ipcMain.handle('backup-restore', async (_, filePath) => {
+ipcMain.handle('backup-restore', async (_, filePath, opts) => {
   if (!backupManager) return { success: false, error: 'Backup not initialized' };
   try {
+    // 2.0.5: this replaces every company too - same gate and same backup-first rule as opening a company file
+    const replaceSnapshot = await assertReplaceAllConfirmed({ confirmReplaceAll: opts && opts.confirmReplaceAll });
+    await takePreOpenBackup(replaceSnapshot);
     const result = await backupManager.restore(filePath);
     // Inject the vendor support account (vendor machine only) into the restored DB.
     try { if (svcManager) await svcManager._ensureSuperAdmin(); } catch (e) { console.warn('[Restore IPC] vendor inject:', e.message); }
@@ -1671,7 +1701,7 @@ ipcMain.handle('backup-restore', async (_, filePath) => {
     try { if (svcManager) await svcManager.syncAdminPassword(); } catch (e) { console.warn('[Restore IPC] admin pw sync:', e.message); }
     return { success: true, ...result };
   } catch (e) {
-    return { success: false, error: e.message };
+    return { success: false, error: e.message, code: e.code || null, ...(e && e.replaceAll ? e.replaceAll : {}) };
   }
 });
 
@@ -1744,7 +1774,8 @@ function initBackupOnStartup() {
     const config = loadConfig();
     if (!config.companies || config.companies.length === 0) return;
 
-    const company = config.companies[0];
+    const company = livePolicy.liveEntryOf(config.companies);   // 2.0.5: the live entry, never a planned per-company one
+    if (!company) return;
     const tcdbPath = company.tcdbPath || company.storagePath;
     if (!tcdbPath) return;
 
@@ -1926,7 +1957,7 @@ function newBackupManager(extra = {}) {
 function liveCompanyFile() {
   try {
     if (backupManager && backupManager.backupPath) return backupManager.backupPath;
-    const co = (loadConfig().companies || [])[0];
+    const co = livePolicy.liveEntryOf(loadConfig().companies);   // (2.0.5) never a planned per-company entry
     const p = co && (co.tcdbPath || null);
     return p || null;
   } catch { return null; }
@@ -1954,7 +1985,8 @@ const sameFile = (a, b) => {
 function fileErrorStatus(code) {
   return ({ PICK_EXPIRED: 404, FILE_NOT_FOUND: 404, FILE_NOT_LOCAL: 504, FILE_TOO_LARGE: 413, EXPORT_EXISTS: 409, EXPORT_IS_LIVE_FILE: 409,
     EXPORT_BUSY: 409, TCDB_PASSPHRASE_REQUIRED: 422, TCDB_BAD_PASSPHRASE: 422, TCDB_CORRUPT: 422, LEGACY_TCDB: 422, PASSPHRASE_TOO_SHORT: 400, BAD_REQUEST: 400, SERVICES_DOWN: 503, EXPORT_EMPTY: 409, NO_PERMISSION: 403, LOCATE_BUSY: 429, BAD_JSON: 400, BODY_TOO_LARGE: 413, RESTORE_BUSY: 409,
-    FOLDER_PERMISSION: 403, JOB_EXPIRED: 404, BAD_STATE: 409, NOT_LOCAL: 409, TCDB_UNSAFE_SQL: 422, TCDB_NO_DATA: 422, TCDB_NO_SCHEMA: 422 })[code] || 500;
+    FOLDER_PERMISSION: 403, JOB_EXPIRED: 404, BAD_STATE: 409, NOT_LOCAL: 409, TCDB_UNSAFE_SQL: 422, TCDB_NO_DATA: 422, TCDB_NO_SCHEMA: 422,
+    REPLACE_ALL_CONFIRM_REQUIRED: 409, PRE_OPEN_BACKUP_FAILED: 500 })[code] || 500;
 }
 
 /** The folders a search for a picked file looks in (harness runs may replace them with scratch folders so they never scan the real profile). */
@@ -2006,6 +2038,22 @@ async function handleCompanyFileRoutes(req, res) {
           success: true, ready: !!(svcManager && svcManager.isRunning()),
           companyFile: live, companyDir: live ? path.dirname(live) : null, defaultDir: companyFile.defaultCompanyDir(),
           passphraseMinLength: MIN_PASSPHRASE_LEN, platform: process.platform,
+        });
+        return true;
+      }
+
+      // ── GET /api/live-file-info (2.0.5): the ONE file the whole database is saved to right now + the companies in it + the files companies chose for later ──
+      //    The company wizard says «all companies are saved in one file: <path>» from this; mode tells a later page whether per-company files are on.
+      case 'GET /api/live-file-info': {
+        const live = liveCompanyFile();
+        let companies = null;
+        try { if (svcManager && svcManager.isRunning()) companies = await listLocalCompanies(); } catch { companies = null; }
+        const planned = (loadConfig().companies || []).filter((c) => c && c.planned === true).map((c) => ({ name: c.name || '', companyId: c.companyId || null, plannedTcdbPath: c.plannedTcdbPath || null }));
+        sendJson(res, 200, {
+          success: true, mode: 'single-file', liveFile: live,
+          companyCount: companies ? companies.length : null,
+          companies: companies ? companies.map((c) => ({ id: c.id, name: c.name })) : null,
+          planned,
         });
         return true;
       }
@@ -2247,7 +2295,7 @@ async function handleCompanyFileRoutes(req, res) {
         if (!isTcdbContainer(buf)) throw Object.assign(new Error('Not a TexaCore backup file'), { code: 'BAD_REQUEST' });
         const passphrase = typeof body.passphrase === 'string' ? body.passphrase.slice(0, 256) : '';
         newBackupManager().probeAccess(buf, { passphrase });   // a protected file answers TCDB_PASSPHRASE_REQUIRED / TCDB_BAD_PASSPHRASE BEFORE anything changes
-        const out = await restoreTcdbFromPath(item.filePath, { passphrase });
+        const out = await restoreTcdbFromPath(item.filePath, { passphrase, confirmReplaceAll: livePolicy.isConfirmed(body.confirmReplaceAll) });   // 2.0.5: the explicit yes of replace-all (REPLACE_ALL_CONFIRM_REQUIRED without it)
         fileLog('[Pick] opened in place', item.filePath, '→ company file', out && out.tcdbPath);
         sendJson(res, 200, { ...out, openedFrom: item.filePath, inPlace: !!(out && out.tcdbPath && path.resolve(out.tcdbPath) === path.resolve(item.filePath)) });
         return true;
@@ -2271,7 +2319,7 @@ async function handleCompanyFileRoutes(req, res) {
     }
   } catch (err) {
     const code = err && err.code ? String(err.code) : 'ERROR';
-    if (!res.headersSent) sendJson(res, fileErrorStatus(code), { success: false, code, error: err.message, ...(code === 'FOLDER_PERMISSION' ? { area: err.area || null, state: err.state || 'denied' } : {}) });
+    if (!res.headersSent) sendJson(res, fileErrorStatus(code), { success: false, code, error: err.message, ...(code === 'FOLDER_PERMISSION' ? { area: err.area || null, state: err.state || 'denied' } : {}), ...(err && err.replaceAll ? err.replaceAll : {}) });
     else res.end();
     if (fileErrorStatus(code) === 500) console.error(`[CompanyFile] ${route} failed:`, err.message);
     return true;
@@ -2418,6 +2466,66 @@ function adminRequestIsLocal(req) {
   // the UI proxy always sends Host: 127.0.0.1:<admin port>; a page that set x-texacore-fwd-* itself (DNS rebinding to this port) carries its own Host
   return netGuard.isLoopbackHost(req.headers.host) && netGuard.isLoopbackHost(fwdHost) && netGuard.isThisMachineAddress(fwdPeer) && fwdProxied === '0';
 }
+// ─── (2.0.5) Replacing the whole database needs an explicit yes, and a backup of what is replaced is taken first ───────────────────────────
+// ONE database holds every company of this install, and opening a .tcdb truncates all of it (for every user) before loading the file. 2.0.4 did that without a
+// word (owner, 21-10). Now: the database is read first (companies + connected sessions); when it holds companies the request must carry confirmReplaceAll:true
+// (the page asks the user; an older page never sends it and gets REPLACE_ALL_CONFIRM_REQUIRED with the list, nothing changes), and a .tcdb of what is about to be
+// replaced is written to <app data>/backups/pre-open/ BEFORE anything is touched - if it cannot be written, nothing is replaced.
+/** What a replace-all would wipe: { companies:[{id,name}]|null, sessions, users, liveFile }. companies === null = the database could not be read (never treated as empty). */
+async function replaceAllSnapshot() {
+  const out = { companies: null, sessions: null, users: null, liveFile: null };
+  try { out.liveFile = liveCompanyFile(); } catch { out.liveFile = null; }
+  if (!svcManager) return out;
+  const { Client } = require('pg');
+  const client = new Client({ host: '127.0.0.1', port: ServiceManager.PG_PORT, database: 'postgres', user: 'postgres', password: svcManager.dbPassword || '', connectionTimeoutMillis: 8000 });
+  try {
+    await client.connect();
+    try {
+      const r = await client.query('SELECT id, name FROM public.companies ORDER BY created_at DESC LIMIT 500');
+      out.companies = r.rows.map((x) => ({ id: String(x.id), name: x.name == null ? '' : String(x.name) }));
+    } catch (e) {
+      if (e && e.code === '42P01') out.companies = [];   // no companies table at all = an empty database (the restore then reports TCDB_NO_SCHEMA itself)
+    }
+    // "connected" = a session refreshed within the last hour (an access token lives an hour); the columns differ between GoTrue builds, so the richer query is tried first
+    for (const sql of [
+      "SELECT count(*)::int AS n, count(DISTINCT user_id)::int AS u FROM auth.sessions WHERE COALESCE(refreshed_at, updated_at, created_at) > now() - interval '1 hour' AND (not_after IS NULL OR not_after > now())",
+      "SELECT count(*)::int AS n, count(DISTINCT user_id)::int AS u FROM auth.sessions WHERE COALESCE(updated_at, created_at) > now() - interval '1 hour'",
+    ]) {
+      try { const r = await client.query(sql); out.sessions = +r.rows[0].n; out.users = +r.rows[0].u; break; } catch { /* try the next shape */ }
+    }
+  } catch (e) {
+    console.warn('[ReplaceAll] could not read the database:', e.message);
+  } finally {
+    try { await client.end(); } catch { /* not connected */ }
+  }
+  return out;
+}
+/** The gate: throws REPLACE_ALL_CONFIRM_REQUIRED (with the list) unless the database holds no companies or `confirmReplaceAll` is an explicit yes. Returns the snapshot. */
+async function assertReplaceAllConfirmed({ confirmReplaceAll } = {}) {
+  const snapshot = await replaceAllSnapshot();
+  livePolicy.requireReplaceAllConfirmation({ confirmReplaceAll, snapshot });
+  return snapshot;
+}
+/** A .tcdb of the database as it is NOW, in the program's own backups folder (the unified key: it opens on any TexaCore). Returns its path, or null when there was nothing to save. */
+async function takePreOpenBackup(snapshot) {
+  const holdsCompanies = !!(snapshot && Array.isArray(snapshot.companies) && snapshot.companies.length > 0);
+  const unknown = !snapshot || snapshot.companies === null;
+  if (!holdsCompanies && !unknown) return null;   // an empty database: nothing to lose
+  const target = livePolicy.preOpenBackupPath(DATA_DIR);
+  try {
+    fs.mkdirSync(path.dirname(target), { recursive: true });
+    const out = await newBackupManager({ backupPath: target }).exportTo(target, { overwrite: false });
+    livePolicy.prunePreOpenBackups(path.dirname(target), 10);
+    fileLog('[OpenTCDB] backup of the current companies before replacing them →', out.path, out.size, 'bytes');
+    return out.path;
+  } catch (e) {
+    if (e && e.code === 'EXPORT_EMPTY') return null;   // the dump holds no company data
+    if (holdsCompanies) { fileLog('[OpenTCDB] ❌ the pre-open backup failed:', e && e.message); throw livePolicy.preOpenBackupError(e); }
+    console.warn('[OpenTCDB] pre-open backup skipped (the database could not be read):', e && e.message);
+    return null;
+  }
+}
+
 // ─── Open a .tcdb: restore it into the running database and keep syncing back to the SAME file ───────────────
 // Shared by the file-dialog route (GET /api/open-tcdb) and the launcher's upgrade notice («فتح» beside a company file named in the old config).
 // Returns the JSON the route sends; throws on failure.
@@ -2429,10 +2537,13 @@ async function restoreTcdbFromPath(selectedPath, opts = {}) {
   restoreInFlight = true;
   try { return await openTcdbFromPathUnlocked(selectedPath, opts); } finally { restoreInFlight = false; }
 }
-async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '' } = {}) {
+async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '', confirmReplaceAll = false } = {}) {
   const fileName = path.basename(selectedPath);
   const fileDir = path.dirname(selectedPath);
   if (!svcManager || !svcManager.isRunning()) throw new Error('الخدمات غير شغّالة — شغّل النظام أولاً ثم افتح الملف');
+  // 2.0.5: replacing every company needs the user's explicit yes, and what is replaced is saved first (nothing below runs without both)
+  const replaceSnapshot = await assertReplaceAllConfirmed({ confirmReplaceAll });
+  const preOpenBackup = await takePreOpenBackup(replaceSnapshot);
   // ── Restore from TCDB and sync back to SAME file ──
   const os = require('os');
   const isWin = process.platform === 'win32';
@@ -2648,6 +2759,7 @@ async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '' } = {}) 
     tenantId,
     users,
     tcdbPath: liveTarget,
+    preOpenBackup: preOpenBackup || undefined,   // 2.0.5: the file the companies that were replaced were saved to first (null/absent = the database was empty)
     protectedSource: openedWithPassphrase ? selectedPath : undefined,
     integrity: restoreIntegrity ? { ok: restoreIntegrity.ok, problems: restoreIntegrity.problems.slice(0, 5) } : null,
     ...restoreResult
@@ -3076,8 +3188,9 @@ const httpServer = http.createServer(async (req, res) => {
 
   // ─── GET /api/open-tcdb ─────────────────────────────────────
   // Opens native file dialog → gets full path (even USB) → restores → syncs to same file
-  } else if (req.method === 'GET' && req.url === '/api/open-tcdb') {
+  } else if (req.method === 'GET' && (req.url === '/api/open-tcdb' || (req.url || '').startsWith('/api/open-tcdb?'))) {
     try {
+      const openQuery = new URL(req.url, 'http://127.0.0.1').searchParams;   // 2.0.5: ?confirmReplaceAll=true is the explicit yes of replace-all
       // (the dialog itself is the shared showNativeDialog() above: it activates the app and hangs from an always-on-top host window, so it opens IN FRONT of the browser without showing the main window)
       const result = await showNativeDialog('open', {
         title: 'فتح ملف بيانات TexaCore',
@@ -3103,7 +3216,7 @@ const httpServer = http.createServer(async (req, res) => {
       console.log(`[OpenTCDB] User selected: ${selectedPath}`);
 
       if (isTcdb) {
-        const out = await restoreTcdbFromPath(selectedPath);
+        const out = await restoreTcdbFromPath(selectedPath, { confirmReplaceAll: livePolicy.isConfirmed(openQuery.get('confirmReplaceAll')) });
         res.writeHead(200, { 'Content-Type': 'application/json' });
         res.end(JSON.stringify(out));
       } else if (isRsf) {
@@ -3116,8 +3229,8 @@ const httpServer = http.createServer(async (req, res) => {
       }
     } catch (err) {
       console.error('[OpenTCDB] ❌ Error:', err.message);
-      res.writeHead(err.code === 'LEGACY_TCDB' || /^TCDB_/.test(String(err.code)) ? 422 : 500, { 'Content-Type': 'application/json' });
-      res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null }));
+      res.writeHead(err.code === 'LEGACY_TCDB' || /^TCDB_/.test(String(err.code)) ? 422 : fileErrorStatus(err.code), { 'Content-Type': 'application/json' });
+      res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null, ...(err && err.replaceAll ? err.replaceAll : {}) }));
     }
 
   } else if (HARNESS_OK && req.method === 'GET' && req.url === '/api/ui-smoke') {
@@ -3275,6 +3388,17 @@ const httpServer = http.createServer(async (req, res) => {
           throw probeErr;
         }
         
+        // 2.0.5: replacing every company needs the explicit yes (a text field `confirmReplaceAll`), and what is replaced is saved first - both BEFORE the upload is written anywhere
+        let confirmReplaceAllField = '';
+        for (const part of parts) {
+          const he = part.indexOf('\r\n\r\n');
+          if (he === -1) continue;
+          const hdr = part.subarray(0, he).toString();
+          if (/name="confirmReplaceAll"/.test(hdr) && !hdr.includes('filename=')) { confirmReplaceAllField = part.subarray(he + 4, part.lastIndexOf('\r\n')).toString('utf8').slice(0, 16); break; }
+        }
+        const uploadReplaceSnapshot = await assertReplaceAllConfirmed({ confirmReplaceAll: confirmReplaceAllField });
+        const uploadPreOpenBackup = await takePreOpenBackup(uploadReplaceSnapshot);
+
         // 2.0.4: the user's choice on the permission step - keep the company file in the program's own folder (no macOS permission needed)
         let folderChoice = '';
         for (const part of parts) {
@@ -3363,11 +3487,11 @@ const httpServer = http.createServer(async (req, res) => {
         
         console.log(`[Restore] ✅ DB restored from ${tcdbPath}`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: true, tcdbPath, ...restoreResult }));
+        res.end(JSON.stringify({ success: true, tcdbPath, preOpenBackup: uploadPreOpenBackup || undefined, ...restoreResult }));
       } catch (err) {
         console.error('[Restore] ❌ Failed:', err.message);
-        res.writeHead(/^TCDB_/.test(String(err.code)) ? 422 : (err.code === 'RESTORE_BUSY' ? 409 : (err.code === 'FOLDER_PERMISSION' ? 403 : 500)), { 'Content-Type': 'application/json' });
-        res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null, ...(err.code === 'FOLDER_PERMISSION' ? { area: err.area || null, state: err.state || 'denied' } : {}) }));
+        res.writeHead(/^TCDB_/.test(String(err.code)) ? 422 : (err.code === 'RESTORE_BUSY' || err.code === 'REPLACE_ALL_CONFIRM_REQUIRED' ? 409 : (err.code === 'FOLDER_PERMISSION' ? 403 : 500)), { 'Content-Type': 'application/json' });
+        res.end(JSON.stringify({ success: false, error: err.message, code: err.code || null, ...(err.code === 'FOLDER_PERMISSION' ? { area: err.area || null, state: err.state || 'denied' } : {}), ...(err && err.replaceAll ? err.replaceAll : {}) }));
       } finally {
         if (heldRestore) restoreInFlight = false;
       }
