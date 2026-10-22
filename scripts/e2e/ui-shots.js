@@ -132,28 +132,28 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         function m(x) { return `${x.checked ? 'ON' : 'OFF'} track ${x.trackW}×${x.trackH} bg ${x.trackBg}, knob ${x.knob[0]}px, gaps L${x.insetLeft}/R${x.insetRight}/T${x.insetTop}/B${x.insetBottom} (${x.dir}), aria-checked=${x.ariaChecked}`; }
       });
 
-      await R.check(`U2 [${lang}] copy buttons beside the cloud link and the local link copy exactly what is shown`, async () => {
-        // display-only sample state (no cloud account exists in this isolated run): a subdomain and a LAN address, through the renderer's own updateUI
+      await R.check(`U2 [${lang}] the copy buttons beside the cloud address, the office employee link and the cloud employee link copy exactly what is shown (each link appears once)`, async () => {
+        // display-only sample state (no cloud account exists in this isolated run): a subdomain, a LAN address and one company, through the renderer's own updateUI / renderLinks
         await js(`(() => { window.__copied = []; navigator.clipboard.writeText = (x) => { window.__copied.push(x); return Promise.resolve(); };
+          _empCompanies = [{ id: '6b6e4674-1c2a-4b7e-9d0a-6f3b2c1d4e5f', name: 'Acme' }]; _empListed = true; _chosenCompanyId = '';
           updateUI(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: true, subdomain: 'acme-demo', port: 80 }), localIp: '192.168.1.20' }));
           document.getElementById('cloud-url').scrollIntoView({ block: 'center' }); })()`);
         await sleep(500);
         await ev({ shot: `ui-${lang}-copy-buttons.png`, wait: 200 });
-        const shown = await js(`({ cloud: document.getElementById('cloud-url').textContent.trim(), local: document.getElementById('local-url').textContent.trim(),
-          cloudBtn: document.getElementById('copy-cloud-url').textContent, localBtn: document.getElementById('copy-local-url').textContent,
-          lanBtn: document.getElementById('copy-lan-employee-url') ? document.getElementById('copy-lan-employee-url').textContent : null })`);
+        const shown = await js(`({ cloud: document.getElementById('cloud-url').textContent.trim(), lan: document.getElementById('lan-employee-url').textContent.trim(), emp: document.getElementById('employee-url').textContent.trim(),
+          cloudBtn: document.getElementById('copy-cloud-url').textContent, local: document.getElementById('local-url') ? 'still there' : null })`);
         await js(`document.getElementById('copy-cloud-url').click()`); await sleep(300);
         const afterCloud = await js(`({ copied: window.__copied.slice(), btn: document.getElementById('copy-cloud-url').textContent })`);
         await ev({ shot: `ui-${lang}-copy-clicked.png`, wait: 100 });
-        await js(`document.getElementById('copy-local-url').click()`); await sleep(300);
-        const afterLocal = await js(`({ copied: window.__copied.slice(), btn: document.getElementById('copy-local-url').textContent })`);
-        if (shown.cloud !== 'https://acme-demo.texacore.ai' || shown.local !== 'http://192.168.1.20') throw new Error(`links shown: ${JSON.stringify(shown)}`);
-        if (afterCloud.copied[0] !== shown.cloud) throw new Error(`cloud copy: ${JSON.stringify(afterCloud.copied)}`);
-        if (afterLocal.copied[1] !== shown.local) throw new Error(`local copy: ${JSON.stringify(afterLocal.copied)}`);
+        await js(`document.getElementById('copy-lan-employee-url').click()`); await sleep(300);
+        await js(`document.getElementById('copy-employee-url').click()`); await sleep(300);
+        const afterAll = await js(`window.__copied.slice()`);
+        if (shown.cloud !== 'https://acme-demo.texacore.ai' || shown.lan !== 'http://192.168.1.20/login?c=6b6e4674' || shown.emp !== 'https://acme-demo.texacore.ai/login?c=6b6e4674' || shown.local) throw new Error(`links shown: ${JSON.stringify(shown)}`);
+        if (afterAll[0] !== shown.cloud || afterAll[1] !== shown.lan || afterAll[2] !== shown.emp) throw new Error(`copied: ${JSON.stringify(afterAll)}`);
         if (afterCloud.btn === shown.cloudBtn) throw new Error('the button did not acknowledge the copy');
-        evidence[`copy_${lang}`] = { shown, afterCloud, afterLocal };
+        evidence[`copy_${lang}`] = { shown, afterCloud, afterAll };
         await js(`updateUI(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: false }) }))`);
-        return `cloud ${shown.cloud} → copied; local ${shown.local} → copied; button label «${shown.cloudBtn}» → «${afterCloud.btn}»`;
+        return `cloud ${shown.cloud}, office ${shown.lan}, anywhere ${shown.emp} → each copied; button label «${shown.cloudBtn}» → «${afterCloud.btn}»`;
       });
 
       await R.check(`U3 [${lang}] the red stop button only ASKS, inside the window; Cancel and Esc withdraw it; nothing is stopped`, async () => {

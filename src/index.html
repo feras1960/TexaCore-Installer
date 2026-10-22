@@ -186,10 +186,6 @@
           <span class="btn-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-square"></use></svg></span>
           <span data-i18n="btn.stop">إيقاف النظام</span>
         </button>
-        <button class="btn btn-open" id="btn-open" onclick="openERP()" style="display:none;">
-          <span class="btn-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-globe"></use></svg></span>
-          <span data-i18n="btn.open">فتح في المتصفح</span>
-        </button>
       </div>
 
       <!-- Stop confirmation: asked inside the window (no native dialog) before any service is stopped -->
@@ -221,74 +217,49 @@
         <input type="number" id="input-port" value="80" class="input input-small" dir="ltr" min="1" max="65535">
       </div>
 
-      <!-- Backups (2.0.2): every company file this program keeps in step - its path, when it was last in step, its state, a visible error -->
-      <div class="cloud-box" id="backups-box" style="display:none; margin-bottom:16px;">
+      <!-- Block 1 «الدخول إلى البرنامج» (2.0.5): open the program on THIS computer + the office link (LAN, ?c=<company code>) for the staff of the chosen company.
+           Shown while the system runs. The company selector (only with 2+ companies) drives both employee links (this one and the cloud one). -->
+      <div class="cloud-box stack-card" id="access-box" style="display:none;">
         <div class="cloud-header">
           <div>
-            <h3><svg class="icon icon-20 icon-lead" aria-hidden="true" focusable="false"><use href="#i-database"></use></svg><span data-i18n="bk.title">النسخ الاحتياطي</span></h3>
-            <p data-i18n="bk.subtitle">ملف الشركة (.tcdb) يُحدَّث تلقائياً كل دقيقة؛ هنا ترى كل مكان محفوظ فيه ومتى آخر مزامنة.</p>
+            <h3><svg class="icon icon-20 icon-lead" aria-hidden="true" focusable="false"><use href="#i-globe"></use></svg><span data-i18n="access.title">الدخول إلى البرنامج</span></h3>
+            <p data-i18n="access.subtitle">افتح البرنامج من هنا، وأرسل لموظفيك رابط دخولهم.</p>
           </div>
         </div>
-        <div id="bk-warn" role="alert" style="display:none; margin-top:12px; padding:10px 12px; border-radius:var(--radius-sm); font-size:12px; line-height:1.6; background:rgba(220,38,38,.10); border:1px solid rgba(220,38,38,.35); color:#b91c1c;"></div>
-        <div id="bk-rows" style="margin-top:12px; display:flex; flex-direction:column; gap:8px;"></div>
-        <div id="bk-cloud" style="display:none; margin-top:10px; padding:10px 12px; border-radius:var(--radius-sm); font-size:12px; line-height:1.6; background:rgba(217,119,6,.10); border:1px solid rgba(217,119,6,.35); color:#92400e;"></div>
-        <button class="btn btn-primary" id="btn-bk-now" style="margin-top:10px; width:100%; height:40px; font-size:13px;" onclick="syncBackupsNow()" data-i18n="bk.syncNow">مزامنة الآن</button>
+        <button class="btn btn-open link-btn-wide" id="btn-open" onclick="openERP()" style="display:none; margin-top:14px;">
+          <span class="btn-icon"><svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-globe"></use></svg></span>
+          <span data-i18n="btn.open">فتح البرنامج في المتصفح</span>
+        </button>
+        <div class="field-inline" id="link-company-row" style="display:none;">
+          <label for="link-company" data-i18n="emp.company">الشركة</label>
+          <select id="link-company" class="field-input" onchange="onEmployeeCompanyChange(this)"></select>
+        </div>
+        <div class="link-item" id="lan-link-row" style="display:none;">
+          <div class="link-item-title" data-i18n="access.lanTitle">رابط الموظفين (داخل المكتب)</div>
+          <div class="link-item-row">
+            <a href="#" class="link-url" id="lan-employee-url" dir="ltr" onclick="openLanEmployeeUrl(); return false;">—</a>
+            <div class="link-item-actions">
+              <button type="button" class="copy-btn" onclick="openLanEmployeeUrl()" data-i18n="link.open">فتح</button>
+              <button type="button" class="copy-btn copy-btn-solid" id="copy-lan-employee-url" onclick="copyLink('lan-employee-url', 'copy-lan-employee-url')" data-i18n="emp.copy">نسخ</button>
+            </div>
+          </div>
+          <div class="link-item-hint" data-i18n="access.lanHint">أرسله لموظفي هذه الشركة على شبكة المكتب؛ يفتح الشركة مباشرة ويعمل بلا إنترنت.</div>
+        </div>
+        <div class="link-item-hint" id="lan-no-company" style="display:none; margin-top:12px;" data-i18n="emp.noCompany">أنشئ شركة أولاً.</div>
       </div>
 
-      <!-- Employees: the LAN link + add an employee on this machine (local admin only; the one-time password is shown once) -->
-      <div class="cloud-box" id="employees-box" style="display:none; margin-bottom:16px;">
+      <!-- Block 2 «الوصول من أي مكان (سحابي)» (2.0.5): the toggle; then the program's cloud address (primary button + copy), the employee link of the chosen company
+           (?c=), the connection status, and last the admin-portal password. No other cloud / local link anywhere on the screen. -->
+      <div class="cloud-box stack-card" id="cloud-box">
         <div class="cloud-header">
           <div>
-            <h3><svg class="icon icon-20 icon-lead" aria-hidden="true" focusable="false"><use href="#i-users"></use></svg><span data-i18n="emp.title">الموظفون</span></h3>
-            <p data-i18n="emp.subtitle">أضف موظفاً على هذا الجهاز؛ يدخل من شبكتك المحلية بالرابط أدناه.</p>
-          </div>
-        </div>
-        <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-top:12px;">
-          <div style="font-size:11px; color:var(--text-muted); margin-bottom:6px; font-weight:600;" data-i18n="emp.lanLink">رابط الموظفين داخل الشبكة المحلية:</div>
-          <div style="display:flex; align-items:center; gap:8px; justify-content:center; flex-wrap:wrap;">
-            <a href="#" id="lan-employee-url" style="color:#16a34a; font-family:monospace; font-size:13px; font-weight:bold; text-decoration:none; word-break:break-all;" onclick="openLanEmployeeUrl(); return false;" dir="ltr">—</a>
-            <button id="copy-lan-employee-url" onclick="copyLanEmployeeUrl()" style="flex-shrink:0; background:var(--accent); color:#fff; border:none; border-radius:6px; padding:5px 12px; font-size:11px; font-weight:600; cursor:pointer;" data-i18n="emp.copy">نسخ</button>
-          </div>
-        </div>
-        <div style="display:grid; grid-template-columns:1fr 1fr; gap:8px; margin-top:12px;">
-          <select id="emp-company" class="input input-small" style="height:38px;" onchange="onEmployeeCompanyChange()"></select>
-          <select id="emp-role" class="input input-small" style="height:38px;"></select>
-          <input type="text" id="emp-name" class="input input-small" style="height:38px;" placeholder="الاسم الكامل" data-i18n-ph="emp.name">
-          <input type="email" id="emp-email" class="input input-small" style="height:38px;" dir="ltr" placeholder="name@company.com">
-        </div>
-        <div id="emp-roles-hint" style="display:none; font-size:11px; color:var(--text-muted); margin-top:6px;" data-i18n="emp.rolesHint"></div>
-        <button class="btn btn-primary" id="btn-add-employee" style="margin-top:10px; width:100%; height:40px; font-size:13px;" onclick="addEmployee()" data-i18n="emp.add">إضافة الموظف</button>
-        <div id="emp-result" style="display:none; margin-top:10px; font-size:12px;"></div>
-      </div>
-
-      <!-- Cloud config -->
-      <div class="cloud-box" id="cloud-box">
-        <div class="cloud-header">
-          <div>
-            <h3 id="cloud-title"><svg class="icon icon-20 icon-lead" aria-hidden="true" focusable="false"><use href="#i-cloud"></use></svg><span data-i18n="cloud.title">الوصول السحابي (Cloud Access)</span></h3>
+            <h3 id="cloud-title"><svg class="icon icon-20 icon-lead" aria-hidden="true" focusable="false"><use href="#i-cloud"></use></svg><span data-i18n="cloud.title">الوصول من أي مكان (سحابي)</span></h3>
             <p data-i18n="cloud.subtitle">اربط الخادم بالإنترنت للوصول من أي مكان</p>
           </div>
           <label class="toggle-switch">
             <input type="checkbox" id="input-cloud" role="switch" aria-checked="false" aria-labelledby="cloud-title" onchange="toggleCloudView()">
             <span class="slider" aria-hidden="true"></span>
           </label>
-        </div>
-
-        <!-- Admin portal password (بوابة الإدارة) — collapsible: a button reveals the change box, which hides again after saving -->
-        <div style="margin-top:14px;">
-          <button type="button" id="btn-toggle-admin-password" onclick="toggleAdminPasswordPanel()"
-            style="width:100%; display:flex; align-items:center; justify-content:space-between; gap:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px 14px; color:var(--text); font-size:13px; font-weight:600; cursor:pointer;">
-            <span><svg class="icon icon-16 icon-lead" aria-hidden="true" focusable="false"><use href="#i-key"></use></svg><span data-i18n="admin.title">كلمة مرور بوابة الإدارة</span></span>
-            <span id="admin-password-chevron" class="chevron-label" style="color:var(--text-muted); font-size:12px; font-weight:500;"><span data-i18n="admin.toggleChange">تغيير</span><svg class="icon icon-16 icon-chevron" aria-hidden="true" focusable="false"><use href="#i-chevron-down"></use></svg></span>
-          </button>
-          <div id="admin-password-panel" style="display:none; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px; margin-top:8px;">
-            <div style="font-size:11px; color:var(--text-muted); margin-bottom:10px;" data-i18n="admin.desc">تحمي صفحة «عرض كافة الشركات» عند الدخول من الرابط السحابي. الافتراضية = مفتاح الترخيص (لا حاجة للقديمة).</div>
-            <div style="display:flex; gap:8px;">
-              <input type="password" id="input-admin-password" placeholder="كلمة مرور جديدة (4 أحرف+)" data-i18n-ph="admin.placeholder" class="input input-small" style="flex:1; height:40px;" autocomplete="new-password">
-              <button class="btn btn-primary" id="btn-save-admin-password" style="padding:0 20px; font-size:13px; white-space:nowrap; height:40px;" onclick="saveAdminPassword()" data-i18n="common.save">حفظ</button>
-            </div>
-            <div id="admin-password-status" style="font-size:11px; color:var(--text-muted); margin-top:8px; line-height:1.6;"></div>
-          </div>
         </div>
 
         <div id="cloud-content" style="display:none; margin-top: 16px;">
@@ -309,30 +280,26 @@
           </div>
 
           <!-- Active View (Registered) -->
-          <div id="cloud-active" style="display:none; text-align:center;">
-            <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
-              <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;" data-i18n="cloud.urlRemote">الرابط السحابي (من أي مكان):</div>
-              <div class="link-row">
-                <a href="#" id="cloud-url" dir="ltr" style="color:var(--accent); font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openCloudUrl(); return false;">https://sub.texacore.ai</a>
-                <button type="button" class="copy-btn" id="copy-cloud-url" onclick="copyLink('cloud-url', 'copy-cloud-url')" data-i18n="emp.copy">نسخ</button>
-              </div>
+          <div id="cloud-active" style="display:none;">
+            <div class="link-primary-row">
+              <a href="#" class="btn btn-primary link-btn-wide link-primary" id="btn-open-cloud" onclick="openCloudUrl(); return false;">
+                <svg class="icon icon-20" aria-hidden="true" focusable="false"><use href="#i-cloud"></use></svg>
+                <span class="lp-text"><span class="lp-label" data-i18n="cloud.openAnywhere">فتح البرنامج من أي مكان</span><span class="lp-url" id="cloud-url" dir="ltr">https://sub.texacore.ai</span></span>
+              </a>
+              <button type="button" class="copy-btn copy-btn-solid" id="copy-cloud-url" onclick="copyLink('cloud-url', 'copy-cloud-url')" data-i18n="emp.copy">نسخ</button>
             </div>
-            <div style="background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
-              <div style="font-size:11px; color:var(--text-muted); margin-bottom:4px; font-weight:600;" data-i18n="cloud.urlLocal">الرابط المحلي (داخل شبكتك):</div>
-              <div class="link-row">
-                <a href="#" id="local-url" dir="ltr" style="color:#3b82f6; font-family:monospace; font-size:16px; font-weight:bold; text-decoration:none;" onclick="openLocalUrl(); return false;">http://127.0.0.1:80</a>
-                <button type="button" class="copy-btn" id="copy-local-url" onclick="copyLink('local-url', 'copy-local-url')" data-i18n="emp.copy">نسخ</button>
+            <div class="link-item" id="cloud-employee-row" style="display:none;">
+              <div class="link-item-title" data-i18n="cloud.employeeTitle">رابط الموظفين (من أي مكان)</div>
+              <div class="link-item-row">
+                <a href="#" class="link-url" id="employee-url" dir="ltr" onclick="openEmployeeUrl(); return false;">—</a>
+                <div class="link-item-actions">
+                  <button type="button" class="copy-btn" onclick="openEmployeeUrl()" data-i18n="link.open">فتح</button>
+                  <button type="button" class="copy-btn copy-btn-solid" id="copy-employee-url" onclick="copyLink('employee-url', 'copy-employee-url')" data-i18n="emp.copy">نسخ</button>
+                </div>
               </div>
+              <div class="link-item-hint" data-i18n="cloud.employeeLinkHint">يعمل عبر الإنترنت من أي مكان، ويحتاج أن يبقى هذا الجهاز شغّالاً ومتصلاً.</div>
             </div>
-            <div id="employee-link-box" style="display:none; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px; margin-bottom:12px;">
-              <div style="font-size:11px; color:var(--text-muted); margin-bottom:6px; font-weight:600;" data-i18n="cloud.urlEmployee">رابط الموظفين (دخول مباشر للشركة):</div>
-              <div style="display:flex; align-items:center; gap:8px; justify-content:center; flex-wrap:wrap;">
-                <a href="#" id="employee-url" style="color:#16a34a; font-family:monospace; font-size:13px; font-weight:bold; text-decoration:none; word-break:break-all;" onclick="openEmployeeUrl(); return false;">—</a>
-                <button id="copy-employee-url" onclick="copyEmployeeUrl()" style="flex-shrink:0; background:var(--accent); color:#fff; border:none; border-radius:6px; padding:5px 12px; font-size:11px; font-weight:600; cursor:pointer;" data-i18n="cloud.copyLink">نسخ</button>
-              </div>
-              <div style="font-size:10px; color:var(--text-muted); margin-top:6px;" data-i18n="cloud.employeeHint">أرسل هذا الرابط لموظفي هذه الشركة ليدخلوا مباشرةً.</div>
-            </div>
-            <div style="display:flex; justify-content:center; gap:16px;">
+            <div style="display:flex; justify-content:center; gap:16px; margin-top:14px;">
               <span style="font-size:12px; color:var(--text-muted);"><span data-i18n="cloud.connStatus">حالة الاتصال:</span> <strong id="tunnel-status" style="color:var(--danger);" data-i18n="cloud.disconnected">غير متصل</strong></span>
               <span style="font-size:12px; color:var(--text-muted);"><svg class="icon icon-16 icon-accent" aria-hidden="true" focusable="false"><use href="#i-check"></use></svg> <span data-i18n="cloud.reserved">تم الحجز للترخيص</span></span>
             </div>
@@ -345,7 +312,75 @@
             </div>
           </div>
         </div>
+
+        <!-- Admin portal password (بوابة الإدارة) — collapsible: a button reveals the change box, which hides again after saving -->
+        <div style="margin-top:16px;">
+          <button type="button" id="btn-toggle-admin-password" onclick="toggleAdminPasswordPanel()"
+            style="width:100%; display:flex; align-items:center; justify-content:space-between; gap:8px; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:12px 14px; color:var(--text); font-size:13px; font-weight:600; cursor:pointer;">
+            <span><svg class="icon icon-16 icon-lead" aria-hidden="true" focusable="false"><use href="#i-key"></use></svg><span data-i18n="admin.title">كلمة مرور بوابة الإدارة</span></span>
+            <span id="admin-password-chevron" class="chevron-label" style="color:var(--text-muted); font-size:12px; font-weight:500;"><span data-i18n="admin.toggleChange">تغيير</span><svg class="icon icon-16 icon-chevron" aria-hidden="true" focusable="false"><use href="#i-chevron-down"></use></svg></span>
+          </button>
+          <div id="admin-password-panel" style="display:none; background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:14px; margin-top:8px;">
+            <div style="font-size:11px; color:var(--text-muted); margin-bottom:10px;" data-i18n="admin.desc">تحمي صفحة «عرض كافة الشركات» عند الدخول من الرابط السحابي. الافتراضية = مفتاح الترخيص (لا حاجة للقديمة).</div>
+            <div style="display:flex; gap:8px;">
+              <input type="password" id="input-admin-password" placeholder="كلمة مرور جديدة (4 أحرف+)" data-i18n-ph="admin.placeholder" class="input input-small" style="flex:1; height:40px;" autocomplete="new-password">
+              <button class="btn btn-primary" id="btn-save-admin-password" style="padding:0 20px; font-size:13px; white-space:nowrap; height:40px;" onclick="saveAdminPassword()" data-i18n="common.save">حفظ</button>
+            </div>
+            <div id="admin-password-status" style="font-size:11px; color:var(--text-muted); margin-top:8px; line-height:1.6;"></div>
+          </div>
+        </div>
+
       </div>
+
+      <!-- Block 3 «الموظفون»: the add-employee form only (labelled, full-width fields). The employee links live in Blocks 1 and 2, once each. -->
+      <div class="cloud-box stack-card" id="employees-box" style="display:none;">
+        <div class="cloud-header">
+          <div>
+            <h3><svg class="icon icon-20 icon-lead" aria-hidden="true" focusable="false"><use href="#i-users"></use></svg><span data-i18n="emp.title">الموظفون</span></h3>
+            <p data-i18n="emp.subtitle">أضف موظفاً لهذه الشركة. بعد الإضافة أرسل له رابط الموظفين من الأعلى.</p>
+          </div>
+        </div>
+        <div class="form-grid">
+          <div class="field">
+            <label for="emp-company" data-i18n="emp.company">الشركة</label>
+            <select id="emp-company" class="field-input" onchange="onEmployeeCompanyChange(this)"></select>
+          </div>
+          <div class="field">
+            <label for="emp-role" data-i18n="emp.role">الدور</label>
+            <select id="emp-role" class="field-input"></select>
+          </div>
+          <div class="field">
+            <label for="emp-name" data-i18n="emp.name">الاسم الكامل</label>
+            <input type="text" id="emp-name" class="field-input" autocomplete="off" placeholder="مثال: أحمد الخطيب" data-i18n-ph="emp.namePh">
+          </div>
+          <div class="field">
+            <label for="emp-email" data-i18n="emp.email">البريد الإلكتروني</label>
+            <input type="email" id="emp-email" class="field-input field-ltr" dir="ltr" autocomplete="off" placeholder="name@company.com">
+          </div>
+        </div>
+        <div id="emp-roles-hint" class="roles-hint" role="note" style="display:none;">
+          <div class="roles-hint-title"><svg class="icon icon-16 icon-lead" aria-hidden="true" focusable="false"><use href="#i-info"></use></svg><span data-i18n="emp.rolesHintTitle">لا توجد أدوار للموظفين بعد</span></div>
+          <div class="roles-hint-text" data-i18n="emp.rolesHint">المتاح الآن أدوار الإدارة فقط.</div>
+          <button type="button" class="copy-btn" id="btn-open-roles" onclick="openRolesPage()" data-i18n="emp.openRoles">فتح صفحة الأدوار</button>
+        </div>
+        <button class="btn btn-primary" id="btn-add-employee" style="margin:14px 0 0; width:100%; height:44px; font-size:14px;" onclick="addEmployee()" data-i18n="emp.add">إضافة الموظف</button>
+        <div id="emp-result" style="display:none; margin-top:10px; font-size:12px;"></div>
+      </div>
+
+      <!-- Backups (2.0.2): every company file this program keeps in step - its path, when it was last in step, its state, a visible error -->
+      <div class="cloud-box stack-card" id="backups-box" style="display:none;">
+        <div class="cloud-header">
+          <div>
+            <h3><svg class="icon icon-20 icon-lead" aria-hidden="true" focusable="false"><use href="#i-database"></use></svg><span data-i18n="bk.title">النسخ الاحتياطي</span></h3>
+            <p data-i18n="bk.subtitle">ملف الشركة (.tcdb) يُحدَّث تلقائياً كل دقيقة؛ هنا ترى كل مكان محفوظ فيه ومتى آخر مزامنة.</p>
+          </div>
+        </div>
+        <div id="bk-warn" role="alert" style="display:none; margin-top:12px; padding:10px 12px; border-radius:var(--radius-sm); font-size:12px; line-height:1.6; background:rgba(220,38,38,.10); border:1px solid rgba(220,38,38,.35); color:#b91c1c;"></div>
+        <div id="bk-rows" style="margin-top:12px; display:flex; flex-direction:column; gap:8px;"></div>
+        <div id="bk-cloud" style="display:none; margin-top:10px; padding:10px 12px; border-radius:var(--radius-sm); font-size:12px; line-height:1.6; background:rgba(217,119,6,.10); border:1px solid rgba(217,119,6,.35); color:#92400e;"></div>
+        <button class="btn btn-primary" id="btn-bk-now" style="margin-top:10px; width:100%; height:40px; font-size:13px;" onclick="syncBackupsNow()" data-i18n="bk.syncNow">مزامنة الآن</button>
+      </div>
+
     </div>
   </div>
 

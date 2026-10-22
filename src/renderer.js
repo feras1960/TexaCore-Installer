@@ -102,15 +102,11 @@ async function refreshStatus() {
     // updateControlPanel also refreshes the license badge (tier + expiry), so a
     // cloud-synced tier change / extension shows here within one poll (~5s).
     updateControlPanel(state);
-    // The employee link's company-id fetch can miss on first paint (before the DB
-    // is up). While the cloud box is shown and the link is still the bare fallback
-    // (no ?c=), re-resolve it each poll until the short code lands, then stop.
+    // The company list (and with it the employee links) can miss on first paint (before the DB is up): refreshEmployeesBox re-asks until it lands;
+    // renderLinks re-draws both employee links from the current state on every poll (no IPC) so a newly learned LAN address / registered name shows at once.
     refreshEmployeesBox(state);
     refreshBackupsBox();
-    const empEl = document.getElementById('employee-url');
-    if (state.config && state.config.subdomain && empEl && !String(empEl.dataset.url || '').includes('?c=')) {
-      setEmployeeLink(state.config.subdomain);
-    }
+    renderLinks(state);
   } catch { /* silent */ }
 }
 
@@ -138,6 +134,7 @@ function updateUI(state) {
   }
 
   // Set port and cloud settings
+  renderLinks(state);
   if (state.config?.port) {
     document.getElementById('input-port').value = state.config.port;
   }
@@ -157,17 +154,8 @@ function updateUI(state) {
     document.getElementById('cloud-setup').style.display = _tunnelNameTaken ? 'block' : 'none';
     document.getElementById('cloud-active').style.display = 'block';
     document.getElementById('cloud-url').textContent = `https://${state.config.subdomain}.texacore.ai`;
-    
-    // Set Local URL
-    const localIp = state.localIp || '127.0.0.1';
-    const port = state.config.port || 80;
-    const portStr = port === 80 ? '' : `:${port}`;
-    document.getElementById('local-url').textContent = `http://${localIp}${portStr}`;
 
-    // Set Employee direct-login link (manager shares this with the company's staff).
-    // Uses a SHORT, clean company code (the company UUID's first segment, e.g. 6b6e4674)
-    // instead of the URL-encoded Arabic name. LocalLauncher resolves the code → company.
-    setEmployeeLink(state.config.subdomain);
+    // The employee links (office / cloud) are drawn by renderLinks: a SHORT company code (?c=, the company id's first segment), never the URL-encoded Arabic name.
 
     // The saved subdomain may have been deleted from the cloud (Cloudflare).
     // Verify it still resolves; if not, flip to the setup view and prompt the
@@ -437,15 +425,18 @@ function updateControlButtons(state) {
   const btnStart = document.getElementById('btn-start');
   const btnStop = document.getElementById('btn-stop');
   const btnOpen = document.getElementById('btn-open');
+  const accessBox = document.getElementById('access-box');      // Block 1 «الدخول إلى البرنامج»: shown while the system runs
 
   if (state.containerRunning) {
     btnStart.style.display = 'none';
     btnStop.style.display = 'inline-flex';
     btnOpen.style.display = 'inline-flex';
+    if (accessBox) accessBox.style.display = 'block';
   } else {
     btnStart.style.display = 'inline-flex';
     btnStop.style.display = 'none';
     btnOpen.style.display = 'none';
+    if (accessBox) accessBox.style.display = 'none';
   }
 }
 
@@ -711,72 +702,60 @@ function openCloudUrl() {
   }
 }
 
-function openLocalUrl() {
-  openERP(); // Always open localhost to prevent Vite strict MIME issues locally
-}
-
-// Build the employee direct-login link with a SHORT, clean company code (the
-// company UUID's first segment) so it carries no URL-encoded Arabic. Fetches the
-// id from the local admin API; falls back to the bare /login URL when the system
-// isn't running (still valid — the employee just picks the company once).
-async function setEmployeeLink(subdomain) {
-  const empBox = document.getElementById('employee-link-box');
-  const empEl = document.getElementById('employee-url');
-  if (!empBox || !empEl) return;
-  if (!subdomain) { empBox.style.display = 'none'; return; }
-  let code = '';
-  try {
-    // IPC, not fetch(): the admin API has no CORS for a file:// page, and the secret never leaves the main process.
-    const j = await window.texacore.listLocalCompanies();
-    if (j && j.success) {
-      const companies = j.companies || [];
-      code = String(companies[0] && companies[0].id || '').split('-')[0];  // e.g. 6b6e4674
-    }
-  } catch (e) { /* services may be down — fall back to the base link */ }
-  const url = code
-    ? `https://${subdomain}.texacore.ai/login?c=${code}`
-    : `https://${subdomain}.texacore.ai/login`;
-  empEl.textContent = url;
-  empEl.dataset.url = url;
-  empBox.style.display = 'block';
-}
-
 function openEmployeeUrl() {
   const url = document.getElementById('employee-url')?.dataset.url;
   if (url) texacore.openBrowser(url);
 }
 
-async function copyEmployeeUrl() {
-  const url = document.getElementById('employee-url')?.dataset.url;
-  if (!url) return;
-  try {
-    await navigator.clipboard.writeText(url);
-  } catch {
-    // Fallback for environments without the async clipboard API
-    const ta = document.createElement('textarea');
-    ta.value = url;
-    document.body.appendChild(ta);
-    ta.select();
-    document.execCommand('copy');
-    document.body.removeChild(ta);
-  }
-  const btn = document.getElementById('copy-employee-url');
-  if (btn) {
-    btn.textContent = t('cloud.copied');
-    setTimeout(() => { btn.textContent = t('cloud.copyLink'); }, 1500);
-  }
-}
-
-
-// ─── Employees (LAN link + add an employee on this machine) ──────────────────
+// ─── Employee links (Blocks 1 and 2) + the add-an-employee form (Block 3) ────────────────────────────────────
+// ONE chosen company drives everything: the company selector of Block 1 (shown with 2+ companies), the company field of the form, and both employee links
+//   · office  (Block 1): http://<LAN address>[:port]/login?c=<code>   - for staff on the office network, works without internet
+//   · anywhere (Block 2): https://<name>.texacore.ai/login?c=<code>   - over the internet, only while this computer stays on and connected
+// <code> is the first segment of the company's id (8 characters), never the URL-encoded Arabic name; «?c=» opens that company's sign-in directly.
 let _empCompanies = [];
 let _empRefreshing = false;
 let _empLast = 0;
+let _empListed = false;          // the company list has been read at least once (so «no company yet» is never shown before the first answer)
+let _chosenCompanyId = '';
+function companyCode(companyId) { return String(companyId || '').split('-')[0]; }
 function lanEmployeeLink(state, companyId) {
   const ip = state && state.localIp;
   if (!ip || !companyId) return '';
   const port = (state.config && state.config.port) || 80;
-  return `http://${ip}${port === 80 ? '' : ':' + port}/login?c=${String(companyId).split('-')[0]}`;
+  return `http://${ip}${port === 80 ? '' : ':' + port}/login?c=${companyCode(companyId)}`;
+}
+function cloudEmployeeLink(state, companyId) {
+  const sub = state && state.config && state.config.subdomain;
+  if (!sub || !companyId) return '';
+  return `https://${sub}.texacore.ai/login?c=${companyCode(companyId)}`;
+}
+// the company the links and the form are about: the picked one if it still exists, else the first (the list is newest-first)
+function chosenCompanyId() {
+  if (_chosenCompanyId && _empCompanies.some((c) => c.id === _chosenCompanyId)) return _chosenCompanyId;
+  return (_empCompanies[0] && _empCompanies[0].id) || '';
+}
+function setChosenCompany(id) {
+  _chosenCompanyId = id || '';
+  for (const sid of ['link-company', 'emp-company']) {
+    const sel = document.getElementById(sid);
+    if (sel && sel.value !== _chosenCompanyId) sel.value = _chosenCompanyId;
+  }
+}
+function showLink(rowId, anchorId, url) {
+  const row = document.getElementById(rowId);
+  const a = document.getElementById(anchorId);
+  if (row) row.style.display = url ? 'block' : 'none';
+  if (a) { a.textContent = url || '—'; a.dataset.url = url || ''; }
+}
+function renderLinks(state) {
+  const st = state || currentState || {};
+  const id = chosenCompanyId();
+  showLink('lan-link-row', 'lan-employee-url', lanEmployeeLink(st, id));
+  showLink('cloud-employee-row', 'employee-url', cloudEmployeeLink(st, id));
+  const none = document.getElementById('lan-no-company');
+  if (none) none.style.display = (_empListed && !_empCompanies.length) ? 'block' : 'none';
+  const pick = document.getElementById('link-company-row');
+  if (pick) pick.style.display = _empCompanies.length > 1 ? 'flex' : 'none';
 }
 async function refreshEmployeesBox(state) {
   const box = document.getElementById('employees-box');
@@ -786,22 +765,25 @@ async function refreshEmployeesBox(state) {
   _empLast = Date.now();
   try {
     const r = await window.texacore.listLocalCompanies();
-    const companies = (r && r.success && r.companies) || [];
-    if (!companies.length) { box.style.display = 'none'; return; }
+    if (!r || !r.success) return;                                         // services may be down: keep what is shown
+    _empListed = true;
+    const companies = r.companies || [];
+    if (!companies.length) { _empCompanies = []; box.style.display = 'none'; renderLinks(state || currentState); return; }
     box.style.display = 'block';
-    const sel = document.getElementById('emp-company');
     const sameList = JSON.stringify(companies.map((c) => c.id)) === JSON.stringify(_empCompanies.map((c) => c.id));
     if (!sameList) {
+      const keep = chosenCompanyId();
       _empCompanies = companies;
-      const keep = sel.value;
-      sel.innerHTML = '';
-      for (const c of companies) { const o = document.createElement('option'); o.value = c.id; o.textContent = c.name; sel.appendChild(o); }
-      if (keep && companies.some((c) => c.id === keep)) sel.value = keep;
+      for (const sid of ['link-company', 'emp-company']) {
+        const sel = document.getElementById(sid);
+        if (!sel) continue;
+        sel.innerHTML = '';
+        for (const c of companies) { const o = document.createElement('option'); o.value = c.id; o.textContent = c.name; sel.appendChild(o); }
+      }
+      setChosenCompany(companies.some((c) => c.id === keep) ? keep : companies[0].id);
       await loadEmployeeRoles();
     }
-    const url = lanEmployeeLink(state || currentState, sel.value);
-    const a = document.getElementById('lan-employee-url');
-    a.textContent = url || '—'; a.dataset.url = url;
+    renderLinks(state || currentState);
   } catch { /* services may be down */ } finally { _empRefreshing = false; }
 }
 // ─── Backups box (2.0.2) ─────────────────────────────────────
@@ -934,8 +916,17 @@ async function loadEmployeeRoles() {
     sel.appendChild(o);
   }
 }
-async function onEmployeeCompanyChange() { await loadEmployeeRoles(); await refreshEmployeesBox(currentState); }
+async function onEmployeeCompanyChange(sel) {
+  setChosenCompany((sel && sel.value) || '');
+  renderLinks(currentState);
+  await loadEmployeeRoles();
+}
 function openLanEmployeeUrl() { const u = document.getElementById('lan-employee-url')?.dataset.url; if (u) texacore.openBrowser(u); }
+// «Open the roles page»: the program's own page where an employee role is created (route /system-config/users-permissions, first tab = roles), on this computer
+function openRolesPage() {
+  const port = parseInt(document.getElementById('input-port')?.value, 10) || 80;
+  texacore.openBrowser(`http://localhost:${port}/system-config/users-permissions`);
+}
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); } catch {
     const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
@@ -951,13 +942,6 @@ async function copyLink(linkId, btnId) {
     btn.textContent = t('emp.copied'); btn.classList.add('copied');
     setTimeout(() => { btn.textContent = t('emp.copy'); btn.classList.remove('copied'); }, 1500);
   }
-}
-async function copyLanEmployeeUrl() {
-  const u = document.getElementById('lan-employee-url')?.dataset.url;
-  if (!u) return;
-  await copyText(u);
-  const btn = document.getElementById('copy-lan-employee-url');
-  if (btn) { btn.textContent = t('emp.copied'); setTimeout(() => { btn.textContent = t('emp.copy'); }, 1500); }
 }
 async function addEmployee() {
   const out = document.getElementById('emp-result');
@@ -977,12 +961,10 @@ async function addEmployee() {
       show(esc(msg), 'var(--danger)');
       return;
     }
-    const link = lanEmployeeLink(currentState, r.companyId);
     show(`<div style="font-weight:700; color:#16a34a;">${esc(t('emp.created'))}: ${esc(r.fullName)} — ${esc(r.email)}</div>
       <div style="margin-top:6px;">${esc(t('emp.otp'))}</div>
       <div style="font-family:monospace; font-size:18px; font-weight:700; letter-spacing:1px; user-select:all;" dir="ltr">${esc(r.oneTimePassword)}</div>
-      <div style="color:var(--text-muted); margin-top:4px;">${esc(t('emp.otpHint'))}</div>
-      ${link ? `<div style="margin-top:6px; font-family:monospace; word-break:break-all;" dir="ltr">${esc(link)}</div>` : ''}`);
+      <div style="color:var(--text-muted); margin-top:4px;">${esc(t('emp.otpHint'))}</div>`);
     document.getElementById('emp-name').value = ''; document.getElementById('emp-email').value = '';
   } catch (e) { show(`${esc(t('emp.errGeneric'))} ${esc(e.message)}`, 'var(--danger)'); } finally { btn.disabled = false; }
 }
@@ -1190,6 +1172,7 @@ async function registerSubdomain() {
       document.getElementById('cloud-setup').style.display = 'none';
       document.getElementById('cloud-active').style.display = 'block';
       document.getElementById('cloud-url').textContent = result.url || `https://${input.value}.texacore.ai`;
+      renderLinks(currentState);
 
       alert(t('subdomain.reserved'));
     } else {

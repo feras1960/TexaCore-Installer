@@ -1186,19 +1186,11 @@ ipcMain.handle('get-version', () => {
   };
 });
 
+// The address office PCs type to reach this computer. Picked by src/lan-address.js: the interface carrying the default route if it is a real
+// adapter, else en* / eth* / Wi-Fi / Ethernet, else a private-range address - never a VPN tunnel (utun*, tun*, ...) or a link-local address.
+const lanAddressProvider = require('./lan-address').createLanAddressProvider({ networkInterfaces: () => require('os').networkInterfaces(), platform: process.platform });
 function getLocalIpAddress() {
-  const os = require('os');
-  const interfaces = os.networkInterfaces();
-  for (const devName in interfaces) {
-    const iface = interfaces[devName];
-    for (let i = 0; i < iface.length; i++) {
-      const alias = iface[i];
-      if (alias.family === 'IPv4' && alias.address !== '127.0.0.1' && !alias.internal) {
-        return alias.address;
-      }
-    }
-  }
-  return '127.0.0.1';
+  return lanAddressProvider.get();
 }
 
 // Get initial state

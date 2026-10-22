@@ -605,6 +605,95 @@ body {
 .copy-btn.copied { color: var(--accent); border-color: var(--accent); }
 .copy-btn:focus-visible, .btn:focus-visible, .btn-update-restart:focus-visible, .btn-update-later:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
+/* ─── Access blocks (2.0.5): «الدخول إلى البرنامج», «الوصول من أي مكان», «الموظفون» ─────────────────
+   One card style for all of them. Every link sits in a .link-item (title, the link in a left-to-right box, open + copy, one line saying who uses it and when);
+   the form fields are labelled and fill their column (the 80px .input-small is for the port number only). */
+.stack-card { margin: 0 0 16px; }
+a.btn { text-decoration: none; }
+.link-btn-wide { width: 100%; margin: 0; padding: 14px 20px; font-size: 16px; }
+.link-primary-row { display: flex; align-items: stretch; gap: 8px; }
+.link-primary { flex: 1 1 auto; min-width: 0; }
+.lp-text { display: flex; flex-direction: column; align-items: center; gap: 2px; min-width: 0; }
+.lp-label { font-size: 16px; font-weight: 700; }
+.lp-url { font-family: 'SF Mono', 'Courier New', monospace; font-size: 12px; font-weight: 600; opacity: 0.92; direction: ltr; unicode-bidi: isolate; word-break: break-all; }
+.link-primary-row .copy-btn { align-self: stretch; padding: 0 18px; font-size: 12px; }
+
+.link-item {
+  background: var(--bg-primary);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  padding: 12px 14px;
+  margin-top: 12px;
+  text-align: start;
+}
+.link-primary-row + .link-item { margin-top: 12px; }
+.link-item-title { font-size: 13px; font-weight: 700; color: var(--text-primary); margin-bottom: 8px; }
+.link-item-row { display: flex; align-items: center; gap: 8px; flex-wrap: wrap; }
+.link-url {
+  flex: 1 1 220px;
+  min-width: 0;
+  direction: ltr;
+  unicode-bidi: isolate;
+  text-align: left;
+  font-family: 'SF Mono', 'Courier New', monospace;
+  font-size: 13px;
+  font-weight: 700;
+  color: #16a34a;
+  text-decoration: none;
+  word-break: break-all;
+  padding: 8px 10px;
+  background: rgba(255, 255, 255, 0.04);
+  border: 1px solid var(--border);
+  border-radius: 6px;
+}
+.link-url:hover { background: rgba(255, 255, 255, 0.07); }
+.link-item-actions { display: flex; gap: 6px; flex-shrink: 0; }
+.link-item-actions .copy-btn { padding: 7px 14px; font-size: 12px; }
+.link-item-hint { font-size: 12px; line-height: 1.6; color: var(--text-muted); margin-top: 8px; text-align: start; }
+.copy-btn-solid { background: var(--accent); color: #fff; border-color: var(--accent); }
+.copy-btn-solid:hover { background: var(--accent-hover); color: #fff; }
+.copy-btn-solid.copied { background: transparent; color: var(--accent); }
+
+.field-inline { display: flex; align-items: center; gap: 10px; margin-top: 14px; }
+.field-inline label { flex-shrink: 0; font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.field-inline .field-input { flex: 1 1 auto; min-width: 0; height: 38px; }
+
+.form-grid { display: grid; grid-template-columns: 1fr 1fr; gap: 12px 14px; margin-top: 14px; }
+@media (max-width: 600px) { .form-grid { grid-template-columns: 1fr; } }
+.field { display: flex; flex-direction: column; gap: 6px; min-width: 0; }
+.field label { font-size: 12px; font-weight: 600; color: var(--text-secondary); }
+.field-input {
+  width: 100%;
+  min-width: 0;
+  height: 42px;
+  padding: 8px 12px;
+  background: var(--bg-primary);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-sm);
+  color: var(--text-primary);
+  font-family: 'Cairo', sans-serif;
+  font-size: 14px;
+  text-align: start;
+  outline: none;
+  transition: border-color 0.2s ease, box-shadow 0.2s ease;
+}
+.field-input:focus { border-color: var(--accent); box-shadow: 0 0 0 4px var(--accent-glow); }
+.field-input::placeholder { color: var(--text-muted); opacity: 0.85; }
+.field-input.field-ltr { text-align: left; }
+select.field-input { text-overflow: ellipsis; }
+
+.roles-hint {
+  margin-top: 12px;
+  padding: 10px 12px;
+  border-radius: var(--radius-sm);
+  background: rgba(245, 158, 11, 0.10);
+  border: 1px solid var(--warning);
+  text-align: start;
+}
+.roles-hint-title { font-size: 13px; font-weight: 700; color: var(--text-primary); }
+.roles-hint-text { font-size: 12px; line-height: 1.7; color: var(--text-secondary); margin: 4px 0 8px; }
+.roles-hint .copy-btn { padding: 6px 14px; font-size: 12px; }
+
 /* ─── Stop confirmation (inside the window — no native dialog) ─── */
 .stop-confirm {
   margin: 12px auto 0;
