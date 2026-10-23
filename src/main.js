@@ -19,6 +19,7 @@ const cloudClient = require('./cloud-client');
 const BackupManager = require('./backup-manager');
 const companyFile = require('./company-file');
 const livePolicy = require('./live-file-policy');   // 2.0.5: replace-all needs an explicit yes + a pre-open backup; the live file never changes owner by itself
+const liveFileMove = require('./live-file-move');   // 2.0.5 RC2: «تغيير المكان» - the safe copy → verify → switch of the live company file
 const locateFile = require('./locate-file');
 const folderAccessMod = require('./folder-access');   // 2.0.4: macOS «Files and Folders» permission - probed in a child process, never in the main loop
 const locateJobMod = require('./locate-job');
@@ -1791,6 +1792,69 @@ function initBackupOnStartup() {
       dbHost: 'localhost',
       dbPort: ServiceManager.PG_PORT,
       dbName: 'postgres',
+// ─── 2.0.5 RC2: «تغيير المكان» - move the live company file to another folder ─────────────────────────────────────────────────────────────
+// The safe sequence (permission → space → pause the sync → copy → verify bytes + container → switch → resume; the old file is KEPT) is
+// live-file-move.js; this is only its wiring to the backup manager, the config, the native folder window and the macOS folder permission.
+const liveFileMover = liveFileMove.createLiveFileMover({
+  liveFile: () => liveCompanyFile(),
+  // the native folder chooser (the E2E_DIALOG 'open' stub answers it in harness runs, like every other native dialog)
+  pickFolder: async ({ defaultPath }) => {
+    let start = null;
+    try {
+      if (defaultPath && path.isAbsolute(defaultPath)) { const v = await folderAccess.ensureUsable(defaultPath, { waitMs: 1500 }); if (v.state === 'allowed') start = defaultPath; }
+    } catch { start = null; }
+    const r = await showNativeDialog('open', {
+      title: 'مكان ملف الشركة الجديد — TexaCore',
+      ...(start ? { defaultPath: start } : {}),
+      buttonLabel: 'نقل الملف إلى هنا',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (r.canceled || !r.filePaths || !r.filePaths[0]) return { canceled: true };
+    return { dir: r.filePaths[0] };
+  },
+  requireFolderAccess: (dir) => requireFolderAccess(dir),
+  // pause the one-minute sync: no run may be in the middle of replacing the file while it is copied; the newest data is flushed into the OLD file first
+  quiesce: async () => {
+    const bm = backupManager;
+    if (!bm) return { ok: true, resume: () => {} };
+    if (bm._restoring) return { ok: false };
+    const wasSyncing = !!bm._timer;
+    try { bm.stopSync(); } catch { /* not running */ }
+    const idle = await bm.waitIdle();
+    if (!idle || bm._restoring) { if (wasSyncing) bm.startSync(); return { ok: false }; }
+    if (svcManager && svcManager.isRunning() && bm.backupPath) { try { await bm.backup(); } catch (e) { fileLog('[Move] the last flush into the old file failed:', e && e.message); } }
+    bm.holdWrites = true;
+    return { ok: true, resume: () => { bm.holdWrites = false; if (wasSyncing) bm.startSync(); } };
+  },
+  probe: (buf) => (backupManager || newBackupManager()).probeAccess(buf),
+  // SWITCH: config first (a failed save changes nothing), then the running manager; a restore that re-pointed the manager meanwhile aborts the switch
+  commit: ({ from, to, dir }) => {
+    const bm = backupManager;
+    if (bm && bm.backupPath && !sameFile(bm.backupPath, from)) throw new Error('the live company file changed while it was being moved');
+    const cfg = loadConfig();
+    cfg.companies = livePolicy.moveLiveEntry(cfg.companies, from, to);
+    cfg.storagePath = dir;
+    if (cfg.currentDbPath && sameFile(cfg.currentDbPath, from)) cfg.currentDbPath = to;
+    saveConfig(cfg);
+    if (bm && bm.backupPath) {
+      bm.backupPath = to;
+      bm.snapshotDir = companyFile.isCompanyFolder(dir) ? null : path.join(DATA_DIR, 'backups', 'snapshots');
+    }
+  },
+  log: (...a) => fileLog(...a),
+});
+/** opts = { dir?: string } - without `dir` the native folder chooser opens. Never throws: { success:true, from, to, kept:true, bytes } or { success:false, code, error }. */
+async function moveLiveFile(opts) {
+  try {
+    const r = await liveFileMover.move({ dir: opts && typeof opts.dir === 'string' ? opts.dir : undefined });
+    return r && r.success ? { ...r, cloudFolder: companyFile.detectCloudFolder(path.dirname(r.to)) || undefined } : r;
+  } catch (e) {
+    fileLog('[Move] failed:', e && e.message);
+    return { success: false, code: (e && e.code) || 'MOVE_FAILED', error: String((e && e.message) || e).slice(0, 300) };
+  }
+}
+ipcMain.handle('move-live-file', async (_, opts) => moveLiveFile(opts));
+
       dbUser: 'postgres',
       dbPassword: svcManager.dbPassword,
       backupPath: tcdbPath,
@@ -2103,7 +2167,7 @@ async function handleCompanyFileRoutes(req, res) {
       }
 
       // ── POST /api/pick-save-location {suggestedName?, dir?}: where a NEW company's file will live - the OS save window, default
-      //    <Documents>/TexaCore/<name>.tcdb. Nothing is written; the page puts the answer in the company form (storagePath + dbFileName). ──
+      //    <default TexaCore folder>/<name>.tcdb. Nothing is written; the page puts the answer in the company form (storagePath + dbFileName). ──
       case 'POST /api/pick-save-location': {
         const body = await readJsonBody(req);
         const base = companyFile.safeFileBase(body.suggestedName || 'my_company', 'my_company');
@@ -2602,7 +2666,8 @@ async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '', confirm
   backupManager.secondaryBackupPath = null;   // 2.0.2: the program's second copy belonged to the PREVIOUS company file - never write this company's data over it
   // (review rv203) the daily snapshots of a file opened in place in the user's own folder go to the program's backups folder, not into a
   // 'snapshots' folder created beside the user's file (Desktop, a USB stick, iCloud…); a file in the TexaCore folder keeps them beside it as before.
-  backupManager.snapshotDir = path.resolve(path.dirname(liveTarget)) === path.resolve(companyFile.defaultCompanyDir()) ? null : path.join(DATA_DIR, 'backups', 'snapshots');
+  // (2.0.5) the default folder moved to ~/TexaCore, but a file an install already keeps in the old ~/Documents/TexaCore stays a «TexaCore folder» too (isCompanyFolder knows both)
+  backupManager.snapshotDir = companyFile.isCompanyFolder(path.dirname(liveTarget)) ? null : path.join(DATA_DIR, 'backups', 'snapshots');
   
   // Restore DB from the file (its error log goes to the program's logs folder, never beside the user's file)
   backupManager.restoreLogDir = LOG_DIR;
@@ -3415,7 +3480,7 @@ const httpServer = http.createServer(async (req, res) => {
           ? path.join(DATA_DIR, 'company-files')
           : ((HARNESS_OK && process.env.TEXACORE_TCDB_DIR)
             ? path.resolve(process.env.TEXACORE_TCDB_DIR)
-            : (isWin ? 'C:\\TexaCore' : path.join(os.homedir(), 'Documents', 'TexaCore')));
+            : companyFile.defaultCompanyDir());
         if (folderChoice !== 'program') await requireFolderAccess(tcdbDir);   // 2.0.4: macOS must have said yes before the synchronous folder calls below
         if (!fs.existsSync(tcdbDir)) fs.mkdirSync(tcdbDir, { recursive: true });
         // 2.0.2 (review): a FREE name - the picked file may itself live in this folder (a passphrase-protected export saved to the company folder):

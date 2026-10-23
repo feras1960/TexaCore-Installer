@@ -80,6 +80,7 @@ class BackupManager {
     this._consecutiveFailures = 0;
     this._lastSkipped = null;
     this._lastAccessBlock = null;
+    this.holdWrites = false;   // 2.0.5 RC2: set while the live file is moved (see live-file-move.js)
   }
 
   _markOk(role, when = new Date()) {
@@ -145,6 +146,10 @@ class BackupManager {
     }
     if (this._restoring) {
       console.log('[BackupManager] A restore is running, skipping this backup');
+      return null;
+    }
+    if (this.holdWrites) {   // 2.0.5 RC2: the live file is being moved to another folder - nothing writes to either file until the switch is done (the caller resumes the sync)
+      console.log('[BackupManager] The company file is being moved, skipping this backup');
       return null;
     }
     if (!this.backupPath) {   // 2.0.3 (review): a failed open detached the company file (afterFailedRestore) - the database belongs to no file, nothing is written

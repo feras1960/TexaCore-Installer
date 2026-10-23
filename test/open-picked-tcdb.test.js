@@ -30,7 +30,7 @@ test('it opens only what the user picked: a live reference to a .tcdb, read with
 
 test('the company file is the opened file itself, unless it is a protected export or cannot be written', () => {
   assert.match(fn, /const liveTarget = \(!openedWithPassphrase && fileWritable && besideOk\)\s*\?\s*selectedPath/);
-  assert.match(fn, /uniqueTcdbPath\(besideOk \? fileDir : companyFile\.defaultCompanyDir\(\)/, 'otherwise a FREE name beside it (or Documents/TexaCore)');
+  assert.match(fn, /uniqueTcdbPath\(besideOk \? fileDir : companyFile\.defaultCompanyDir\(\)/, 'otherwise a FREE name beside it (or the default TexaCore folder)');
   assert.match(fn, /backupManager\.backupPath = liveTarget;/);
   assert.match(fn, /tcdbPath: liveTarget, storagePath: path\.dirname\(liveTarget\)/);
 });
@@ -39,5 +39,5 @@ test('the one-off copy never overwrites another file', () => {
   assert.match(fn, /path\.join\(DATA_DIR, 'backups', `\$\{companyFile\.safeFileBase\(/);
   assert.match(fn, /\.opened-\$\{companyFile\.localDateStamp\(\)\}\.tcdb/);
   assert.match(fn, /COPYFILE_EXCL/);
-  assert.doesNotMatch(fn, /path\.join\(tcdbDir, fileName\)/, 'the 1.x copy over <Documents>/TexaCore/<same name> is gone');
+  assert.doesNotMatch(fn, /path\.join\(tcdbDir, fileName\)/, 'the 1.x copy over <default folder>/<same name> is gone');
 });

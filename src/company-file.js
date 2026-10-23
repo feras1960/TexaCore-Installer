@@ -16,9 +16,26 @@ const os = require('os');
 const path = require('path');
 const crypto = require('crypto');
 
-/** The folder a company file goes to when no better place is known (the same default 1.x and the restore route use). */
+/**
+ * The folder a NEW company file goes to when no better place is known. 2.0.5: ~/TexaCore on macOS/Linux (it used to be ~/Documents/TexaCore -
+ * Documents is a protected / iCloud-synced folder on a Mac, which is exactly what made the first file save ask permission); C:\\TexaCore on Windows.
+ * Only the DEFAULT moved: a path an install already stores (config.companies[], the live file) is never rewritten - see legacyCompanyDirs().
+ */
 function defaultCompanyDir(platform = process.platform, home = os.homedir()) {
-  return platform === 'win32' ? 'C:\\TexaCore' : path.join(home, 'Documents', 'TexaCore');
+  return platform === 'win32' ? 'C:\\TexaCore' : path.join(home, 'TexaCore');
+}
+
+/** The folders earlier releases used as the default (2.0.4 and before: ~/Documents/TexaCore on macOS/Linux). An install whose files are there keeps them there. */
+function legacyCompanyDirs(platform = process.platform, home = os.homedir()) {
+  return platform === 'win32' ? [] : [path.join(home, 'Documents', 'TexaCore')];
+}
+
+/** Is `dir` the current default company folder or a legacy default one? (decides where the daily snapshots go: beside the file in a TexaCore folder, else the program's folder) */
+function isCompanyFolder(dir, platform = process.platform, home = os.homedir()) {
+  if (!dir) return false;
+  const norm = (p) => { const r = path.resolve(String(p)); return platform === 'linux' ? r : r.toLowerCase(); };
+  const d = norm(dir);
+  return [defaultCompanyDir(platform, home), ...legacyCompanyDirs(platform, home)].some((x) => norm(x) === d);
 }
 
 /**
@@ -228,7 +245,7 @@ function readFileIdle(filePath, { idleMs = 20000, maxBytes = 1024 * 1024 * 1024,
 }
 
 module.exports = {
-  defaultCompanyDir, safeFileBase, uniqueTcdbPath, rsfCompanyFilePlan, folderIsWritable, localDateStamp,
+  defaultCompanyDir, legacyCompanyDirs, isCompanyFolder, safeFileBase, uniqueTcdbPath, rsfCompanyFilePlan, folderIsWritable, localDateStamp,
   createPickRegistry, looksLikeCloudPlaceholder, icloudStubFor, readFileIdle, FILE_NOT_LOCAL_TEXT,
   classifyFsError, detectCloudFolder, programCopyPath,
 };

@@ -175,9 +175,27 @@ function plannedFileOf(companies, companyId) {
   return c && c.plannedTcdbPath ? c.plannedTcdbPath : null;
 }
 
+/**
+ * config.companies after the live file MOVED to `to` (2.0.5 RC2, «change place»): the live entry (never a planned one) keeps its name and its
+ * other fields (copyPath...) and gets the new tcdbPath + storagePath; with no live entry yet one is made, first in the list (the start-up code reads
+ * the live entry). Planned entries are untouched. The old file is NOT recorded anywhere as owned - it is left in place for the user.
+ */
+function moveLiveEntry(companies, from, to) {
+  if (!isAbs(to)) return Array.isArray(companies) ? companies.slice() : [];
+  const list = (Array.isArray(companies) ? companies : []).map((c) => (c && typeof c === 'object' ? { ...c } : c));
+  const live = liveEntryOf(list);
+  if (live) {
+    live.tcdbPath = to;
+    live.storagePath = path.dirname(to);
+    return list;
+  }
+  list.unshift({ name: path.basename(to).replace(/\.tcdb$/i, ''), tcdbPath: to, storagePath: path.dirname(to) });
+  return list;
+}
+
 module.exports = {
   REPLACE_ALL_CODE, PRE_OPEN_BACKUP_FAILED, REPLACE_ALL_WARNING,
   isConfirmed, needsReplaceAllConfirmation, replaceAllMessage, replaceAllError, requireReplaceAllConfirmation, preOpenBackupError,
   localStamp, preOpenBackupPath, prunePreOpenBackups,
-  liveEntryOf, planNewCompanyFile, recordPlannedCompany, plannedFileOf,
+  liveEntryOf, planNewCompanyFile, recordPlannedCompany, plannedFileOf, moveLiveEntry,
 };

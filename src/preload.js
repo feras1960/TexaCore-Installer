@@ -82,6 +82,7 @@ contextBridge.exposeInMainWorld('texacore', {
   importRSF: (filePath) => ipcRenderer.invoke('import-rsf', filePath),
   exportRSF: (rsfPath) => ipcRenderer.invoke('export-rsf', rsfPath),
   onRsfProgress: (cb) => ipcRenderer.on('rsf-progress', (_, d) => cb(d)),
+  moveLiveFile: (opts) => ipcRenderer.invoke('move-live-file', opts),   // 2.0.5 RC2 «تغيير المكان»: opts = { dir? } (no dir = the native folder window) → { success, from, to, kept, bytes } | { success:false, code, error }
 
   // Window
   minimize: () => ipcRenderer.invoke('window-minimize'),

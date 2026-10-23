@@ -7,6 +7,13 @@ const { Readable } = require('stream');
 const cf = require('../src/company-file');
 const { mkdtemp } = require('./helpers');
 
+test('defaultCompanyDir: ~/TexaCore on macOS/Linux (2.0.5 RC2), C:\\TexaCore on Windows - never the old ~/Documents/TexaCore for a new file', () => {
+  assert.equal(cf.defaultCompanyDir('darwin', '/Users/me'), path.join('/Users/me', 'TexaCore'));
+  assert.equal(cf.defaultCompanyDir('linux', '/home/me'), path.join('/home/me', 'TexaCore'));
+  assert.equal(cf.defaultCompanyDir('win32', 'C:\\Users\\me'), 'C:\\TexaCore');
+  assert.notEqual(cf.defaultCompanyDir('darwin', '/Users/me'), cf.legacyCompanyDirs('darwin', '/Users/me')[0]);
+});
+
 test('safeFileBase: separators and reserved characters go, Arabic stays, nothing empty or dotted comes out', () => {
   assert.equal(cf.safeFileBase('شركة النور / فرع 2'), 'شركة النور فرع 2');
   assert.equal(cf.safeFileBase('..\\..\\evil:name*?'), 'evil name');
