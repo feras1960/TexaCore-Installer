@@ -155,7 +155,11 @@ const STATES = {
             if (!vis(e)) continue;
             if (e.scrollWidth > e.clientWidth + 1 && getComputedStyle(e).overflow === 'hidden' && !e.classList.contains('url')) clipped.push((e.id || e.className) + ':' + e.textContent.trim().slice(0, 24));
           }
+          const trk = document.querySelector('.toggle-switch .slider');
+          const sw = trk && vis(trk) ? (() => { const t = trk.getBoundingClientRect(); const k = getComputedStyle(trk, '::before'); const kl = parseFloat(k.left), kt = parseFloat(k.top), kw = parseFloat(k.width), kh = parseFloat(k.height);
+            return { dir: de.dir, checked: document.getElementById('input-cloud').checked, trackW: t.width, trackH: t.height, knob: [kw, kh], insets: [kl, t.width - kl - kw, kt, t.height - kt - kh] }; })() : null;
           return {
+            sw,
             page: { sh: de.scrollHeight, ch: de.clientHeight, sw: de.scrollWidth, cw: de.clientWidth }, body: { sh: document.body.scrollHeight, ch: document.body.clientHeight },
             pane: box('.pane:not([hidden])'), cards, sizes: [...sizes].sort(), fams: [...fams].sort(), primaries,
             select: sel ? { bidi: getComputedStyle(sel).unicodeBidi, h: sel.clientHeight, sh: sel.scrollHeight, text: sel.options[sel.selectedIndex] ? sel.options[sel.selectedIndex].text : '' } : null,
@@ -166,6 +170,7 @@ const STATES = {
         check(`${tag} no page scroll`, m.page.sh <= m.page.ch && m.page.sw <= m.page.cw && m.body.sh <= m.body.ch, JSON.stringify(m.page));
         if (m.pane) check(`${tag} no pane scroll`, m.pane.sh <= m.pane.ch + 1 && m.pane.sw <= m.pane.cw + 1, JSON.stringify(m.pane));
         for (const c of m.cards) check(`${tag} card ${c.id} fits (no inner scroll)`, c.sh <= c.ch + 1 && c.sw <= c.cw + 1, JSON.stringify(c));
+        if (m.sw) check(`${tag} the switch knob sits inside the track with an equal inset on all four sides`, m.sw.insets.every((x) => Math.abs(x - 3) < 0.6 || (m.sw.checked && Math.abs(x - 3) < 0.6) || x >= 0) && Math.abs(m.sw.insets[2] - 3) < 0.6 && Math.abs(m.sw.insets[3] - 3) < 0.6 && m.sw.insets.every((x) => x >= 0), JSON.stringify(m.sw));
         check(`${tag} three sizes only`, m.sizes.every((x) => ['12px', '14px', '16px'].includes(x)), m.sizes.join(','));
         check(`${tag} one text family (+ mono)`, m.fams.filter((f) => !/mono|menlo|consolas|sf mono/i.test(f)).length <= 1, m.fams.join(' | '));
         check(`${tag} at most ONE primary in the hero`, m.primaries.length <= 1, m.primaries.join(','));

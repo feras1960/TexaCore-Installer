@@ -97,7 +97,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     ];
 
     for (const lang of ['ar', 'en']) {
-      await js(`(() => { const s = document.getElementById('lang-select'); s.value = '${lang}'; onLangChange(); document.getElementById('input-cloud').blur(); window.scrollTo(0, 0); })()`);
+      await js(`(() => { const s = document.getElementById('lang-select'); s.value = '${lang}'; onLangChange(); document.getElementById('input-cloud').blur(); window.scrollTo(0, 0); selectTab('links'); })()`);
       await sleep(600);
 
       await R.check(`U1 [${lang}] the Cloud Access switch: OFF grey with the knob at the inline-start, ON green with the knob at the inline-end, always inside the track with equal insets`, async () => {
@@ -134,7 +134,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
       await R.check(`U2 [${lang}] the copy buttons beside the cloud address, the office employee link and the cloud employee link copy exactly what is shown (each link appears once)`, async () => {
         // display-only sample state (no cloud account exists in this isolated run): a subdomain, a LAN address and one company, through the renderer's own updateUI / renderLinks
-        await js(`(() => { window.__copied = []; navigator.clipboard.writeText = (x) => { window.__copied.push(x); return Promise.resolve(); };
+        await js(`(() => { window.refreshStatus = async () => {}; window.__copied = []; navigator.clipboard.writeText = (x) => { window.__copied.push(x); return Promise.resolve(); };
           _empCompanies = [{ id: '6b6e4674-1c2a-4b7e-9d0a-6f3b2c1d4e5f', name: 'Acme' }]; _empListed = true; _chosenCompanyId = '';
           renderState(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: true, subdomain: 'acme-demo', port: 80 }), localIp: '192.168.1.20' }));
           selectTab('links'); document.getElementById('cloud-url').scrollIntoView({ block: 'center' }); })()`);
