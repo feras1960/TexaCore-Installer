@@ -420,9 +420,14 @@ async function gotrueSessionFor(deps, email) {
   throw new ProvisioningError('OWNER_SESSION_FAILED', "could not verify the owner's session");
 }
 
-async function cleanupEmployee(deps, { userId, requestId }, log) {
-  if (requestId) {
-    await withClient(deps, async (c) => { await c.query(`UPDATE public.company_membership_requests SET status = 'cancelled', updated_at = now() WHERE id = $1 AND status = 'pending'`, [requestId]); });
+/**
+ * Undo what ONE invite call created: cancel the still-pending requests whose ids THIS call was handed, then (only when this call created the account)
+ * remove that account by id. Never a lookup by e-mail, never a list.
+ */
+async function cleanupInvited(deps, { userId, requestIds }, log) {
+  const ids = (Array.isArray(requestIds) ? requestIds : []).filter((x) => UUID_RE.test(String(x || '')));
+  if (ids.length) {
+    await withClient(deps, async (c) => { await c.query(`UPDATE public.company_membership_requests SET status = 'cancelled', updated_at = now() WHERE id = ANY($1::uuid[]) AND status = 'pending'`, [ids]); });
   }
   if (!userId) return;
   await withClient(deps, async (c) => {
@@ -438,6 +443,9 @@ async function cleanupEmployee(deps, { userId, requestId }, log) {
   const r = await httpJson('DELETE', `${deps.gotrueUrl}/admin/users/${userId}`, { headers: { apikey: deps.serviceKey, Authorization: `Bearer ${deps.serviceKey}` } });
   if (r.status >= 300) await withClient(deps, async (c) => { await c.query('DELETE FROM auth.users WHERE id = $1', [userId]); });
   log(`[Employee] cleanup: ${userId} removed`);
+}
+async function cleanupEmployee(deps, { userId, requestId }, log) {
+  return cleanupInvited(deps, { userId, requestIds: requestId ? [requestId] : [] }, log);
 }
 
 /**
@@ -526,7 +534,237 @@ async function inviteLocalEmployee(deps, rawInput) {
   }
 }
 
+// ════════════════════════════════════════════════════════════════
+// 2.0.5 RC2 — the local «دعوة مستخدم» for a SIGNED-IN manager (not "the owner, on the machine itself").
+//
+// inviteLocalEmployee above runs as the tenant OWNER, obtained with the service key, for the launcher's own form. The ERP's «إضافة مستخدم» screen
+// is used by whoever is signed in to the ERP - a tenant admin, a company admin - from this computer, a LAN PC or the tunnel. So here the invitation is
+// made AS THE CALLER, with the caller's own GoTrue token against PostgREST: every guard the cloud's invite-user relies on runs for HIM
+// (fn_settings_actor_may_manage, fn_membership_invite_multi's tenant / may-manage-members / may-grant-role checks). Only two things are done with the
+// installer's own powers, exactly as for the owner flow: creating the account (GoTrue admin API; there is no e-mail to send a link by) and reading
+// the plan limit. A NEW account accepts every invitation at once with a one-time password that is returned once and never logged.
+// Server contract: POST /local-api/invite-user (src/local-invite-route.js).
+// ════════════════════════════════════════════════════════════════
+const COMPANIES_PER_INVITE = 20;
+const ROLES_PER_COMPANY = 20;
+
+/** The body of POST /local-api/invite-user → a normalised value, or { ok:false, reason, error }. Unknown fields are dropped. */
+function normaliseCallerInviteInput(data) {
+  const d = data && typeof data === 'object' ? data : {};
+  const bad = (reason, error) => ({ ok: false, reason, error, errors: [error] });
+  const email = normEmail(d.email);
+  if (!email || !EMAIL_RE.test(email) || email.length > 254) return bad('email', 'a valid email is required');
+  const fullName = String(d.full_name == null ? '' : d.full_name).trim().slice(0, 120);
+  if (!fullName) return bad('full_name', 'full_name is required');
+  let phone = '';
+  if (d.phone != null && d.phone !== '') {
+    phone = String(d.phone).trim();
+    if (!/^[0-9+()\-\s.]{3,40}$/.test(phone)) return bad('phone', 'phone is not valid');
+  }
+  let employeeId = null;
+  if (d.employee_id != null && d.employee_id !== '') {
+    employeeId = String(d.employee_id).trim();
+    if (!UUID_RE.test(employeeId)) return bad('employee_id', 'employee_id must be a uuid');
+  }
+  let note = null;
+  if (d.note != null && d.note !== '') {
+    if (typeof d.note !== 'string') return bad('note', 'note must be text');
+    note = d.note.trim().slice(0, 500) || null;
+  }
+  if (!Array.isArray(d.items) || d.items.length === 0) return bad('items', 'items must be a non-empty list');
+  if (d.items.length > COMPANIES_PER_INVITE) return bad('items', `at most ${COMPANIES_PER_INVITE} companies per invitation`);
+  const seen = new Set();
+  const items = [];
+  for (const it of d.items) {
+    const companyId = it && typeof it.company_id === 'string' ? it.company_id.trim().toLowerCase() : '';
+    if (!UUID_RE.test(companyId)) return bad('items', 'every item needs a company_id (uuid)');
+    if (seen.has(companyId)) return bad('items', 'a company appears twice');
+    seen.add(companyId);
+    const roles = it && Array.isArray(it.role_ids) ? it.role_ids : null;
+    if (!roles || roles.length === 0 || roles.length > ROLES_PER_COMPANY || roles.some((r) => typeof r !== 'string' || !UUID_RE.test(r.trim()))) {
+      return bad('items', `every item needs 1..${ROLES_PER_COMPANY} role_ids (uuid)`);
+    }
+    items.push({ company_id: companyId, role_ids: [...new Set(roles.map((r) => r.trim().toLowerCase()))] });
+  }
+  if (employeeId && items.length !== 1) return bad('employee_id', 'employee_id can be linked only when exactly one company is invited');
+  return { ok: true, value: { email, fullName, phone, employeeId, note, items } };
+}
+
+const NETWORK_ERRORS = new Set(['ECONNREFUSED', 'ECONNRESET', 'ETIMEDOUT', 'EHOSTUNREACH', 'EPIPE', 'ENOTFOUND']);
+function servicesDown(e) { return !!e && (NETWORK_ERRORS.has(e.code) || /timeout calling|connect ECONN|Connection terminated|the database system/i.test(String(e.message || ''))); }
+
+/**
+ * Who is calling? The caller's own GoTrue access token, checked by GoTrue itself (GET /user): a missing, malformed, expired, revoked or anon/service key is
+ * refused. Returns { ok:true, id, email } | { ok:false, code:'AUTH_REQUIRED' | 'SERVICES_DOWN', error }. The token is never logged.
+ */
+async function authenticateCaller(deps, token) {
+  const t = typeof token === 'string' ? token.trim() : '';
+  if (!/^[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}\.[A-Za-z0-9_-]{8,}$/.test(t) || t.length > 4096) return { ok: false, code: 'AUTH_REQUIRED', error: 'sign in first' };
+  let r;
+  try { r = await httpJson('GET', `${deps.gotrueUrl}/user`, { headers: { apikey: deps.anonKey, Authorization: `Bearer ${t}` } }); }
+  catch (e) { return servicesDown(e) ? { ok: false, code: 'SERVICES_DOWN', error: 'the sign-in service is not running' } : { ok: false, code: 'AUTH_REQUIRED', error: 'sign in first' }; }
+  if (r.status >= 500) return { ok: false, code: 'SERVICES_DOWN', error: 'the sign-in service is not available' };
+  const u = r.body && typeof r.body === 'object' ? r.body : null;
+  if (r.status !== 200 || !u || !UUID_RE.test(String(u.id || '')) || u.is_anonymous === true) return { ok: false, code: 'AUTH_REQUIRED', error: 'the session is not valid or has expired' };
+  return { ok: true, id: String(u.id), email: normEmail(u.email) };
+}
+
+const RPC_REFUSALS = {
+  not_allowed: ['NOT_ALLOWED', 'not allowed to add users to this company'],
+  cross_tenant: ['NOT_ALLOWED', 'this company belongs to another tenant'],
+  role_not_grantable: ['ROLE_NOT_GRANTABLE', 'one of the roles cannot be granted by you'],
+  bad_request: ['BAD_REQUEST', 'the invitation is not valid'],
+  company_not_found: ['BAD_REQUEST', 'company not found'],
+  not_authenticated: ['AUTH_REQUIRED', 'the session is not valid or has expired'],
+};
+/** A PostgREST error answer of an invite function → our failure object (the server's own reason word is kept as `reason`). */
+function inviteRpcFailure(res, fallback = 'INVITE_FAILED') {
+  const b = res && res.body && typeof res.body === 'object' ? res.body : {};
+  const msg = String(b.message || b.reason || '').trim();
+  const key = msg.toLowerCase();
+  if (res && (res.status === 401 || b.code === 'PGRST301' || b.code === 'PGRST303' || /jwt/i.test(msg))) return { success: false, code: 'AUTH_REQUIRED', reason: 'jwt', error: RPC_REFUSALS.not_authenticated[1] };
+  if (RPC_REFUSALS[key]) {
+    const out = { success: false, code: RPC_REFUSALS[key][0], reason: key, error: RPC_REFUSALS[key][1] };
+    const det = typeof b.details === 'string' ? b.details.match(/[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}/i) : null;
+    if (det) out.company_id = det[0];
+    return out;
+  }
+  const reason = /^[a-z0-9_]{1,60}$/i.test(key) ? key : 'refused';
+  return { success: false, code: fallback, reason, error: `the server refused the invitation (${reason})` };
+}
+
+/**
+ * Invite (and, for a new account, create and activate) a user into one or more companies AS THE SIGNED-IN CALLER.
+ * rawInput: { callerToken, caller?, email, full_name, phone?, employee_id?, items:[{company_id, role_ids[]}], note? }   (caller = result of authenticateCaller)
+ * Returns { success:true, data:{ user_id, email, is_new, one_time_password?, created, skipped, request_ids, accepted, companies } } or
+ * { success:false, code, reason?, error, current?, max? } - never throws for expected failures. The password appears only in this return value.
+ */
+async function inviteLocalUserAsCaller(deps, rawInput) {
+  const log = deps.log || (() => {});
+  const norm = normaliseCallerInviteInput(rawInput);
+  if (!norm.ok) return { success: false, code: 'BAD_REQUEST', reason: norm.reason, error: norm.error };
+  const v = norm.value;
+  const callerToken = rawInput && typeof rawInput.callerToken === 'string' ? rawInput.callerToken.trim() : '';
+  const created = { userId: null, requestIds: [] };
+  try {
+    // 1. who is calling (GoTrue vouches for the token)
+    const caller = (rawInput && rawInput.caller && rawInput.caller.ok) ? rawInput.caller : await authenticateCaller(deps, callerToken);
+    if (!caller.ok) return { success: false, code: caller.code, error: caller.error };
+    const rpcAs = (token, fn, args) => httpJson('POST', `${deps.restUrl}/rpc/${fn}`, { headers: { apikey: deps.anonKey, Authorization: `Bearer ${token}` }, body: args });
+
+    // 2. authorise, with the CALLER's own token: may he manage each company, and does the multi-company function (tenant, may-manage-members, may-grant-role) accept it
+    for (const it of v.items) {
+      const may = await rpcAs(callerToken, 'fn_settings_actor_may_manage', { p_actor: caller.id, p_company: it.company_id });
+      if (may.status === 401 || (may.body && typeof may.body === 'object' && (may.body.code === 'PGRST301' || may.body.code === 'PGRST303'))) return { success: false, code: 'AUTH_REQUIRED', error: RPC_REFUSALS.not_authenticated[1] };
+      if (may.status >= 500) throw Object.assign(new Error(`the server could not check the permission (${may.status})`), { code: 'RPC_UNAVAILABLE' });
+      if (may.status !== 200 || may.body !== true) return { success: false, code: 'NOT_ALLOWED', reason: 'not_allowed', company_id: it.company_id, error: RPC_REFUSALS.not_allowed[1] };
+    }
+    const dry = await rpcAs(callerToken, 'fn_membership_invite_multi', { p_email: v.email, p_items: v.items, p_note: v.note, p_request_key: null, p_dry_run: true });
+    if (dry.status !== 200) {
+      if (dry.status >= 500) throw Object.assign(new Error(`the server could not check the invitation (${dry.status})`), { code: 'RPC_UNAVAILABLE' });
+      return inviteRpcFailure(dry);
+    }
+
+    // 3. the companies' tenant (one), whether the account exists, and - only when a NEW account would be created - the plan limit
+    const ctx = await withClient(deps, async (c) => {
+      const co = await c.query('SELECT id, name, tenant_id FROM public.companies WHERE id = ANY($1::uuid[])', [v.items.map((i) => i.company_id)]);
+      if (co.rowCount !== v.items.length) return { error: { code: 'BAD_REQUEST', reason: 'company_not_found', error: RPC_REFUSALS.company_not_found[1] } };
+      const tenants = [...new Set(co.rows.map((r) => r.tenant_id))];
+      if (tenants.length !== 1) return { error: { code: 'BAD_REQUEST', reason: 'mixed_tenants', error: 'all companies of one invitation must belong to the same tenant' } };
+      const ex = await c.query('SELECT id FROM auth.users WHERE lower(email) = $1 LIMIT 1', [v.email]);
+      const isNew = ex.rowCount === 0;
+      if (isNew) {
+        const lim = await c.query(`SELECT public.check_plan_limits($1::uuid, 'users') AS r`, [tenants[0]]);
+        const r = lim.rows[0].r || {};
+        if (r.allowed === false && !['no_active_subscription', 'plan_not_found'].includes(r.error || '')) {
+          return { error: { code: 'PLAN_LIMIT_EXCEEDED', error: `PLAN_LIMIT_EXCEEDED: users (${r.current ?? '?'}/${r.max ?? '?'})`, current: r.current, max: r.max } };
+        }
+      }
+      return { tenantId: tenants[0], isNew, existingId: isNew ? null : ex.rows[0].id, names: new Map(co.rows.map((r) => [r.id, r.name])) };
+    });
+    if (ctx.error) return { success: false, ...ctx.error };
+
+    // 4. a NEW account: same GoTrue admin call and metadata as inviteLocalEmployee (the trigger on auth.users writes the profile)
+    let password = null;
+    if (ctx.isNew) {
+      password = generateOneTimePassword();
+      const create = await httpJson('POST', `${deps.gotrueUrl}/admin/users`, {
+        headers: { apikey: deps.serviceKey, Authorization: `Bearer ${deps.serviceKey}` },
+        body: {
+          email: v.email, password, email_confirm: true,
+          user_metadata: { full_name: v.fullName, invited_by: caller.id, tenant_id: ctx.tenantId, company_id: v.items[0].company_id, ...(v.phone ? { phone: v.phone } : {}) },
+          app_metadata: { provider: 'email', providers: ['email'], tenant_id: ctx.tenantId, company_id: v.items[0].company_id },
+        },
+      });
+      if (create.status !== 200 && create.status !== 201) {
+        const ec = create.body && (create.body.error_code || create.body.code);
+        if (ec === 'email_exists' || create.status === 422) return { success: false, code: 'INVITE_FAILED', reason: 'email_exists', error: 'This email was registered on this computer a moment ago. Try again.' };
+        const msg = JSON.stringify(create.body || '');
+        if (/PLAN_LIMIT_EXCEEDED|Database error creating new user/i.test(msg)) return { success: false, code: 'PLAN_LIMIT_EXCEEDED', error: 'PLAN_LIMIT_EXCEEDED: users' };
+        return { success: false, code: 'INVITE_FAILED', reason: 'account_create_failed', error: `Could not create the sign-in account (${create.status})` };
+      }
+      created.userId = create.body.id;
+    }
+
+    // 5. the invitation(s), AS THE CALLER - the server applies every guard again for the real write
+    let outcome;
+    if (v.employeeId) {
+      // the multi-company function carries no payload; a single company with an employee record goes through the single-company function (it validates the employee)
+      const it = v.items[0];
+      const one = await rpcAs(callerToken, 'fn_membership_invite_create', { p_company_id: it.company_id, p_email: v.email, p_role_ids: it.role_ids, p_note: v.note, p_payload: { full_name: v.fullName, employee_id: v.employeeId } });
+      if (one.status !== 200 || !one.body || one.body.ok !== true || !one.body.request_id) {
+        const f = one.status !== 200 ? inviteRpcFailure(one) : { success: false, code: 'INVITE_FAILED', reason: String((one.body && one.body.reason) || 'refused').replace(/[^a-z0-9_]/gi, '').slice(0, 60) || 'refused' };
+        throw Object.assign(new Error(f.error || `the server refused the invitation (${f.reason})`), { failure: { ...f, error: f.error || `the server refused the invitation (${f.reason})` } });
+      }
+      outcome = { created: 1, skipped: [], request_ids: [one.body.request_id] };
+    } else {
+      const real = await rpcAs(callerToken, 'fn_membership_invite_multi', { p_email: v.email, p_items: v.items, p_note: v.note, p_request_key: `local-invite:${crypto.randomUUID()}`, p_dry_run: false });
+      if (real.status !== 200 || !real.body || real.body.ok !== true) {
+        const f = inviteRpcFailure(real);
+        throw Object.assign(new Error(f.error), { failure: f });
+      }
+      outcome = { created: Number(real.body.created) || 0, skipped: Array.isArray(real.body.skipped) ? real.body.skipped.map((x) => ({ company_id: x && x.company_id, reason: x && x.reason })) : [], request_ids: Array.isArray(real.body.request_ids) ? real.body.request_ids.filter((x) => UUID_RE.test(String(x))) : [] };
+    }
+    created.requestIds = outcome.request_ids.slice();
+
+    // 6. a NEW account accepts every invitation at once (the identity guard of the respond function is the account itself)
+    let accepted = 0;
+    if (ctx.isNew && outcome.request_ids.length) {
+      const si = await httpJson('POST', `${deps.gotrueUrl}/token?grant_type=password`, { headers: { apikey: deps.anonKey }, body: { email: v.email, password } });
+      if (si.status !== 200 || !si.body || !si.body.access_token) throw new ProvisioningError('EMPLOYEE_SIGN_IN_FAILED', `the new account could not sign in (${si.status})`);
+      for (const rid of outcome.request_ids) {
+        const acc = await rpcAs(si.body.access_token, 'fn_membership_invite_respond', { p_request_id: rid, p_accept: true });
+        if (acc.status !== 200 || !acc.body || acc.body.ok !== true) {
+          throw new ProvisioningError('INVITE_NOT_APPLIED', `the server did not apply the membership: ${(acc.body && (acc.body.reason || acc.body.message)) || acc.status}`);
+        }
+        accepted += 1;
+      }
+    }
+
+    const userId = ctx.isNew ? created.userId : ctx.existingId;
+    log(`[Invite] ${ctx.isNew ? 'new account' : 'existing account'} ${userId} invited by ${caller.id} to ${v.items.length} company(ies): ${outcome.created} created, ${accepted} accepted`);   // never the password or a token
+    return {
+      success: true,
+      data: {
+        user_id: userId, email: v.email, is_new: ctx.isNew,
+        ...(ctx.isNew ? { one_time_password: password } : {}),
+        created: outcome.created, skipped: outcome.skipped, request_ids: outcome.request_ids, accepted,
+        companies: v.items.map((i) => ({ company_id: i.company_id, company_name: ctx.names.get(i.company_id) || '', login_code: i.company_id.split('-')[0] })),
+      },
+    };
+  } catch (err) {
+    log(`[Invite] failed: ${err.failure ? err.failure.code : (err.code || 'error')}`);   // (the message may name a server reason, never a secret)
+    if (created.userId || created.requestIds.length) {
+      try { await cleanupInvited(deps, created, log); } catch (e) { log(`[Invite] cleanup failed: ${e.message}`); }
+    }
+    if (err.failure) return err.failure;
+    if (servicesDown(err) || err.code === 'RPC_UNAVAILABLE') return { success: false, code: 'SERVICES_DOWN', error: 'the services are not available' };
+    return { success: false, code: 'INVITE_FAILED', reason: String(err.code || 'error').replace(/[^A-Za-z0-9_]/g, '').slice(0, 40) || 'error', error: err instanceof ProvisioningError ? String(err.message).slice(0, 200) : 'the invitation failed' };
+  }
+}
+
 module.exports = {
   createLocalCompany, healTenantOwners, ensureVendorSupport, normaliseInput, httpJson, ProvisioningError, MIN_PASSWORD_LENGTH,
   inviteLocalEmployee, listGrantableRoles, normaliseEmployeeInput, generateOneTimePassword,
+  inviteLocalUserAsCaller, authenticateCaller, normaliseCallerInviteInput, inviteRpcFailure, cleanupInvited,
 };

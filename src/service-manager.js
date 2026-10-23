@@ -21,6 +21,8 @@ const { openMigrationsStore } = require('./migrations-store');
 const { TunnelMonitor, redact } = require('./tunnel-monitor');
 const tunnelRoute = require('./tunnel-route');
 const portalSession = require('./portal-session');
+const provisioning = require('./provisioning');
+const localInviteRoute = require('./local-invite-route');   // 2.0.5 RC2: POST /local-api/invite-user (the ERP's «إضافة مستخدم» on a local install)
 
 // ─── Ports (defaults — TEXACORE_PORT_BASE moves the whole block; see ports.js) ───
 const PG_PORT = PORTS.pg;
@@ -1420,6 +1422,19 @@ window.__TEXACORE_CONFIG__ = {
         log: (m) => console.log(m),
       });
       app.all('/portal-api/*', (req, res, next) => { portalRoutes.handle(req, res).then((done) => { if (!done) next(); }, next); });
+
+      // 2.0.5 RC2 (local invite): the ERP's «إضافة مستخدم» posts here (same origin: this computer, the office network and the tunnel all reach it). Not part of the local-only
+      // admin API and given no admin secret: what authorises a call is the caller's OWN GoTrue session, and the database's guards decide (provisioning.inviteLocalUserAsCaller).
+      // Registered BEFORE /api/*; no CORS header, cross-site refused, rate limited (local-invite-route.js).
+      if (!this.localInviteRoutes) {
+        this.localInviteRoutes = localInviteRoute.createLocalInviteRoutes({
+          getDeps: () => (this.isRunning() ? (this.getProvisioningDeps ? this.getProvisioningDeps() : this.provisioningDeps()) : null),
+          invite: (deps, input) => provisioning.inviteLocalUserAsCaller(deps, input),
+          authenticate: (deps, token) => provisioning.authenticateCaller(deps, token),
+          log: (m) => console.log(m),
+        });
+      }
+      app.all('/local-api/*', (req, res, next) => { this.localInviteRoutes.handle(req, res).then((done) => { if (!done) next(); }, next); });
 
       // Admin API proxy (/api/companies, /api/delete-company, etc.)
       // These are served by the Electron admin server (main.js, PORTS.admin). The installer's admin API is a LOCAL

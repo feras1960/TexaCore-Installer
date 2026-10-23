@@ -4359,6 +4359,7 @@ app.whenReady().then(() => {
     try {
       const testResult = await new Promise((resolve, reject) => {
         const req = https.request({
+    svcManager.getProvisioningDeps = () => provisioningDeps();   // 2.0.5 RC2: the local invite route (/local-api/invite-user) gets the same deps as the IPC flows
           hostname: 'wzkklenfsaepegymfxfz.supabase.co',
           port: 443,
           path: '/functions/v1/license-heartbeat',

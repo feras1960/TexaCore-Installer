@@ -102,6 +102,20 @@ function readJsonBody(req, limit = MAX_BODY_BYTES) {
 }
 
 /**
+ * Same-origin only: no CORS header is ever sent, so a browser blocks a cross-origin JSON POST by itself; on top of that a request a browser marks as anything but
+ * same-origin / direct navigation (cross-site, or just same-SITE like another subdomain) is refused. A client that sends no Fetch-Metadata at all (an old browser,
+ * curl) is held to the Origin header instead, when it sends one. (2.0.5 RC2: shared by /portal-api/* and /local-api/*.)
+ */
+function isCrossOrigin(req) {
+  const sfs = String(req.headers['sec-fetch-site'] || '').toLowerCase();
+  if (sfs) return sfs !== 'same-origin' && sfs !== 'none';
+  const origin = String(req.headers.origin || '');
+  if (!origin) return false;
+  if (origin === 'null') return true;
+  try { return new URL(origin).host !== String(req.headers.host || ''); } catch { return true; }
+}
+
+/**
  * The route handler: `handle(req, res)` answers `/portal-api/*` and resolves true, or resolves false for any other path (the caller goes on).
  * @param {object} o
  * @param {ReturnType<typeof createPortalSessions>} o.sessions
@@ -110,17 +124,8 @@ function readJsonBody(req, limit = MAX_BODY_BYTES) {
  * @param {(msg: string) => void} [o.log]  never receives a password or a token
  */
 function createPortalRoutes({ sessions, verifyPassword, listCompanies, log = () => {} }) {
-  // same-origin only: no CORS header is ever sent, so a browser blocks a cross-origin JSON POST by itself; on top of that a request a browser marks as anything but
-  // same-origin / direct navigation (cross-site, or just same-SITE like another subdomain) is refused. A client that sends no Fetch-Metadata at all (an old browser,
-  // curl) is held to the Origin header instead, when it sends one.
-  function crossOrigin(req) {
-    const sfs = String(req.headers['sec-fetch-site'] || '').toLowerCase();
-    if (sfs) return sfs !== 'same-origin' && sfs !== 'none';
-    const origin = String(req.headers.origin || '');
-    if (!origin) return false;
-    if (origin === 'null') return true;
-    try { return new URL(origin).host !== String(req.headers.host || ''); } catch { return true; }
-  }
+  // same-origin only: see isCrossOrigin() (shared with the local invite route)
+  const crossOrigin = isCrossOrigin;
   const tokenOf = (req) => readCookie(req.headers.cookie, COOKIE_NAME);
 
   async function handle(req, res) {
@@ -169,4 +174,4 @@ function createPortalRoutes({ sessions, verifyPassword, listCompanies, log = () 
   return { handle };
 }
 
-module.exports = { createPortalSessions, createPortalRoutes, readCookie, sessionCookie, COOKIE_NAME, COOKIE_PATH, SESSION_TTL_MS };
+module.exports = { createPortalSessions, createPortalRoutes, isCrossOrigin, readCookie, sessionCookie, COOKIE_NAME, COOKIE_PATH, SESSION_TTL_MS };
