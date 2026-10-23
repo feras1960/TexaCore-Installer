@@ -86,6 +86,23 @@ function pickLanAddress(interfaces, defaultRoute) {
   return '127.0.0.1';
 }
 
+/**
+ * 2.0.5 RC2: every usable IPv4 the launcher's «network address» picker may offer (never loopback / link-local / multicast), the adapter's name and whether it
+ * looks like a tunnel / virtual adapter (offered last, with that note: an office PC will not reach it). Pure, over the shape of os.networkInterfaces().
+ * @returns {Array<{name:string, address:string, virtual:boolean, private:boolean}>} physical first, then by name
+ */
+function listLanCandidates(interfaces) {
+  const out = [];
+  for (const name of Object.keys(interfaces || {})) {
+    for (const a of (interfaces[name] || [])) {
+      if (!isIPv4(a) || a.internal || !isUsableUnicastV4(a.address)) continue;
+      if (out.some((c) => c.address === a.address)) continue;
+      out.push({ name, address: a.address, virtual: isVirtualName(name), private: isPrivateV4(a.address) });
+    }
+  }
+  return out.sort((x, y) => (Number(x.virtual) - Number(y.virtual)) || byName(x, y));
+}
+
 // ─── the default route (which interface carries the traffic to the internet / the office router) ───
 // macOS: `route -n get default`  →  "  interface: en0"
 function parseDarwinRouteGet(text) {
@@ -116,7 +133,7 @@ function detectDefaultRoute(platform, run) {
 
 // A tiny cache: the answer is read on every status poll (about every 5 s) and never waits for a child process. The first call
 // answers from the interface names alone and starts the lookup; later calls use the default route once it is known.
-function createLanAddressProvider({ networkInterfaces, platform, ttlMs = 60000, now = Date.now, detect = detectDefaultRoute }) {
+function createLanAddressProvider({ networkInterfaces, platform, ttlMs = 60000, now = Date.now, detect = detectDefaultRoute, getOverride = () => null }) {
   let route = null;
   let at = 0;
   let pending = false;
@@ -126,16 +143,35 @@ function createLanAddressProvider({ networkInterfaces, platform, ttlMs = 60000, 
     at = now();
     Promise.resolve().then(() => detect(platform)).then((r) => { route = r || null; }, () => { route = null; }).then(() => { pending = false; });
   }
+  // the owner's choice (config.lanAddress) wins while that address still exists on this machine; otherwise the automatic pick below
+  function chosen(ifaces) {
+    let want = null;
+    try { want = getOverride(); } catch { want = null; }
+    if (!want) return null;
+    return listLanCandidates(ifaces).find((c) => c.address === want) || null;
+  }
   return {
     get() {
       if (!at || now() - at > ttlMs) refresh();
-      return pickLanAddress(networkInterfaces(), route);
+      const ifaces = networkInterfaces();
+      const c = chosen(ifaces);
+      return c ? c.address : pickLanAddress(ifaces, route);
+    },
+    /** what the picker shows: the address in use, its adapter, whether it is the automatic pick, and every candidate */
+    info() {
+      if (!at || now() - at > ttlMs) refresh();
+      const ifaces = networkInterfaces();
+      const candidates = listLanCandidates(ifaces);
+      const c = chosen(ifaces);
+      const address = c ? c.address : pickLanAddress(ifaces, route);
+      const cur = candidates.find((x) => x.address === address) || null;
+      return { address, iface: cur ? cur.name : '', auto: !c, candidates };
     },
     refresh,
   };
 }
 
 module.exports = {
-  pickLanAddress, createLanAddressProvider, detectDefaultRoute, parseDarwinRouteGet, parseWindowsRoutePrint,
+  pickLanAddress, listLanCandidates, createLanAddressProvider, detectDefaultRoute, parseDarwinRouteGet, parseWindowsRoutePrint,
   isPrivateV4, isUsableUnicastV4, isVirtualName, isPhysicalName,
 };

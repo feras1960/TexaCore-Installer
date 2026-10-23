@@ -63,7 +63,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       return r.json;
     };
     const js = async (code) => (await ev({ js: code })).result;
-    await ev({ size: [900, 1500] });                       // tall enough to show the whole control panel in one frame
+    await ev({ size: [960, 748] });                        // the launcher's default window: a no-scroll control panel (RC2)
     await sleep(1500);
 
     // what the page can measure about the switch: track box, knob box (the knob is the track's ::before), direction, state
@@ -136,8 +136,8 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         // display-only sample state (no cloud account exists in this isolated run): a subdomain, a LAN address and one company, through the renderer's own updateUI / renderLinks
         await js(`(() => { window.__copied = []; navigator.clipboard.writeText = (x) => { window.__copied.push(x); return Promise.resolve(); };
           _empCompanies = [{ id: '6b6e4674-1c2a-4b7e-9d0a-6f3b2c1d4e5f', name: 'Acme' }]; _empListed = true; _chosenCompanyId = '';
-          updateUI(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: true, subdomain: 'acme-demo', port: 80 }), localIp: '192.168.1.20' }));
-          document.getElementById('cloud-url').scrollIntoView({ block: 'center' }); })()`);
+          renderState(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: true, subdomain: 'acme-demo', port: 80 }), localIp: '192.168.1.20' }));
+          selectTab('links'); document.getElementById('cloud-url').scrollIntoView({ block: 'center' }); })()`);
         await sleep(500);
         await ev({ shot: `ui-${lang}-copy-buttons.png`, wait: 200 });
         const shown = await js(`({ cloud: document.getElementById('cloud-url').textContent.trim(), lan: document.getElementById('lan-employee-url').textContent.trim(), emp: document.getElementById('employee-url').textContent.trim(),
@@ -152,7 +152,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         if (afterAll[0] !== shown.cloud || afterAll[1] !== shown.lan || afterAll[2] !== shown.emp) throw new Error(`copied: ${JSON.stringify(afterAll)}`);
         if (afterCloud.btn === shown.cloudBtn) throw new Error('the button did not acknowledge the copy');
         evidence[`copy_${lang}`] = { shown, afterCloud, afterAll };
-        await js(`updateUI(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: false }) }))`);
+        await js(`renderState(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: false }) }))`);
         return `cloud ${shown.cloud}, office ${shown.lan}, anywhere ${shown.emp} → each copied; button label «${shown.cloudBtn}» → «${afterCloud.btn}»`;
       });
 
@@ -161,19 +161,19 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const before = await js(`texacore.getState().then((s) => ({ running: !!s.containerRunning, stopVisible: getComputedStyle(document.getElementById('btn-stop')).display !== 'none' }))`);
         if (!before.running || !before.stopVisible) throw new Error(`precondition: ${JSON.stringify(before)}`);
         await js(`document.getElementById('btn-stop').click()`); await sleep(500);
-        const asked = await js(`({ box: getComputedStyle(document.getElementById('stop-confirm')).display, text: document.getElementById('stop-confirm-text').textContent, yes: document.getElementById('btn-stop-confirm').textContent,
+        const asked = await js(`({ box: getComputedStyle(document.getElementById('overlay-stop')).display, text: document.getElementById('stop-confirm-text').textContent, yes: document.getElementById('btn-stop-confirm').textContent,
           cancel: document.getElementById('btn-stop-cancel').textContent, focus: document.activeElement && document.activeElement.id, role: document.getElementById('stop-confirm').getAttribute('role') })`);
         await js(`document.getElementById('stop-confirm').scrollIntoView({ block: 'center' })`);
         await ev({ shot: `ui-${lang}-stop-confirm.png`, wait: 300 });
         await sleep(1500);
         const still = await js(`texacore.getState().then((s) => !!s.containerRunning)`);
-        if (asked.box !== 'block' || !still) throw new Error(`asked ${JSON.stringify(asked)}; still running: ${still}`);
+        if (asked.box !== 'flex' || !still) throw new Error(`asked ${JSON.stringify(asked)}; still running: ${still}`);
         if (asked.focus !== 'btn-stop-cancel') throw new Error(`focus is on ${asked.focus}, not on Cancel`);
         await js(`document.getElementById('btn-stop-cancel').click()`); await sleep(300);
-        const afterCancel = await js(`getComputedStyle(document.getElementById('stop-confirm')).display`);
+        const afterCancel = await js(`getComputedStyle(document.getElementById('overlay-stop')).display`);
         await js(`document.getElementById('btn-stop').click()`); await sleep(300);
         await js(`document.dispatchEvent(new KeyboardEvent('keydown', { key: 'Escape' }))`); await sleep(300);
-        const afterEsc = await js(`getComputedStyle(document.getElementById('stop-confirm')).display`);
+        const afterEsc = await js(`getComputedStyle(document.getElementById('overlay-stop')).display`);
         if (afterCancel !== 'none' || afterEsc !== 'none') throw new Error(`cancel → ${afterCancel}, Esc → ${afterEsc}`);
         const stillAfter = await js(`texacore.getState().then((s) => !!s.containerRunning)`);
         if (!stillAfter) throw new Error('the system stopped without a «yes»');
@@ -205,7 +205,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
       await R.check(`U7 [${lang}] the connection status is honest: connected / starting / off / each error reason is worded as such — «connected» only for a connector that registered`, async () => {
         await js(`window.refreshStatus = async () => {}; window.scrollTo(0, 0)`);          // stop the poll overwriting the states shown here
-        await js(`updateUI(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: true, subdomain: 'acme-demo', port: 80 }), localIp: '192.168.1.20' }))`);
+        await js(`selectTab('links'); renderState(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: true, subdomain: 'acme-demo', port: 80 }), localIp: '192.168.1.20' }))`);
         await sleep(300);
         const cases = [
           ['connected', { enabled: true, state: 'connected', reason: null, detail: '' }, 'circle-check', 'connected'],
@@ -234,12 +234,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         const stopped = await js(`({ text: document.getElementById('tunnel-status').textContent, icon: (document.querySelector('#tunnel-status use') || { getAttribute: () => '' }).getAttribute('href') })`);
         if (stopped.icon === '#i-circle-check') throw new Error(`services stopped but the window says "${stopped.text}" with the connected mark`);
         await js(`delete window.refreshStatus`);
-        await js(`updateUI(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: false }) }))`);   // leave the switch as it was
+        await js(`renderState(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { enableCloud: false }) }))`);   // leave the switch as it was
         return seen.join(' | ');
       });
 
       await R.check(`U8 [${lang}] the admin-portal password UI states the real policy (8+), refuses 7 characters / «admin» / a licence-key shape, and a good password is accepted and verified by the server`, async () => {
-        await js(`window.scrollTo(0, 0); document.getElementById('admin-password-panel').style.display = 'none'; toggleAdminPasswordPanel()`); await sleep(1200);
+        await js(`window.scrollTo(0, 0); selectTab('links'); if (document.getElementById('overlay-password').style.display !== 'flex') toggleAdminPasswordPanel()`); await sleep(1200);
         const open = await js(`({ ph: document.getElementById('input-admin-password').placeholder, status: document.getElementById('admin-password-status').textContent, desc: document.querySelector('[data-i18n="admin.desc"]').textContent })`);
         if (!/8/.test(open.ph) || /(^|[^0-9])4([^0-9]|$)/.test(open.ph + open.status + open.desc)) throw new Error(`policy text: ${JSON.stringify(open)}`);
         if (lang === 'ar' && !/8/.test(open.status)) throw new Error(`status text lacks the minimum: ${open.status}`);   // (the second language runs after a password was set: «custom password is set» has no number)
@@ -269,7 +269,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
 
       // Every icon is an inline SVG now (no emoji): the licence panel, every kind of status line, the subdomain checker, the buttons' busy labels — shot and measured, per language.
       await R.check(`U9 [${lang}] the licence panel and every status line draw SVG icons (no emoji anywhere on the page); icons have a size, point at a defined symbol, and the status ::before masks are painted`, async () => {
-        await js(`window.refreshStatus = async () => {}; window.scrollTo(0, 0); showLicensePanel()`); await sleep(400);
+        await js(`window.refreshStatus = async () => {}; window.scrollTo(0, 0); selectTab('license'); showLicensePanel()`); await sleep(400);
         await ev({ shot: `ui-${lang}-license-panel.png`, wait: 200 });
         // each kind of status line, as the real code sets them (class + plain text): four lines on one frame
         const kinds = await js(`(() => {
@@ -283,12 +283,12 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
           return out; })()`);
         for (const k of kinds) if (!/svg\+xml/.test(k.mask) || k.w !== '16px') throw new Error(`status "${k.cls}" has no painted icon: ${JSON.stringify(k)}`);
         // busy buttons exactly as the real code words them
-        await js(`(() => { const b = document.getElementById('btn-activate'); b.disabled = true; setWithIcon(b, 'loader', t('license.activating'), 20, 'spin'); })()`);
+        await js(`(() => { const b = document.getElementById('btn-activate'); b.disabled = true; setWithIcon(b, 'loader', t('license.activating'), 16, 'spin'); })()`);
         await js(`document.getElementById('feedback-license').scrollIntoView({ block: 'center' })`);
         await ev({ shot: `ui-${lang}-feedback-states.png`, wait: 250 });
-        await js(`(() => { document.querySelectorAll('[data-clone]').forEach((n) => n.remove()); const fb = document.getElementById('feedback-license'); fb.className = 'feedback'; fb.textContent = ''; const b = document.getElementById('btn-activate'); b.disabled = false; setWithIcon(b, 'zap', t('license.activateBtn'), 20, ''); })()`);
+        await js(`(() => { document.querySelectorAll('[data-clone]').forEach((n) => n.remove()); const fb = document.getElementById('feedback-license'); fb.className = 'feedback'; fb.textContent = ''; const b = document.getElementById('btn-activate'); b.disabled = false; b.textContent = t('license.activateBtn'); })()`);
         // the subdomain checker: a non-Latin name is refused with its own icon (no network involved)
-        await js(`document.getElementById('cloud-setup').style.display = 'block'; document.getElementById('cloud-active').style.display = 'none'; checkSubdomain('عربي')`); await sleep(300);
+        await js(`hideLicensePanel(); selectTab('links'); document.getElementById('cloud-content').style.display = 'flex'; document.getElementById('cloud-setup').style.display = 'flex'; document.getElementById('cloud-active').style.display = 'none'; checkSubdomain('عربي')`); await sleep(300);
         const dom = await js(`({ icon: (document.querySelector('#domain-status use') || { getAttribute: () => '' }).getAttribute('href'), text: document.getElementById('domain-status').textContent })`);
         if (dom.icon !== '#i-circle-x' || !dom.text) throw new Error(`subdomain status: ${JSON.stringify(dom)}`);
         await js(`document.getElementById('domain-status').scrollIntoView({ block: 'center' })`);
@@ -305,29 +305,30 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       });
 
       // The licence row: a licence without an end date (the free local plan) never expires — «دائمة» / "Never expires", not «ينتهي: -- (0 يوم)»; a trial shows its real end date and the days left.
-      await R.check(`U11 [${lang}] licence row: FREE says "never expires" (no date, no «0 days»); a trial shows the real end date and the days left`, async () => {
-        await js(`window.refreshStatus = async () => {}; window.scrollTo(0, 0); document.getElementById('panel-license').style.display = 'none'; document.getElementById('panel-control').style.display = 'block'`);
-        const probe = `(() => { const e = document.getElementById('badge-expires'); return { text: e.textContent, expiry: e.dataset.expiry || '', tier: document.getElementById('badge-tier').textContent, never: t('license.neverExpires'), prefix: t('license.expiresPrefix'), unit: t('common.daysUnit') }; })()`;
+      await R.check(`U11 [${lang}] licence card: FREE says "never expires" (no date, no «0 days», no bar); a trial shows the real end date, the days left and the bar`, async () => {
+        await js(`window.refreshStatus = async () => {}; window.scrollTo(0, 0); hideLicensePanel(); selectTab('license')`);
+        const probe = `(() => { const e = document.getElementById('badge-expires'), d = document.getElementById('badge-days'), m = document.getElementById('license-meter'); return { days: d.textContent, ends: e.textContent, meter: getComputedStyle(m).display, tier: document.getElementById('badge-tier').textContent, never: t('license.neverExpires') }; })()`;
         // FREE — the real licence of this run
         const real = await js(`({ tier: (currentState.licenseInfo || {}).tier, expires: (currentState.licenseInfo || {}).expires_at || null })`);
         if (real.tier !== 'free' || real.expires) throw new Error(`this run's licence is not a free one without an end date: ${JSON.stringify(real)}`);
-        await js(`updateControlPanel(currentState)`);
+        await js(`renderState(currentState)`);
         const free = await js(probe);
-        if (free.expiry !== 'never' || free.text !== free.never || !free.never || /\d/.test(free.text) || free.text.includes('--')) throw new Error(`FREE row: ${JSON.stringify(free)}`);
-        await js(`document.getElementById('license-badge').scrollIntoView({ block: 'center' })`);
+        if (free.days !== free.never || !free.never || /\d/.test(free.days) || free.meter !== 'none' || free.ends) throw new Error(`FREE card: ${JSON.stringify(free)}`);
         await ev({ shot: `ui-${lang}-license-row-free.png`, wait: 200 });
         // TRIAL — a licence with an end date 11.5 days away (→ 12 days left)
         const ends = Date.now() + Math.round(11.5 * 86400000);
-        await js(`updateControlPanel(Object.assign({}, currentState, { licenseInfo: { tier: 'trial', license_key: 'TRL-UI-SHOT', expires_at: new Date(${ends}).toISOString() } }))`);
+        await js(`renderState(Object.assign({}, currentState, { config: Object.assign({}, currentState.config, { isTrial: true, isFree: false }), licenseInfo: { tier: 'trial', license_key: 'TRL-UI-SHOT', expires_at: new Date(${ends}).toISOString() } }))`);
         const trial = await js(probe);
         const wantDate = await js(`new Intl.DateTimeFormat(({ ar: 'ar-EG', en: 'en-US', ru: 'ru-RU', uk: 'uk-UA' })[document.documentElement.lang] || 'en-US', { calendar: 'gregory', numberingSystem: 'latn', day: 'numeric', month: 'long', year: 'numeric' }).format(new Date(${ends}))`);
-        if (trial.expiry !== 'date' || trial.text !== `${trial.prefix} ${wantDate} (12 ${trial.unit})` || trial.text === trial.never) throw new Error(`TRIAL row: ${JSON.stringify(trial)} — wanted «${trial.prefix} ${wantDate} (12 ${trial.unit})»`);
+        const wantDays = await js(`fillText(t('ui.license.daysLeftOf'), { n: 12, d: daysWord(12), total: 30 })`);
+        const wantEnds = await js(`t('ui.license.ends') + ' ' + ${JSON.stringify(wantDate)}`);
+        if (trial.days !== wantDays || trial.ends !== wantEnds || trial.meter === 'none') throw new Error(`TRIAL card: ${JSON.stringify(trial)} — wanted «${wantDays}» / «${wantEnds}»`);
         await ev({ shot: `ui-${lang}-license-row-trial.png`, wait: 200 });
-        await js(`updateControlPanel(currentState); delete window.refreshStatus`);
-        return `FREE: "${free.text}" ; TRIAL (tier ${trial.tier}): "${trial.text}"`;
+        await js(`renderState(currentState); delete window.refreshStatus`);
+        return `FREE: "${free.days}" ; TRIAL (${trial.tier}): "${trial.days}" · "${trial.ends}"`;
       });
       await R.check(`U12 [${lang}] the update widget shows every state of the resumable download with the right text, icon and controls — and does not overflow`, async () => {
-        await js(`window.scrollTo(0, 0); document.getElementById('panel-license').style.display = 'none'; document.getElementById('panel-control').style.display = 'block'`);
+        await js(`window.scrollTo(0, 0)`);
         const tr = await js(`({ pause: t('update.pause'), resume: t('update.resume'), retry: t('update.retryNow'), offline: t('update.offline'), pausedNote: t('update.pausedNote') })`);
         const seen = [];
         for (const st of UPD_STATES) {
@@ -353,7 +354,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
     await R.check('U12 [ru, uk] the longest update states do not overflow the widget (shots taken)', async () => {
       const out = [];
       for (const lang of ['ru', 'uk']) {
-        await js(`(() => { const s = document.getElementById('lang-select'); s.value = '${lang}'; onLangChange(); window.scrollTo(0, 0); document.getElementById('panel-license').style.display = 'none'; document.getElementById('panel-control').style.display = 'block'; })()`);
+        await js(`(() => { const s = document.getElementById('lang-select'); s.value = '${lang}'; onLangChange(); window.scrollTo(0, 0); })()`);
         await sleep(400);
         for (const st of UPD_STATES.filter((x) => ['waiting-retry', 'paused', 'no-space', 'failed-verify'].includes(x.name))) {
           await emitUpd(st.snap()); await sleep(250);

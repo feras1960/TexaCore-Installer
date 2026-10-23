@@ -245,9 +245,9 @@ async function main() {
       if (u.secretLength < 32) throw new Error('the window did not receive the admin secret over IPC');
       if (!u.companies.success || u.companies.n < 1) throw new Error(`list-local-companies over IPC: ${JSON.stringify(u.companies)}`);
       const e = u.employeesBox;
-      if (e.display !== 'block' || !/^http:\/\/.+\/login\?c=[0-9a-f]{8}$/.test(e.link) || e.companies < 1 || e.roles < 1) throw new Error(`employees box not drawn from live data: ${JSON.stringify(e)}`);
+      if (e.display !== 'flex' || !/^http:\/\/.+\/login\?c=[0-9a-f]{8}$/.test(e.link) || e.companies < 1 || e.hero !== 'ready' || e.tabs !== 3) throw new Error(`the links are not drawn from live data: ${JSON.stringify(e)}`);
       if (!u.i18n || u.i18n.length < 2) throw new Error('i18n not applied');
-      return `window v${u.version}: ${u.bridgeKeys} bridge functions, state/secret/companies over IPC, employees box drawn (${e.link}; ${e.companies} company, ${e.roles} roles), i18n applied`;
+      return `window v${u.version}: ${u.bridgeKeys} bridge functions, state/secret/companies over IPC, links drawn (${e.link}; ${e.companies} company; hero ${e.hero}; ${e.tabs} tabs), i18n applied`;
     });
     await R.check('3.2 tenants.owner_email + user_profiles.is_tenant_admin set; base currency from the user\'s choice (UAH, not SAR)', async () => {
       const r = (await pg(`SELECT t.owner_email, up.is_tenant_admin, up.role, c.default_currency, cas.base_currency, cas.supported_currencies::text sc
@@ -732,6 +732,55 @@ async function main() {
       if (limited.status !== 402 || limited.json.code !== 'PLAN_LIMIT_EXCEEDED' || !/users \(2\/2\)/.test(limited.json.error)) throw new Error(`user limit → ${limited.status} ${limited.text.slice(0, 200)}`);
       if (JSON.stringify(await counts()) !== JSON.stringify(before)) throw new Error('the refused (limit) invite left rows behind');
       return `${emp.email} added as ${role.code} (profile in the tenant, not an admin, tenant_users+role+accepted request), one-time password not in any log; from ${lanIp || 'LAN-style Host'}: logs in, sees 1 company (own) and nothing of tenant B, admin API 403, signup refused; duplicate → 409 EMAIL_EXISTS; paid-plan max_users 2/2 → 402 PLAN_LIMIT_EXCEEDED, nothing created`;
+    });
+
+    // 2.0.5 RC2: the program's own «إضافة مستخدم» on a local install: POST /local-api/invite-user on the UI server (same origin: localhost, the LAN address, the tunnel), authorised as the
+    // SIGNED-IN caller through his GoTrue session (never the admin secret), every guard the cloud's invite uses checked on the server.
+    await R.check('4.12b in-app add-user route (/local-api/invite-user): no / bad session, cross-site and a foreign Origin are refused; the free plan limit refuses; otherwise the account is created with a one-time password that logs in from the LAN and sees only its company', async () => {
+      const base = lanIp ? `http://${lanIp}:${PORTS.ui}` : UI;
+      const lanHdr = lanIp ? {} : { Host: `192.168.77.20:${PORTS.ui}` };
+      const login = await request('POST', `${base}/_supabase/auth/v1/token?grant_type=password`, { headers: { ...lanHdr, apikey: secrets.anonKey }, body: { email: 'owner@e2e.test', password: 'E2ePass#2026' } });
+      if (login.status !== 200 || !login.json.access_token) throw new Error(`owner login from the LAN address → ${login.status} ${login.text.slice(0, 160)}`);
+      const jwt = login.json.access_token;
+      const roles = await request('GET', `${UI}/api/employee-roles?companyId=${A.companyId}`, { headers: H });
+      const role = (roles.json.roles || []).find((r) => !/owner|admin/i.test(r.code)) || (roles.json.roles || [])[0];
+      if (!role) throw new Error('no grantable role to test with');
+      const counts = async () => (await pg('SELECT (SELECT count(*) FROM auth.users)::int u, (SELECT count(*) FROM public.user_profiles)::int p, (SELECT count(*) FROM public.company_membership_requests)::int req')).rows[0];
+      const call = (extra = {}, body, token = jwt) => request('POST', `${base}/local-api/invite-user`, { headers: { ...lanHdr, 'Content-Type': 'application/json', ...(token ? { Authorization: `Bearer ${token}` } : {}), ...extra }, body: body || { email: 'staff3@e2e.test', full_name: 'Staff Three', items: [{ company_id: A.companyId, role_ids: [role.id] }] } });
+      const before = await counts();
+      const noAuth = await call({}, undefined, null);
+      if (noAuth.status !== 401 || noAuth.json.code !== 'AUTH_REQUIRED') throw new Error(`no session → ${noAuth.status} ${noAuth.text.slice(0, 160)}`);
+      const badJwt = await call({}, undefined, 'not-a-jwt');
+      if (badJwt.status !== 401) throw new Error(`bad session → ${badJwt.status} ${badJwt.text.slice(0, 160)}`);
+      const cross = await call({ 'Sec-Fetch-Site': 'cross-site' });
+      if (cross.status !== 403 || cross.json.code !== 'CROSS_ORIGIN') throw new Error(`cross-site → ${cross.status} ${cross.text.slice(0, 160)}`);
+      const foreign = await call({ Origin: 'https://evil.example' });
+      if (foreign.status !== 403) throw new Error(`foreign Origin → ${foreign.status} ${foreign.text.slice(0, 160)}`);
+      const noJson = await request('POST', `${base}/local-api/invite-user`, { headers: { ...lanHdr, 'Content-Type': 'text/plain', Authorization: `Bearer ${jwt}` }, body: 'x' });
+      if (noJson.status !== 400 && noJson.status !== 415) throw new Error(`non-JSON → ${noJson.status}`);
+      if (JSON.stringify(await counts()) !== JSON.stringify(before)) throw new Error('a refused call left rows behind');
+      const leak = [noAuth, badJwt, cross, foreign].map((r) => r.text).join(' ');
+      if (secrets.localApiSecret && leak.includes(secrets.localApiSecret)) throw new Error('a response carries the admin secret');
+      if (LICENSE === 'free') {
+        const r = await call();
+        if (r.status !== 403 || r.json.code !== 'PLAN_LIMIT_EXCEEDED') throw new Error(`free plan → ${r.status} ${r.text.slice(0, 200)}`);
+        if (JSON.stringify(await counts()) !== JSON.stringify(before)) throw new Error('the refused (limit) call left rows behind');
+        return `no/bad session 401, cross-site + foreign Origin 403, non-JSON refused, free plan → ${r.json.code} (${r.json.current}/${r.json.max}); nothing created`;
+      }
+      const ok = await call();
+      if (ok.status !== 200 || !ok.json.success || !ok.json.data.one_time_password) throw new Error(`invite → ${ok.status} ${ok.text.slice(0, 260)}`);
+      const d = ok.json.data;
+      if (d.is_new !== true || d.accepted < 1 || !/^[A-Za-z0-9]{4}-[A-Za-z0-9]{4}-[A-Za-z0-9]{4}$/.test(d.one_time_password)) throw new Error(`reply ${JSON.stringify({ ...d, one_time_password: '***' })}`);
+      for (const f of [logFile, path.join(userData, 'logs', 'heartbeat.log')]) if (fs.existsSync(f) && fs.readFileSync(f, 'utf8').includes(d.one_time_password)) throw new Error(`the one-time password is in ${path.basename(f)}`);
+      const login2 = await request('POST', `${base}/_supabase/auth/v1/token?grant_type=password`, { headers: { ...lanHdr, apikey: secrets.anonKey }, body: { email: 'staff3@e2e.test', password: d.one_time_password } });
+      if (login2.status !== 200 || !login2.json.access_token) throw new Error(`the new account cannot sign in → ${login2.status}`);
+      const eh = { ...lanHdr, apikey: secrets.anonKey, Authorization: `Bearer ${login2.json.access_token}` };
+      const cos = await request('GET', `${base}/_supabase/rest/v1/companies?select=id`, { headers: eh });
+      if (cos.status !== 200 || cos.json.length !== 1 || cos.json[0].id !== A.companyId) throw new Error(`the new account sees ${cos.text.slice(0, 160)}`);
+      // the employee cannot use the route to add others (not a manager of the company)
+      const asEmp = await call({}, { email: 'staff4@e2e.test', full_name: 'Staff Four', items: [{ company_id: A.companyId, role_ids: [role.id] }] }, login2.json.access_token);
+      if (asEmp.status < 400 || asEmp.json.success) throw new Error(`an employee could add a user: ${asEmp.status} ${asEmp.text.slice(0, 160)}`);
+      return `no/bad session 401, cross-site + foreign Origin 403; ${role.code} account created for ${d.companies && d.companies[0] ? d.companies[0].company_name : 'the company'} with a one-time password (not in any log), accepted ${d.accepted}, signs in from ${lanIp || 'a LAN-style Host'} and sees only its company; as an employee the route refuses (${asEmp.status} ${asEmp.json.code})`;
     });
 
     // ── 5. the web UI ──

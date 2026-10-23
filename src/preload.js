@@ -66,6 +66,14 @@ contextBridge.exposeInMainWorld('texacore', {
   openUpgradeFolder: () => ipcRenderer.invoke('upgrade-notice-open-folder'),
   openUpgradeTcdb: (filePath, opts) => ipcRenderer.invoke('upgrade-notice-open-tcdb', filePath, opts),   // 2.0.5: opts = { confirmReplaceAll:true } after the window asked
 
+  // 2.0.5 RC2 launcher
+  setLanAddress: (address) => ipcRenderer.invoke('set-lan-address', address),            // '' = automatic
+  listBackups: (limit) => ipcRenderer.invoke('list-backups', limit),
+  createBackup: () => ipcRenderer.invoke('create-backup'),
+  pickCompanyFile: () => ipcRenderer.invoke('launcher-pick-company-file'),               // the OS window; the main process remembers the file
+  openPickedCompanyFile: (opts) => ipcRenderer.invoke('launcher-open-picked-file', opts), // opts = { confirmReplaceAll:true } only after the window asked
+  openRunLog: () => ipcRenderer.invoke('open-run-log'),
+
   // Browser
   openBrowser: (port) => ipcRenderer.invoke('open-browser', port),
 
@@ -74,6 +82,7 @@ contextBridge.exposeInMainWorld('texacore', {
   backupStatus: () => ipcRenderer.invoke('backup-status'),
   backupNow: () => ipcRenderer.invoke('backup-now'),
   revealBackup: (filePath) => ipcRenderer.invoke('reveal-backup', filePath),
+  moveLiveFile: (opts) => ipcRenderer.invoke('move-live-file', opts),   // 2.0.5 RC2 «تغيير المكان»: opts = { dir? } (no dir = the native folder window) → { success, from, to, kept, bytes } | { success:false, code, error }
   onBackupProgress: (cb) => ipcRenderer.on('backup-progress', (_, d) => cb(d)),
 
   // RSF Import/Export (Al-Rasheed)
@@ -82,7 +91,6 @@ contextBridge.exposeInMainWorld('texacore', {
   importRSF: (filePath) => ipcRenderer.invoke('import-rsf', filePath),
   exportRSF: (rsfPath) => ipcRenderer.invoke('export-rsf', rsfPath),
   onRsfProgress: (cb) => ipcRenderer.on('rsf-progress', (_, d) => cb(d)),
-  moveLiveFile: (opts) => ipcRenderer.invoke('move-live-file', opts),   // 2.0.5 RC2 «تغيير المكان»: opts = { dir? } (no dir = the native folder window) → { success, from, to, kept, bytes } | { success:false, code, error }
 
   // Window
   minimize: () => ipcRenderer.invoke('window-minimize'),

@@ -37,16 +37,33 @@ test('the warning is the owner\'s sentence, word for word', () => {
   assert.equal(I18N.ar['replace.cancel'], 'إلغاء');
 });
 
-test('the main screen has the read-only live-file line with a «show in the folder» button, no input, and it comes with the system controls', () => {
-  const a = html.indexOf('id="live-file-row"');
+test('the Files tab has the read-only live-file path with a «show» button, no input, a sync chip, «sync now» and «change location»', () => {
+  const a = html.indexOf('id="tab-files"');
   assert.ok(a > 0);
-  const row = html.slice(a, html.indexOf('<div class="control-actions">', a));
-  assert.match(row, /id="live-file-path"/);
-  assert.match(row, /id="btn-live-file-show"/);
+  const pane = html.slice(a, html.indexOf('id="tab-license"', a));
+  assert.match(pane, /id="live-file-path"/);
+  assert.match(pane, /id="btn-live-file-show"/);
+  assert.match(pane, /id="sync-chip"/);
+  assert.match(pane, /id="btn-bk-now"/);
+  assert.match(pane, /id="btn-move-file"[^>]*onclick="moveLiveFile\(\)"/);
+  const row = pane.slice(pane.indexOf('id="live-file-row"'), pane.indexOf('id="live-file-note"'));
   assert.doesNotMatch(row, /<input|contenteditable/, 'it is read-only');
-  assert.match(css, /\.live-file-path \{[^}]*user-select: all/, 'the path can be selected and copied');
+  assert.match(css, /\.url \{[^}]*user-select: all/, 'the path can be selected and copied');
   const ids = [...html.matchAll(/\sid="([^"]+)"/g)].map((m) => m[1]);
   for (const id of ['live-file-row', 'live-file-label', 'live-file-path', 'live-file-note', 'btn-live-file-show', 'live-file-show-label', 'replace-confirm', 'btn-replace-cancel', 'btn-replace-yes']) assert.equal(ids.filter((x) => x === id).length, 1, id);
+});
+
+test('the red zone «open a company file from another computer» is separate, picks through the main process and goes through the replace-all gate', () => {
+  const zone = html.slice(html.indexOf('id="open-file-zone"'), html.indexOf('</section>', html.indexOf('id="open-file-zone"')));
+  assert.match(zone, /id="btn-open-file"[^>]*onclick="pickAndOpenCompanyFile\(\)"/);
+  assert.match(css, /\.redzone \{[^}]*border: 1px solid #5b2121/);
+  const fn = renderer.slice(renderer.indexOf('async function pickAndOpenCompanyFile()'), renderer.indexOf('// ─── OTA Update Widget'));
+  assert.match(fn, /window\.texacore\.pickCompanyFile\(\)/);
+  assert.match(fn, /openPickedCompanyFile\(confirmed \? \{ confirmReplaceAll: true \} : undefined\)/);
+  assert.match(fn, /r\.code === 'REPLACE_ALL_CONFIRM_REQUIRED'/);
+  assert.match(fn, /if \(await askReplaceAll\(r\)\)/);
+  // the window never names a path to open: only the file the main process remembers
+  assert.doesNotMatch(fn, /openPickedCompanyFile\(\s*p\b/);
 });
 
 function viewFns() {
@@ -112,6 +129,7 @@ test('replaceConfirmView: the warning, the companies (at most 12 listed), the co
 
 test('the confirmation: Cancel is focused first and Escape cancels; only the explicit «yes» button resolves true; text goes in through textContent', () => {
   const ask = renderer.slice(renderer.indexOf('function askReplaceAll('), renderer.indexOf('// After an upgrade over a 1.x install'));
+  assert.match(html, /id="overlay-replace"/, 'the question is a dialog above the page');
   assert.match(ask, /no\.focus\(\)/);
   assert.match(ask, /e\.key === 'Escape'[^}]*done\(false\)/);
   assert.match(ask, /yes\.onclick = \(\) => done\(true\)/);

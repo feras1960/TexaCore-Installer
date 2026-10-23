@@ -142,7 +142,7 @@ const hbLog = (userData) => { try { return fs.readFileSync(path.join(userData, '
     const out = {};
     for (const lang of ['ar', 'en']) {
       out[lang] = await evalUi({ size: [900, 700], wait: 250, shot: `resume-${name}-${lang}.png`,
-        js: `(() => { const s = document.getElementById('lang-select'); s.value = '${lang}'; onLangChange(); window.scrollTo(0, 0); document.getElementById('panel-license').style.display = 'none'; document.getElementById('panel-control').style.display = 'block'; document.getElementById('update-widget').scrollIntoView({ block: 'center' }); return (${WIDGET}); })()` });
+        js: `(() => { const s = document.getElementById('lang-select'); s.value = '${lang}'; onLangChange(); window.scrollTo(0, 0); document.getElementById('update-widget').scrollIntoView({ block: 'center' }); return (${WIDGET}); })()` });
     }
     await evalUi({ js: `(() => { const s = document.getElementById('lang-select'); s.value = 'en'; onLangChange(); })()` });
     return out;

@@ -279,10 +279,13 @@ function windowIconPath() {
 function createWindow() {
   const isMac = process.platform === 'darwin';
   mainWindow = new BrowserWindow({
-    width: 900,
-    height: 720,
-    minWidth: 800,
-    minHeight: 650,
+    // 2.0.5 RC2: the launcher is a no-scroll control panel designed for a 960 x 720 page; the content size is what is fixed (macOS adds a 28 px drag strip
+    // for the traffic lights, Windows / Linux have their native title bar outside the content)
+    useContentSize: true,
+    width: 960,
+    height: isMac ? 748 : 720,
+    minWidth: 900,
+    minHeight: isMac ? 708 : 680,
     resizable: true,
     // macOS: frameless + native traffic lights (positioned below).
     // Windows/Linux: native frame so minimize/maximize/close controls exist —
@@ -1189,9 +1192,107 @@ ipcMain.handle('get-version', () => {
   };
 });
 
+// ─── 2.0.5 RC2 launcher: network address choice, recent backups, a backup now, opening a company file from another computer, the run log ───────────────────
+// «تغيير» beside the network address: the owner picks which of THIS computer's addresses the office link carries (or goes back to the automatic pick).
+ipcMain.handle('set-lan-address', async (_, address) => {
+  try {
+    const cfg = loadConfig();
+    const a = typeof address === 'string' ? address.trim() : '';
+    if (!a) delete cfg.lanAddress;                               // back to the automatic pick
+    else {
+      const known = require('./lan-address').listLanCandidates(require('os').networkInterfaces()).some((c) => c.address === a);
+      if (!known) return { success: false, error: 'not an address of this computer' };
+      cfg.lanAddress = a;
+    }
+    saveConfig(cfg);
+    return { success: true, lan: lanAddressProvider.info() };
+  } catch (e) { return { success: false, error: e.message }; }
+});
+
+// The newest backups this program keeps: the daily snapshots next to the live file, the copies taken before a company file replaced the companies, and the ones the owner took
+// with «نسخة الآن». Metadata only (a path is data); the window never receives file contents.
+function listRecentBackups(limit = 3) {
+  const out = [];
+  const live = liveCompanyFile();
+  const liveBase = live ? path.basename(live).replace(/\.tcdb$/i, '') : '';
+  const add = (dir, re, kind, prefix) => {
+    let names = [];
+    try { names = fs.readdirSync(dir); } catch { return; }
+    for (const n of names) {
+      if (!re.test(n) || (prefix && !n.startsWith(prefix))) continue;
+      const p = path.join(dir, n);
+      try { const st = fs.statSync(p); if (st.isFile()) out.push({ path: p, name: n, kind, mtimeMs: st.mtimeMs, size: st.size }); } catch { /* vanished */ }
+    }
+  };
+  const snapDirs = new Set([path.join(DATA_DIR, 'backups', 'snapshots')]);
+  if (backupManager && backupManager.snapshotDir) snapDirs.add(backupManager.snapshotDir);
+  if (live) snapDirs.add(path.join(path.dirname(live), 'snapshots'));
+  for (const d of snapDirs) add(d, /\.\d{4}-\d{2}-\d{2}\.tcdb$/, 'daily', liveBase ? liveBase + '.' : '');
+  add(path.join(DATA_DIR, 'backups', 'pre-open'), /^before-open-.*\.tcdb$/, 'pre-open');
+  add(path.join(DATA_DIR, 'backups', 'manual'), /^manual-.*\.tcdb$/, 'manual');
+  out.sort((a, b) => b.mtimeMs - a.mtimeMs);
+  return { total: out.length, items: out.slice(0, limit) };
+}
+ipcMain.handle('list-backups', async (_, limit) => {
+  try { return { success: true, ...listRecentBackups(Math.max(1, Math.min(10, Number(limit) || 3))) }; }
+  catch (e) { return { success: false, items: [], total: 0, error: e.message }; }
+});
+
+// «نسخة الآن»: one complete .tcdb of every company into <app data>/backups/manual (the newest 10 are kept). The live file and its sync are not touched.
+ipcMain.handle('create-backup', async () => {
+  try {
+    if (!svcManager || !svcManager.isRunning()) return { success: false, code: 'SERVICES_DOWN', error: 'الخدمات غير شغّالة — شغّل النظام أولاً' };
+    const dir = path.join(DATA_DIR, 'backups', 'manual');
+    fs.mkdirSync(dir, { recursive: true });
+    const target = path.join(dir, `manual-${livePolicy.localStamp(new Date())}.tcdb`);
+    const r = await newBackupManager().exportTo(target);
+    try {   // keep the newest 10 manual copies; only files named manual-*.tcdb are ever touched
+      const names = fs.readdirSync(dir).filter((n) => /^manual-.*\.tcdb$/.test(n)).sort();
+      while (names.length > 10) fs.unlinkSync(path.join(dir, names.shift()));
+    } catch { /* pruning is best effort */ }
+    fileLog('[Backup] a manual backup was written:', r.path, r.size);
+    return { success: true, path: r.path, size: r.size };
+  } catch (e) { return { success: false, code: e.code || null, error: e.message }; }
+});
+
+// «فتح ملف…» (red zone): the launcher picks a company file in the OS window, the MAIN process remembers which file it was, and opening it later never takes a
+// path from the window. Opening replaces every company: the first call without `confirmReplaceAll` answers REPLACE_ALL_CONFIRM_REQUIRED (+ the list) when the
+// database holds companies; the window asks, and only an explicit yes calls again - the pre-open backup is taken inside restoreTcdbFromPath.
+let launcherPick = null;
+ipcMain.handle('launcher-pick-company-file', async () => {
+  try {
+    const result = await showNativeDialog('open', { title: 'فتح ملف شركة — TexaCore', filters: [{ name: 'TexaCore Database', extensions: ['tcdb'] }], properties: ['openFile'] });
+    if (result.canceled || !result.filePaths || !result.filePaths.length) return { success: false, canceled: true };
+    const p = result.filePaths[0];
+    if (!/\.tcdb$/i.test(p)) return { success: false, code: 'UNSUPPORTED', error: 'Unsupported file type' };
+    launcherPick = { path: p };
+    return { success: true, name: path.basename(p), dir: path.dirname(p) };
+  } catch (e) { return { success: false, error: e.message, code: e.code || null }; }
+});
+ipcMain.handle('launcher-open-picked-file', async (_, opts) => {
+  if (!launcherPick) return { success: false, code: 'NO_PICK', error: 'no file was picked' };
+  try {
+    const out = await restoreTcdbFromPath(launcherPick.path, { confirmReplaceAll: livePolicy.isConfirmed(opts && opts.confirmReplaceAll) });
+    if (out && out.success) launcherPick = null;
+    return out;
+  } catch (e) {
+    fileLog('[OpenTCDB] ❌ (launcher)', e.message);
+    return { success: false, error: e.message, code: e.code || null, ...(e && e.replaceAll ? e.replaceAll : {}) };
+  }
+});
+
+// «فتح سجل التشغيل»
+ipcMain.handle('open-run-log', async () => {
+  if (HARNESS_OK && process.env.TEXACORE_STUB_SHELL === '1') { fileLog('[Shell] would open the log:', LOG_FILE); return { success: true, stubbed: true, path: LOG_FILE }; }
+  const err = await shell.openPath(LOG_FILE);
+  return err ? { success: false, error: err } : { success: true, path: LOG_FILE };
+});
+
 // The address office PCs type to reach this computer. Picked by src/lan-address.js: the interface carrying the default route if it is a real
 // adapter, else en* / eth* / Wi-Fi / Ethernet, else a private-range address - never a VPN tunnel (utun*, tun*, ...) or a link-local address.
-const lanAddressProvider = require('./lan-address').createLanAddressProvider({ networkInterfaces: () => require('os').networkInterfaces(), platform: process.platform });
+// 2.0.5 RC2: config.lanAddress is the owner's choice from the launcher's «network address» picker (used only while that address still exists on this machine)
+const lanAddressProvider = require('./lan-address').createLanAddressProvider({ networkInterfaces: () => require('os').networkInterfaces(), platform: process.platform,
+  getOverride: () => { try { const a = loadConfig().lanAddress; return typeof a === 'string' && a ? a : null; } catch { return null; } } });
 function getLocalIpAddress() {
   return lanAddressProvider.get();
 }
@@ -1222,6 +1323,8 @@ ipcMain.handle('get-state', async () => {
     licenseInfo,
     port: config.port || APP_PORT,
     localIp: getLocalIpAddress(),
+    lan: lanAddressProvider.info(),                  // 2.0.5 RC2: { address, iface, auto, candidates[] } for the «network address» picker
+    liveFile: liveCompanyFile(),
     osLocale: app.getLocale(),
     tunnel: svcManager ? svcManager.getTunnelStatus() : null,   // the real connector state (never inferred from "services running")
   };
@@ -1689,6 +1792,69 @@ ipcMain.handle('backup-status', async () => {
   return { ...base, liveFile: liveCompanyFile(), plannedCompanies: planned };
 });
 
+// ─── 2.0.5 RC2: «تغيير المكان» - move the live company file to another folder ─────────────────────────────────────────────────────────────
+// The safe sequence (permission → space → pause the sync → copy → verify bytes + container → switch → resume; the old file is KEPT) is
+// live-file-move.js; this is only its wiring to the backup manager, the config, the native folder window and the macOS folder permission.
+const liveFileMover = liveFileMove.createLiveFileMover({
+  liveFile: () => liveCompanyFile(),
+  // the native folder chooser (the E2E_DIALOG 'open' stub answers it in harness runs, like every other native dialog)
+  pickFolder: async ({ defaultPath }) => {
+    let start = null;
+    try {
+      if (defaultPath && path.isAbsolute(defaultPath)) { const v = await folderAccess.ensureUsable(defaultPath, { waitMs: 1500 }); if (v.state === 'allowed') start = defaultPath; }
+    } catch { start = null; }
+    const r = await showNativeDialog('open', {
+      title: 'مكان ملف الشركة الجديد — TexaCore',
+      ...(start ? { defaultPath: start } : {}),
+      buttonLabel: 'نقل الملف إلى هنا',
+      properties: ['openDirectory', 'createDirectory'],
+    });
+    if (r.canceled || !r.filePaths || !r.filePaths[0]) return { canceled: true };
+    return { dir: r.filePaths[0] };
+  },
+  requireFolderAccess: (dir) => requireFolderAccess(dir),
+  // pause the one-minute sync: no run may be in the middle of replacing the file while it is copied; the newest data is flushed into the OLD file first
+  quiesce: async () => {
+    const bm = backupManager;
+    if (!bm) return { ok: true, resume: () => {} };
+    if (bm._restoring) return { ok: false };
+    const wasSyncing = !!bm._timer;
+    try { bm.stopSync(); } catch { /* not running */ }
+    const idle = await bm.waitIdle();
+    if (!idle || bm._restoring) { if (wasSyncing) bm.startSync(); return { ok: false }; }
+    if (svcManager && svcManager.isRunning() && bm.backupPath) { try { await bm.backup(); } catch (e) { fileLog('[Move] the last flush into the old file failed:', e && e.message); } }
+    bm.holdWrites = true;
+    return { ok: true, resume: () => { bm.holdWrites = false; if (wasSyncing) bm.startSync(); } };
+  },
+  probe: (buf) => (backupManager || newBackupManager()).probeAccess(buf),
+  // SWITCH: config first (a failed save changes nothing), then the running manager; a restore that re-pointed the manager meanwhile aborts the switch
+  commit: ({ from, to, dir }) => {
+    const bm = backupManager;
+    if (bm && bm.backupPath && !sameFile(bm.backupPath, from)) throw new Error('the live company file changed while it was being moved');
+    const cfg = loadConfig();
+    cfg.companies = livePolicy.moveLiveEntry(cfg.companies, from, to);
+    cfg.storagePath = dir;
+    if (cfg.currentDbPath && sameFile(cfg.currentDbPath, from)) cfg.currentDbPath = to;
+    saveConfig(cfg);
+    if (bm && bm.backupPath) {
+      bm.backupPath = to;
+      bm.snapshotDir = companyFile.isCompanyFolder(dir) ? null : path.join(DATA_DIR, 'backups', 'snapshots');
+    }
+  },
+  log: (...a) => fileLog(...a),
+});
+/** opts = { dir?: string } - without `dir` the native folder chooser opens. Never throws: { success:true, from, to, kept:true, bytes } or { success:false, code, error }. */
+async function moveLiveFile(opts) {
+  try {
+    const r = await liveFileMover.move({ dir: opts && typeof opts.dir === 'string' ? opts.dir : undefined });
+    return r && r.success ? { ...r, cloudFolder: companyFile.detectCloudFolder(path.dirname(r.to)) || undefined } : r;
+  } catch (e) {
+    fileLog('[Move] failed:', e && e.message);
+    return { success: false, code: (e && e.code) || 'MOVE_FAILED', error: String((e && e.message) || e).slice(0, 300) };
+  }
+}
+ipcMain.handle('move-live-file', async (_, opts) => moveLiveFile(opts));
+
 ipcMain.handle('backup-restore', async (_, filePath, opts) => {
   if (!backupManager) return { success: false, error: 'Backup not initialized' };
   try {
@@ -1792,69 +1958,6 @@ function initBackupOnStartup() {
       dbHost: 'localhost',
       dbPort: ServiceManager.PG_PORT,
       dbName: 'postgres',
-// ─── 2.0.5 RC2: «تغيير المكان» - move the live company file to another folder ─────────────────────────────────────────────────────────────
-// The safe sequence (permission → space → pause the sync → copy → verify bytes + container → switch → resume; the old file is KEPT) is
-// live-file-move.js; this is only its wiring to the backup manager, the config, the native folder window and the macOS folder permission.
-const liveFileMover = liveFileMove.createLiveFileMover({
-  liveFile: () => liveCompanyFile(),
-  // the native folder chooser (the E2E_DIALOG 'open' stub answers it in harness runs, like every other native dialog)
-  pickFolder: async ({ defaultPath }) => {
-    let start = null;
-    try {
-      if (defaultPath && path.isAbsolute(defaultPath)) { const v = await folderAccess.ensureUsable(defaultPath, { waitMs: 1500 }); if (v.state === 'allowed') start = defaultPath; }
-    } catch { start = null; }
-    const r = await showNativeDialog('open', {
-      title: 'مكان ملف الشركة الجديد — TexaCore',
-      ...(start ? { defaultPath: start } : {}),
-      buttonLabel: 'نقل الملف إلى هنا',
-      properties: ['openDirectory', 'createDirectory'],
-    });
-    if (r.canceled || !r.filePaths || !r.filePaths[0]) return { canceled: true };
-    return { dir: r.filePaths[0] };
-  },
-  requireFolderAccess: (dir) => requireFolderAccess(dir),
-  // pause the one-minute sync: no run may be in the middle of replacing the file while it is copied; the newest data is flushed into the OLD file first
-  quiesce: async () => {
-    const bm = backupManager;
-    if (!bm) return { ok: true, resume: () => {} };
-    if (bm._restoring) return { ok: false };
-    const wasSyncing = !!bm._timer;
-    try { bm.stopSync(); } catch { /* not running */ }
-    const idle = await bm.waitIdle();
-    if (!idle || bm._restoring) { if (wasSyncing) bm.startSync(); return { ok: false }; }
-    if (svcManager && svcManager.isRunning() && bm.backupPath) { try { await bm.backup(); } catch (e) { fileLog('[Move] the last flush into the old file failed:', e && e.message); } }
-    bm.holdWrites = true;
-    return { ok: true, resume: () => { bm.holdWrites = false; if (wasSyncing) bm.startSync(); } };
-  },
-  probe: (buf) => (backupManager || newBackupManager()).probeAccess(buf),
-  // SWITCH: config first (a failed save changes nothing), then the running manager; a restore that re-pointed the manager meanwhile aborts the switch
-  commit: ({ from, to, dir }) => {
-    const bm = backupManager;
-    if (bm && bm.backupPath && !sameFile(bm.backupPath, from)) throw new Error('the live company file changed while it was being moved');
-    const cfg = loadConfig();
-    cfg.companies = livePolicy.moveLiveEntry(cfg.companies, from, to);
-    cfg.storagePath = dir;
-    if (cfg.currentDbPath && sameFile(cfg.currentDbPath, from)) cfg.currentDbPath = to;
-    saveConfig(cfg);
-    if (bm && bm.backupPath) {
-      bm.backupPath = to;
-      bm.snapshotDir = companyFile.isCompanyFolder(dir) ? null : path.join(DATA_DIR, 'backups', 'snapshots');
-    }
-  },
-  log: (...a) => fileLog(...a),
-});
-/** opts = { dir?: string } - without `dir` the native folder chooser opens. Never throws: { success:true, from, to, kept:true, bytes } or { success:false, code, error }. */
-async function moveLiveFile(opts) {
-  try {
-    const r = await liveFileMover.move({ dir: opts && typeof opts.dir === 'string' ? opts.dir : undefined });
-    return r && r.success ? { ...r, cloudFolder: companyFile.detectCloudFolder(path.dirname(r.to)) || undefined } : r;
-  } catch (e) {
-    fileLog('[Move] failed:', e && e.message);
-    return { success: false, code: (e && e.code) || 'MOVE_FAILED', error: String((e && e.message) || e).slice(0, 300) };
-  }
-}
-ipcMain.handle('move-live-file', async (_, opts) => moveLiveFile(opts));
-
       dbUser: 'postgres',
       dbPassword: svcManager.dbPassword,
       backupPath: tcdbPath,
@@ -2506,10 +2609,11 @@ async function uiSmoke() {
   out.state = await js('window.texacore.getState().then((s) => ({ ok: !!s, hasConfig: !!s.config, localIp: s.localIp || null }))');
   out.secretLength = await js('String(window.texacore.getLocalApiSecret() || "").length');
   out.companies = await js('window.texacore.listLocalCompanies().then((r) => ({ success: r.success, n: (r.companies || []).length }))');
-  await js('_empLast = 0; _empCompanies = []; refreshEmployeesBox(currentState)');
+  await js('_empLast = 0; _empListed = false; _empCompanies = []; refreshEmployeesBox(currentState)');
   await new Promise((r) => setTimeout(r, 1500));
-  out.employeesBox = await js("({ display: document.getElementById('employees-box').style.display, link: document.getElementById('lan-employee-url').textContent, companies: document.getElementById('emp-company').options.length, roles: document.getElementById('emp-role').options.length })");
-  out.i18n = await js("document.querySelector('[data-i18n=\"emp.add\"]').textContent");
+  // 2.0.5 RC2: the links come from the live company list (the hero's selector drives the office link); the employees form is gone from the launcher
+  out.employeesBox = await js("({ display: document.getElementById('lan-link-row').style.display, link: document.getElementById('lan-employee-url').textContent, companies: document.getElementById('link-company').options.length, hero: document.getElementById('hero').dataset.mode, tabs: document.querySelectorAll('[role=tab]').length })");
+  out.i18n = await js("document.querySelector('[data-i18n=\"ui.openProgram\"]').textContent");
   out.documentTitle = await js('document.title');
   return out;
 }
@@ -3472,7 +3576,7 @@ const httpServer = http.createServer(async (req, res) => {
           const hdr = part.subarray(0, he).toString();
           if (/name="folder"/.test(hdr) && !hdr.includes('filename=')) { folderChoice = part.subarray(he + 4, part.lastIndexOf('\r\n')).toString('utf8').slice(0, 16); break; }
         }
-        // Save to C:\TexaCore (Windows) or ~/Documents/TexaCore (Mac)
+        // Save to C:\TexaCore (Windows) or ~/TexaCore (Mac/Linux; 2.0.5 - it was ~/Documents/TexaCore). A NEW file only: files an install already has are not moved.
         const os = require('os');
         const isWin = process.platform === 'win32';
         // (isolated test runs — HARNESS_OK — may point this at a scratch folder so they never write into the real one)
@@ -4256,6 +4360,7 @@ app.whenReady().then(() => {
   try {
     svcManager = new ServiceManager(app.getPath('userData'));   // classifies the data dir first (a 1.x dir is moved aside)
     svcManager.setLogger(fileLog);                                // tunnel events (start / exit code / last lines, redacted) go to heartbeat.log too
+    svcManager.getProvisioningDeps = () => provisioningDeps();   // 2.0.5 RC2: the local invite route (/local-api/invite-user) gets the same deps as the IPC flows
     svcManager.setHardwareIdProvider(() => { if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR); return licenseGuard.getHardwareId(); });
   } catch (e) {
     if (e && e.code === 'SECRETS_UNAVAILABLE') {
@@ -4359,7 +4464,6 @@ app.whenReady().then(() => {
     try {
       const testResult = await new Promise((resolve, reject) => {
         const req = https.request({
-    svcManager.getProvisioningDeps = () => provisioningDeps();   // 2.0.5 RC2: the local invite route (/local-api/invite-user) gets the same deps as the IPC flows
           hostname: 'wzkklenfsaepegymfxfz.supabase.co',
           port: 443,
           path: '/functions/v1/license-heartbeat',

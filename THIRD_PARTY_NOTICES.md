@@ -2,8 +2,7 @@
 
 ## Lucide icons (launcher window)
 
-The launcher's icons (`src/icons.js`: the inline SVG shapes for database, key, factory, download, circle-check, circle-x, triangle-alert, info, check, x, loader,
-lock, zap, gift, arrow-left, shopping-cart, copy, play, square, globe, cloud, settings, users, chevron-down, sparkles, folder-open) are taken from
+The launcher's icons (`src/icons.js`: the inline SVG shapes for wifi, external-link, power, file, life-buoy, database, key, download, circle-check, circle-x, triangle-alert, info, x, loader, lock, copy, play, cloud, settings, folder-open, pause, rotate-cw, wifi-off, hard-drive, clock, shield-check) are taken from
 [Lucide](https://lucide.dev), licensed under the ISC License. Portions of Lucide derive from Feather (MIT).
 
 ```

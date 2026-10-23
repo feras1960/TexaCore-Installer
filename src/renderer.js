@@ -1,20 +1,84 @@
 // ════════════════════════════════════════════════════════════════
-// TexaCore Installer — Renderer (UI Logic)
-// v2: Native embedded services — no Docker dependency
+// TexaCore launcher — Renderer (UI logic), 2.0.5 RC2
+// A no-scroll control panel: header (status chips · language · stop) · hero (the company + ONE primary button) · three tabs
+// (links · files and backups · licence and support). Native embedded services — no Docker.
 // ════════════════════════════════════════════════════════════════
 
 let currentState = {};
 let statusInterval = null;
+const $ = (id) => document.getElementById(id);
 
-// ─── Language switch (titlebar <select>) ─────────────────────
+// ─── Small helpers ────────────────────────────────────────────
+let _toastTimer = null;
+function showToast(text, ms = 3200) {
+  const el = $('toast');
+  if (!el) return;
+  el.textContent = text;
+  el.style.display = 'block';
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => { el.style.display = 'none'; }, ms);
+}
+function fillText(template, vars) {
+  return Object.keys(vars || {}).reduce((acc, k) => acc.split('{' + k + '}').join(String(vars[k])), String(template));
+}
+// «3 days» in the active language (Arabic dual / plural, Slavic few / many)
+function daysWord(n) {
+  const lang = (typeof CURRENT_LANG === 'string' && CURRENT_LANG) || 'ar';
+  const a = Math.abs(n);
+  if (lang === 'ar') return a === 1 ? 'يوم' : a === 2 ? 'يومان' : (a >= 3 && a <= 10) ? 'أيام' : 'يوماً';
+  if (lang === 'ru' || lang === 'uk') {
+    const m10 = a % 10, m100 = a % 100;
+    if (m10 === 1 && m100 !== 11) return lang === 'ru' ? 'день' : 'день';
+    if (m10 >= 2 && m10 <= 4 && (m100 < 12 || m100 > 14)) return lang === 'ru' ? 'дня' : 'дні';
+    return lang === 'ru' ? 'дней' : 'днів';
+  }
+  return a === 1 ? 'day' : 'days';
+}
+function fmtMB(bytes) {
+  const n = Number(bytes) || 0;
+  const mb = n / 1048576;
+  return `${mb >= 100 ? Math.round(mb) : mb.toFixed(1)} ${t('ui.unit.mb')}`;
+}
+function localeTag() { return ({ ar: 'ar-EG', en: 'en-US', ru: 'ru-RU', uk: 'uk-UA' })[document.documentElement.lang] || 'en-US'; }
+function fmtDate(d, opts) { return new Intl.DateTimeFormat(localeTag(), { calendar: 'gregory', numberingSystem: 'latn', ...opts }).format(d); }
+
+// ─── Tabs ─────────────────────────────────────────────────────
+const TABS = ['links', 'files', 'license'];
+function selectTab(name, focus) {
+  if (!TABS.includes(name)) return;
+  for (const tb of TABS) {
+    const btn = $('tabbtn-' + tb);
+    const pane = $('tab-' + tb);
+    const on = tb === name;
+    if (btn) { btn.classList.toggle('tab-on', on); btn.setAttribute('aria-selected', on ? 'true' : 'false'); btn.tabIndex = on ? 0 : -1; if (on && focus) btn.focus(); }
+    if (pane) pane.hidden = !on;
+  }
+  if (name === 'files') { refreshBackupsBox(); refreshRecentBackups(); }
+}
+function initTabs() {
+  const list = $('tabs');
+  if (!list) return;
+  list.addEventListener('click', (e) => { const b = e.target.closest('[data-tab]'); if (b) selectTab(b.dataset.tab); });
+  list.addEventListener('keydown', (e) => {
+    const cur = TABS.findIndex((tb) => $('tabbtn-' + tb) && $('tabbtn-' + tb).getAttribute('aria-selected') === 'true');
+    const rtl = document.documentElement.dir === 'rtl';
+    let next = -1;
+    if (e.key === 'ArrowRight') next = cur + (rtl ? -1 : 1);
+    else if (e.key === 'ArrowLeft') next = cur + (rtl ? 1 : -1);
+    else if (e.key === 'Home') next = 0;
+    else if (e.key === 'End') next = TABS.length - 1;
+    if (next >= 0) { e.preventDefault(); selectTab(TABS[(next + TABS.length) % TABS.length], true); }
+  });
+}
+
+// ─── Language switch (header <select>) ───────────────────────
 // Top-level so the inline onchange="onLangChange()" can reach it.
 async function onLangChange() {
-  const sel = document.getElementById('lang-select');
+  const sel = $('lang-select');
   const lang = sel ? sel.value : 'en';
   applyI18n(lang);
-  // Re-render JS-set strings (license date, status cards) so they switch instantly
-  // too, not only on the next poll.
-  try { if (currentState) { updateStatusCards(currentState); updateControlPanel(currentState); } } catch (e) { /* ignore */ }
+  // re-render the strings that are set from script so they switch instantly too, not only on the next poll
+  try { if (currentState) renderState(currentState); } catch (e) { /* ignore */ }
   if (window.texacore && window.texacore.setUiLang) {
     try { await window.texacore.setUiLang(lang); } catch (e) { /* ignore */ }
   }
@@ -22,59 +86,50 @@ async function onLangChange() {
 
 // ─── Initialize ──────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', async () => {
-  // Display version + build date from package.json
+  if (/^mac/i.test(navigator.platform || '')) document.documentElement.classList.add('mac');
+  initTabs();
+  loadCachedCompanies();
+
+  // version + build date (package.json, stamped by the build)
   try {
     const verInfo = await texacore.getVersion();
-    // Support both old format (string) and new format (object)
-    if (typeof verInfo === 'object' && verInfo.version) {
-      document.getElementById('version').textContent = `v${verInfo.version}`;
-      if (verInfo.buildDate && verInfo.buildDate !== 'unknown') {
-        const bd = new Date(verInfo.buildDate);
-        const dateStr = bd.toISOString().replace('T', ' ').substring(0, 16) + ' UTC';
-        document.getElementById('build-date').textContent = `Build: ${dateStr}`;
-      }
-    } else {
-      document.getElementById('version').textContent = `v${verInfo}`;
+    const v = typeof verInfo === 'object' && verInfo ? verInfo.version : verInfo;
+    if (v) { $('version').textContent = v; $('info-version').textContent = v; }
+    if (verInfo && verInfo.buildDate && verInfo.buildDate !== 'unknown') {
+      const bd = new Date(verInfo.buildDate);
+      if (!Number.isNaN(bd.getTime())) $('build-date').textContent = bd.toISOString().slice(0, 10);
     }
-  } catch { /* fallback: stays as "v..." */ }
+  } catch { /* stays as "v..." */ }
 
-  // Listen for migration progress events from main process
+  // migration progress events from the main process (first-run schema setup)
   if (texacore.onMigrationProgress) {
     texacore.onMigrationProgress((data) => {
-      const box = document.getElementById('migration-progress-box');
-      const bar = document.getElementById('migration-progress-bar');
-      const counter = document.getElementById('migration-counter');
-      const text = document.getElementById('migration-progress-text');
+      const box = $('migration-progress-box');
+      const bar = $('migration-progress-bar');
+      const counter = $('migration-counter');
+      const text = $('migration-progress-text');
       if (!box || !bar) return;
-
-      box.style.display = 'block';
+      box.style.display = 'flex';
       const pct = Math.round((data.step / data.total) * 100);
       bar.style.width = `${pct}%`;
       counter.textContent = `${data.step}/${data.total}`;
       text.textContent = data.name;
-
-      // Hide when complete
-      if (data.step >= data.total) {
-        setTimeout(() => { box.style.display = 'none'; }, 2000);
-      }
+      if (data.step >= data.total) setTimeout(() => { box.style.display = 'none'; }, 2000);
     });
   }
 
   await refreshState();
 
-  // Determine + apply UI language: saved choice wins, else auto-detect from the
-  // OS locale (provided by main) or the browser language. t() reads CURRENT_LANG
-  // live, so any text set before this still resolves correctly once applied.
+  // language: the saved choice wins, else the OS locale (from main) or the browser's. t() reads CURRENT_LANG live.
   const saved = (currentState && currentState.config && currentState.config.uiLang) || null;
-  const lang = saved || detectLang((currentState && currentState.osLocale) || (navigator.language));
-  const sel = document.getElementById('lang-select');
+  const lang = saved || detectLang((currentState && currentState.osLocale) || navigator.language);
+  const sel = $('lang-select');
   if (sel) sel.value = lang;
   applyI18n(lang);
+  try { renderState(currentState); } catch { /* ignore */ }
 
   refreshAdminPasswordStatus();
-  // Adaptive polling: poll fast (1.5s) while the system is starting/not yet
-  // connected so the status appears near-instantly, then relax to 5s once
-  // connected. Avoids the old fixed 5s lag where the indicator felt slow.
+  // adaptive polling: fast (1.5 s) while the system is starting / not yet connected, relaxed (5 s) once it runs
   const _statusTick = async () => {
     await refreshStatus();
     const connected = currentState && currentState.containerRunning;
@@ -83,549 +138,167 @@ document.addEventListener('DOMContentLoaded', async () => {
   statusInterval = setTimeout(_statusTick, 1500);
 });
 
-// ─── Refresh Full State ──────────────────────────────────────
+// ─── Refresh ─────────────────────────────────────────────────
+let _firstRender = true;
 async function refreshState() {
   try {
     currentState = await texacore.getState();
-    updateUI(currentState);
+    renderState(currentState);
+    refreshEmployeesBox(currentState);
+    if (_firstRender) {
+      _firstRender = false;
+      if (!currentState.hasLicense) selectTab('license');     // nothing works without a licence: land where it is fixed
+    }
   } catch (err) {
     console.error('Failed to get state:', err);
   }
 }
-
-// ─── Refresh Status Only ─────────────────────────────────────
 async function refreshStatus() {
   try {
     const state = await texacore.getState();
     currentState = state;
-    updateStatusCards(state);
-    // updateControlPanel also refreshes the license badge (tier + expiry), so a
-    // cloud-synced tier change / extension shows here within one poll (~5s).
-    updateControlPanel(state);
-    // The company list (and with it the employee links) can miss on first paint (before the DB is up): refreshEmployeesBox re-asks until it lands;
-    // renderLinks re-draws both employee links from the current state on every poll (no IPC) so a newly learned LAN address / registered name shows at once.
+    renderState(state);
+    // the company list (and with it the links) can miss on first paint (before the DB is up): refreshEmployeesBox re-asks until it lands
     refreshEmployeesBox(state);
     refreshBackupsBox();
-    renderLinks(state);
   } catch { /* silent */ }
 }
 
-// ─── Update UI ───────────────────────────────────────────────
-function updateUI(state) {
+// ─── Render everything the state decides ─────────────────────
+function renderState(state) {
+  if (!state) return;
   updateStatusCards(state);
-
-  // Hide all panels
-  document.getElementById('panel-no-docker').style.display = 'none';
-  document.getElementById('panel-license').style.display = 'none';
-  document.getElementById('panel-control').style.display = 'none';
-
-  // No Docker check — go straight to license or control panel
-  if (!state.hasLicense) {
-    // Show license activation
-    document.getElementById('panel-license').style.display = 'block';
-    document.getElementById('btn-cancel-license').style.display = 'none';
-    if (state.config?.licenseKey) {
-      document.getElementById('input-license').value = state.config.licenseKey;
-    }
-  } else {
-    // Show control panel
-    document.getElementById('panel-control').style.display = 'block';
-    updateControlPanel(state);
-  }
-
-  // Set port and cloud settings
+  updateControlButtons(state);
+  renderHero(state);
   renderLinks(state);
-  if (state.config?.port) {
-    document.getElementById('input-port').value = state.config.port;
-  }
-  
-  if (state.config?.enableCloud) {
-    document.getElementById('input-cloud').checked = true;
-    document.getElementById('cloud-content').style.display = 'block';
-  } else {
-    document.getElementById('input-cloud').checked = false;
-    document.getElementById('cloud-content').style.display = 'none';
-  }
-  syncSwitch();
-  
-  // If registered (and not known-deleted), show active view. Otherwise setup view.
-  if (state.config?.subdomain && _deletedSubdomain !== state.config.subdomain) {
-    if (!_tunnelNameTaken) document.getElementById('input-subdomain').value = state.config.subdomain;     // name_taken: leave the field to the user (choose another name)
-    document.getElementById('cloud-setup').style.display = _tunnelNameTaken ? 'block' : 'none';
-    document.getElementById('cloud-active').style.display = 'block';
-    document.getElementById('cloud-url').textContent = `https://${state.config.subdomain}.texacore.ai`;
-
-    // The employee links (office / cloud) are drawn by renderLinks: a SHORT company code (?c=, the company id's first segment), never the URL-encoded Arabic name.
-
-    // The saved subdomain may have been deleted from the cloud (Cloudflare).
-    // Verify it still resolves; if not, flip to the setup view and prompt the
-    // user to register a new one instead of showing a dead cloud URL.
-    verifyCloudSubdomain(state.config.subdomain);
-  } else {
-    document.getElementById('cloud-setup').style.display = 'block';
-    document.getElementById('cloud-active').style.display = 'none';
-    // A saved subdomain that no longer resolves (deleted from the cloud): stay on
-    // setup with a warning + the old name pre-filled so the user re-registers it.
-    if (state.config?.subdomain && _deletedSubdomain === state.config.subdomain) {
-      const warn = document.getElementById('subdomain-deleted-warning');
-      if (warn) { setWithIcon(warn, 'triangle-alert', t('subdomain.deleted')); warn.style.display = 'block'; }
-      const inp = document.getElementById('input-subdomain');
-      if (inp && !inp.value) { inp.value = state.config.subdomain; checkSubdomain(state.config.subdomain); }
-    }
-  }
+  renderLanAddress(state);
+  renderCloud(state);
+  renderLicense(state);
+  renderSupport(state);
 }
 
-// Verify the configured subdomain still exists. On a definitive "deleted"
-// result, switch from the active view to setup, surface a warning, and pre-fill
-// the old name so the user can re-register it (now free) or pick a new one.
-let _verifiedAliveSubdomain = null;  // cache: skip re-checking a subdomain we already confirmed alive
-let _deletedSubdomain = null;        // a saved subdomain confirmed deleted — keeps updateUI on the setup view
-async function verifyCloudSubdomain(subdomain) {
-  if (!subdomain || !window.texacore?.verifySubdomain) return;
-  if (_verifiedAliveSubdomain === subdomain) return;  // already confirmed — avoid a DNS lookup every poll
-  try {
-    const r = await texacore.verifySubdomain();
-    if (r && r.valid === false && r.reason === 'deleted') {
-      _verifiedAliveSubdomain = null;
-      _deletedSubdomain = subdomain;  // updateUI now routes straight to setup (no active⇄setup flicker)
-      document.getElementById('cloud-active').style.display = 'none';
-      document.getElementById('cloud-setup').style.display = 'block';
-      const warn = document.getElementById('subdomain-deleted-warning');
-      if (warn) { setWithIcon(warn, 'triangle-alert', t('subdomain.deleted')); warn.style.display = 'block'; }
-      const inp = document.getElementById('input-subdomain');
-      if (inp) { inp.value = subdomain; checkSubdomain(subdomain); }
-    } else if (r && r.valid === true) {
-      _verifiedAliveSubdomain = subdomain;  // confirmed alive — don't re-check (retry on deleted/error)
-      if (_deletedSubdomain === subdomain) _deletedSubdomain = null;  // recovered / re-registered
-    }
-  } catch { /* network/verify error — keep the active view, retry next refresh */ }
+// ─── Header chips ────────────────────────────────────────────
+function setChip(chipId, dotId, textId, cls, dot, text) {
+  const chip = $(chipId), d = $(dotId), tx = $(textId);
+  if (chip) chip.className = 'chip' + (cls ? ' ' + cls : '');
+  if (d) d.className = 'dot ' + dot;
+  if (tx) tx.textContent = text;
 }
-
-// ─── Update Status Cards ─────────────────────────────────────
+function licenseView(state) {
+  const li = state && state.licenseInfo;
+  const cfg = (state && state.config) || {};
+  const out = { kind: 'none', tier: '', daysLeft: null, expires: null, total: null };
+  if (!li) return out;
+  const isTrial = cfg.isTrial === true || /^TRL-/i.test(String(li.license_key || '')) || String(li.tier || '').toLowerCase() === 'trial';
+  const isFree = !isTrial && (String(li.tier || '').toLowerCase() === 'free' || cfg.isFree === true) && !li.expires_at;
+  out.tier = isFree ? 'free' : (isTrial ? 'trial' : String(li.tier || 'PRO'));
+  if (li.expires_at) {
+    const end = new Date(li.expires_at).getTime();
+    out.expires = Number.isNaN(end) ? null : end;
+    out.daysLeft = out.expires === null ? null : Math.ceil((out.expires - Date.now()) / 86400000);
+  }
+  out.total = isTrial ? 30 : 365;
+  if (!state.hasLicense) out.kind = 'expired';
+  else if (isFree || !li.expires_at) out.kind = isFree ? 'free' : 'paid-open';
+  else out.kind = isTrial ? 'trial' : 'paid';
+  return out;
+}
 function updateStatusCards(state) {
-  // Database (replaced Docker)
-  const dbStatus = document.getElementById('status-database');
-  const dbIndicator = document.getElementById('indicator-database');
-  if (dbStatus && dbIndicator) {
-    if (state.containerRunning) {
-      if (state.containerHealth === 'healthy') {
-        dbStatus.textContent = t('status.running');
-        dbIndicator.className = 'status-indicator green';
-      } else {
-        dbStatus.textContent = t('status.starting');
-        dbIndicator.className = 'status-indicator blue';
-      }
-    } else {
-      dbStatus.textContent = t('status.stopped');
-      dbIndicator.className = 'status-indicator yellow';
-    }
+  const running = !!state.containerRunning;
+  const healthy = running && state.containerHealth === 'healthy';
+  if (running) {
+    setChip('chip-erp', 'indicator-erp', 'status-erp', '', healthy ? 'green' : 'blue', healthy ? t('ui.chip.systemRunning') : t('status.starting'));
+    setChip('chip-database', 'indicator-database', 'status-database', '', healthy ? 'green' : 'blue', healthy ? t('ui.chip.dbRunning') : t('status.starting'));
+  } else {
+    setChip('chip-erp', 'indicator-erp', 'status-erp', 'bad', 'red', t('ui.chip.systemStopped'));
+    setChip('chip-database', 'indicator-database', 'status-database', '', 'yellow', t('ui.chip.dbStopped'));
   }
-
-  // License
-  const licenseStatus = document.getElementById('status-license');
-  const licenseIndicator = document.getElementById('indicator-license');
-  if (licenseStatus && licenseIndicator) {
-    if (state.hasLicense) {
-      licenseStatus.textContent = t('status.active');
-      licenseIndicator.className = 'status-indicator green';
-    } else {
-      licenseStatus.textContent = t('status.inactive');
-      licenseIndicator.className = 'status-indicator red';
-    }
-  }
-
-  // ERP
-  const erpStatus = document.getElementById('status-erp');
-  const erpIndicator = document.getElementById('indicator-erp');
-  if (erpStatus && erpIndicator) {
-    if (state.containerRunning) {
-      if (state.containerHealth === 'healthy') {
-        erpStatus.textContent = t('status.running');
-        erpIndicator.className = 'status-indicator green';
-      } else {
-        erpStatus.textContent = t('status.starting');
-        erpIndicator.className = 'status-indicator blue';
-      }
-    } else {
-      erpStatus.textContent = t('status.stopped');
-      erpIndicator.className = 'status-indicator red';
-    }
-  }
-
+  const lv = licenseView(state);
+  let cls = '', dot = 'green', text = '';
+  if (lv.kind === 'trial') {
+    cls = lv.daysLeft <= 7 ? 'warn' : ''; dot = lv.daysLeft <= 7 ? 'yellow' : 'green';
+    text = fillText(t('ui.chip.trial'), { n: Math.max(0, lv.daysLeft), d: daysWord(lv.daysLeft) });
+  } else if (lv.kind === 'free') { text = t('ui.chip.free'); }
+  else if (lv.kind === 'paid' || lv.kind === 'paid-open') {
+    text = lv.daysLeft !== null ? fillText(t('ui.chip.paid'), { n: Math.max(0, lv.daysLeft), d: daysWord(lv.daysLeft) }) : t('status.active');
+    if (lv.daysLeft !== null && lv.daysLeft <= 7) { cls = 'warn'; dot = 'yellow'; }
+  } else if (lv.kind === 'expired') { cls = 'bad'; dot = 'red'; text = t('ui.chip.expired'); }
+  else { cls = 'bad'; dot = 'red'; text = t('status.inactive'); }
+  setChip('chip-license', 'indicator-license', 'status-license', cls, dot, text);
   renderTunnelStatus(state);
 }
 
-// The connection status comes from the REAL connector state (main → ServiceManager.getTunnelStatus → tunnel-monitor.js): «connected» only when
-// cloudflared is running AND has logged a registered tunnel connection. 2.0.0 showed «connected» whenever the services ran, even with no cloudflared at all.
-function renderTunnelStatus(state) {
-  const el = document.getElementById('tunnel-status');
-  const det = document.getElementById('tunnel-detail');
-  if (!el) return;
-  const tn = state && state.tunnel;
-  let text; let color; let ico; let detail = '';
-  if (!state || !state.containerRunning || !tn || !tn.enabled) {
-    text = t('cloud.disconnected'); color = 'var(--danger)'; ico = 'circle-x';
-  } else if (tn.state === 'connected') {
-    text = t('cloud.connected'); color = 'var(--accent)'; ico = 'circle-check';
-  } else if (tn.state === 'starting') {
-    text = tn.reason === 'repairing' ? t('cloud.repairing') : tn.reason === 'verifying_route' ? t('cloud.verifying') : t('cloud.connecting'); color = 'var(--warning)'; ico = 'loader';
-  } else if (tn.state === 'route_mismatch') {
-    text = t('cloud.st.routeMismatch'); color = 'var(--danger)'; ico = 'triangle-alert';
-    detail = tn.detail || '';
-  } else if (tn.state === 'connected_unverified') {
-    text = t('cloud.st.unverified'); color = 'var(--warning)'; ico = 'triangle-alert';
-    detail = tn.detail || '';
-  } else if (tn.state === 'name_taken') {
-    text = t('cloud.st.nameTaken'); color = 'var(--danger)'; ico = 'triangle-alert';
-  } else if (tn.state === 'error') {
-    text = (t('cloud.err.' + tn.reason) !== 'cloud.err.' + tn.reason ? t('cloud.err.' + tn.reason) : t('cloud.disconnected')); color = 'var(--danger)'; ico = 'circle-x';
-    detail = tn.detail || '';
-  } else if (tn.reason === 'subdomain_deleted') {
-    text = t('cloud.off.subdomain_deleted'); color = 'var(--danger)'; ico = 'triangle-alert';
-  } else {
-    text = t('cloud.disconnected'); color = 'var(--danger)'; ico = 'circle-x';
-  }
-  setWithIcon(el, ico, text, 16, ico === 'loader' ? 'icon-lead spin' : 'icon-lead');
-  el.style.color = color;
-  el.dataset.tunnelState = tn ? `${tn.state}${tn.reason ? ':' + tn.reason : ''}` : 'none';
-  el.dataset.tunnelIcon = ico;
-  if (det) { det.textContent = detail; det.style.display = detail ? 'block' : 'none'; }
-  renderTunnelFix(tn, !!(state && state.containerRunning && tn && tn.enabled));
-}
-
-// 2.0.2: «connected» is shown only when the public link was PROVEN to reach this computer (tunnel-route.js). When it does not (route_mismatch), cannot be verified
-// (connected_unverified) or the name belongs to an earlier licence (name_taken), this box says why in words and offers «إصلاح الرابط» (IPC → the same repair the app
-// tries once per start). For a taken name the subdomain field of the setup view is shown too, to choose another name.
-let _tunnelNameTaken = false;       // while true the setup view (the subdomain input) stays visible beside the active view
-function tunnelRepairMessage(r) {
-  if (!r || !r.outcome) return '';
-  const key = 'cloud.repair.' + r.outcome;
-  if (r.outcome === 'taken') return t(r.reason === 'quarantined' ? 'cloud.nameTakenQuarantined' : 'cloud.nameTaken');
-  if (t(key) === key) return '';
-  return t(key).replace('{min}', String(Math.max(1, Math.ceil((r.retryAfterSec || 60) / 60))));
-}
-function renderTunnelFix(tn, active) {
-  const box = document.getElementById('tunnel-fix-box');
-  if (!box) return;
-  const btn = document.getElementById('btn-fix-link');
-  const msg = document.getElementById('tunnel-route-msg');
-  const rep = document.getElementById('tunnel-repair-msg');
-  const st = active && tn ? tn.state : null;
-  let line = '';
-  if (st === 'route_mismatch') line = t('cloud.route.' + tn.reason) !== 'cloud.route.' + tn.reason ? t('cloud.route.' + tn.reason) : t('cloud.route.no_route');
-  else if (st === 'connected_unverified') line = (t('cloud.unverified.' + tn.reason) !== 'cloud.unverified.' + tn.reason) ? t('cloud.unverified.' + tn.reason) : t('cloud.connectedUnverified');
-  else if (st === 'name_taken') line = t(tn.reason === 'quarantined' ? 'cloud.nameTakenQuarantined' : 'cloud.nameTaken');
-  else if (st === 'starting' && tn.reason === 'repairing') line = t('cloud.repairing');
-  const show = !!line;
-  box.style.display = show ? 'block' : 'none';
-  if (msg) msg.textContent = line;
-  const canFix = st === 'route_mismatch' || st === 'name_taken';
-  if (btn) { btn.style.display = canFix ? 'block' : 'none'; btn.disabled = !!(tn && tn.repairing) || _repairBusy; }
-  // what the last repair attempt said (kept for 10 minutes; «fixed» only while the link is fine)
-  const r = tn && tn.repair;
-  const fresh = r && (Date.now() - r.at < 10 * 60 * 1000);
-  const rtext = fresh && (r.outcome !== 'fixed' || st === 'connected') ? tunnelRepairMessage(r) : '';
-  if (rep) { rep.textContent = rtext; rep.style.display = rtext ? 'block' : 'none'; }
-  if (rtext && r.outcome === 'fixed') box.style.display = 'block';
-  _tunnelNameTaken = st === 'name_taken';
-  const setup = document.getElementById('cloud-setup');
-  if (setup && _tunnelNameTaken) setup.style.display = 'block';
-  else if (setup && !_tunnelNameTaken && _nameTakenForcedSetup && currentState && currentState.config && currentState.config.subdomain) setup.style.display = 'none';
-  _nameTakenForcedSetup = _tunnelNameTaken;
-  box.dataset.tunnelFix = st || 'none';
-}
-let _nameTakenForcedSetup = false;
-let _repairBusy = false;
-async function repairTunnelLink() {
-  const btn = document.getElementById('btn-fix-link');
-  const rep = document.getElementById('tunnel-repair-msg');
-  if (_repairBusy || !window.texacore || !window.texacore.repairTunnelLink) return;
-  _repairBusy = true;
-  if (btn) { btn.disabled = true; setWithIcon(btn, 'loader', t('cloud.repairing'), 16, 'icon-lead spin'); }
-  try {
-    const r = await window.texacore.repairTunnelLink();
-    const text = tunnelRepairMessage(r);
-    if (rep && text) { rep.textContent = text; rep.style.display = 'block'; }
-  } catch (e) {
-    if (rep) { rep.textContent = t('cloud.repair.network'); rep.style.display = 'block'; }
-  } finally {
-    _repairBusy = false;
-    if (btn) { btn.textContent = t('cloud.fixBtn'); btn.disabled = false; }
-    refreshStatus();
-  }
-}
-
-// ─── Update Control Panel ────────────────────────────────────
-function updateControlPanel(state) {
-  updateControlButtons(state);
-
-    // Update license badge from state.licenseInfo
-  if (state.licenseInfo) {
-    const li = state.licenseInfo;
-    const tierEl = document.getElementById('badge-tier');
-    const expiresEl = document.getElementById('badge-expires');
-    tierEl.textContent = (li.tier || 'PRO').toUpperCase();
-    if (li.tier === 'free') tierEl.style.background = 'linear-gradient(135deg, #f59e0b, #d97706)';
-    
-    // Format date specifically as Gregorian with Western/Arabic numerals (1, 2, 3...)
-    let exDate = '--';
-    if (li.expires_at) {
-      const d = new Date(li.expires_at);
-      const _dl = ({ ar: 'ar-EG', en: 'en-US', ru: 'ru-RU', uk: 'uk-UA' })[document.documentElement.lang] || 'en-US';
-      exDate = new Intl.DateTimeFormat(_dl, {
-        calendar: 'gregory',
-        numberingSystem: 'latn',
-        day: 'numeric',
-        month: 'long',
-        year: 'numeric'
-      }).format(d);
-    }
-    
-    if (!li.expires_at) {
-      // A licence without an end date never expires (the free local plan: license-guard.validate() never marks it expired) — never «-- (0 days)».
-      expiresEl.textContent = t('license.neverExpires');
-      expiresEl.dataset.expiry = 'never';
-    } else {
-      const daysLeft = Math.ceil((new Date(li.expires_at) - Date.now()) / 86400000);
-      expiresEl.textContent = `${t('license.expiresPrefix')} ${exDate} (${daysLeft} ${t('common.daysUnit')})`;
-      expiresEl.dataset.expiry = 'date';
-    }
-
-    // Support code = the full license key (for fast support / activation / extension).
-    const codeEl = document.getElementById('support-code');
-    if (codeEl && li.license_key) codeEl.textContent = li.license_key;
-  }
-}
-
-// Copy the support code (license key) to the clipboard, with a file:// fallback.
-function copySupportCode() {
-  const code = (document.getElementById('support-code')?.textContent || '').trim();
-  if (!code || code === '—') return;
-  const flash = () => {
-    const btn = document.getElementById('btn-copy-key');
-    if (btn) { const prev = btn.innerHTML; setWithIcon(btn, 'check', t('common.copied'), 16, ''); setTimeout(() => { btn.innerHTML = prev; }, 1500); }
-  };
-  if (navigator.clipboard && navigator.clipboard.writeText) {
-    navigator.clipboard.writeText(code).then(flash).catch(() => fallbackCopy(code, flash));
-  } else {
-    fallbackCopy(code, flash);
-  }
-}
-function fallbackCopy(text, done) {
-  try {
-    const ta = document.createElement('textarea');
-    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
-    document.body.appendChild(ta); ta.select();
-    document.execCommand('copy'); document.body.removeChild(ta);
-    if (done) done();
-  } catch { /* ignore */ }
-}
-
 function updateControlButtons(state) {
-  const btnStart = document.getElementById('btn-start');
-  const btnStop = document.getElementById('btn-stop');
-  const btnOpen = document.getElementById('btn-open');
-  const accessBox = document.getElementById('access-box');      // Block 1 «الدخول إلى البرنامج»: shown while the system runs
-
-  if (state.containerRunning) {
-    btnStart.style.display = 'none';
-    btnStop.style.display = 'inline-flex';
-    btnOpen.style.display = 'inline-flex';
-    if (accessBox) accessBox.style.display = 'block';
-  } else {
-    btnStart.style.display = 'inline-flex';
-    btnStop.style.display = 'none';
-    btnOpen.style.display = 'none';
-    if (accessBox) accessBox.style.display = 'none';
-  }
+  const running = !!state.containerRunning;
+  const stop = $('btn-stop');
+  if (stop) stop.style.display = running ? 'inline-flex' : 'none';
 }
 
-// ─── Activate License ────────────────────────────────────────
-async function activateLicense() {
-  const input = document.getElementById('input-license');
-  const btn = document.getElementById('btn-activate');
-  const feedback = document.getElementById('feedback-license');
-  const key = input.value.trim();
-
-  if (!key) {
-    feedback.className = 'feedback error';
-    feedback.textContent = t('license.errNoKey');
-    input.focus();
-    return;
-  }
-
-  btn.disabled = true;
-  setWithIcon(btn, 'loader', t('license.activating'), 20, 'spin');
-  feedback.className = 'feedback loading';
-  feedback.textContent = t('license.connectingLicense');
-
-  try {
-    const result = await texacore.activateLicense(key);
-
-    if (result.success) {
-      feedback.className = 'feedback success';
-      feedback.textContent = `${t('license.activatedOk')} ${result.license.tier} — ${t('license.expiresPrefix')} ${new Date(result.license.expires_at).toLocaleDateString()}`;
-      // اقتران التبديل بإعادة تشغيل فعلية لتطبيق الباقة
-      await restartSystemForLicense();
-    } else {
-      feedback.className = 'feedback error';
-      feedback.textContent = `${t('license.activateFailed')} ${result.error}`;
-    }
-  } catch (err) {
-    feedback.className = 'feedback error';
-    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
-  }
-
-  btn.disabled = false;
-  setWithIcon(btn, 'zap', t('license.activateBtn'), 20, '');
+// ─── Hero: the company and the ONE primary button ────────────
+let _starting = false;
+function heroMode(state) {
+  if (!state.hasLicense) return 'nolicense';
+  if (!state.containerRunning) return 'stopped';
+  if (_empListed && !_empCompanies.length) return 'nocompany';
+  return 'ready';
+}
+function renderHero(state) {
+  const hero = $('hero');
+  if (!hero) return;
+  const mode = heroMode(state);
+  hero.dataset.mode = mode;
+  const note = $('hero-note');
+  if (note) note.textContent = mode === 'nocompany' ? t('ui.hero.noCompany') : mode === 'nolicense' ? t('ui.hero.noLicense') : '';
+  const open = $('btn-open-label');
+  if (open) open.textContent = mode === 'nocompany' ? t('ui.hero.createCompany') : t('ui.openProgram');
+  const startBtn = $('btn-start');
+  if (startBtn && !_starting) startBtn.disabled = false;
+  const sel = $('link-company');
+  if (sel) sel.disabled = mode !== 'ready';
 }
 
-// ─── إعادة تشغيل المحرّكات بعد تغيير الرخصة ──────────────────────
-// نفس تدفّق أزرار Stop→Start المُثبت (IPC مباشر) ⇒ يقترن كل تبديل رخصة بإيقاف
-// وإعادة تشغيل فعلية فتُطبَّق الباقة الجديدة بلا حالة قديمة. أضمن + يفيد التحصين.
-async function restartSystemForLicense() {
-  const fb = document.getElementById('feedback-license') || document.getElementById('feedback-control');
-  try {
-    if (fb) { fb.className = 'feedback loading'; fb.textContent = 'جارٍ إيقاف وإعادة تشغيل المحرّكات لتطبيق الباقة…'; }
-    try { await texacore.stopERP(); } catch (e) { console.warn('[restart] stop:', e); }
-    await new Promise(r => setTimeout(r, 1800));       // مهلة تحرّر PG قبل الإقلاع
-    await refreshState();                               // config محدّث بالرخصة الجديدة
-    const c = (currentState && currentState.config) || {};
-    const result = await texacore.startERP({
-      licenseKey: c.licenseKey,
-      dbPassword: c.dbPassword || 'texacore2026',
-      port: parseInt(c.port) || 8080,
-      enableCloud: !!c.enableCloud,
-      subdomain: c.subdomain,
-    });
-    await refreshState();
-    if (fb) {
-      if (result && result.success) { fb.className = 'feedback success'; fb.textContent = 'أُعيد التشغيل وطُبّقت الباقة'; }
-      else { fb.className = 'feedback error'; fb.textContent = 'فشلت إعادة التشغيل: ' + ((result && result.error) || ''); }
-    }
-  } catch (e) {
-    console.error('[restart] failed:', e);
-    if (fb) { fb.className = 'feedback error'; fb.textContent = 'خطأ إعادة التشغيل: ' + e.message; }
-  }
+// ─── Start / stop ────────────────────────────────────────────
+function currentPort() {
+  const running = currentState && currentState.containerRunning;
+  const cfgPort = currentState && currentState.config && parseInt(currentState.config.port, 10);
+  if (running && cfgPort) return cfgPort;
+  return parseInt($('input-port').value, 10) || cfgPort || 8080;
 }
-
-function showLicensePanel() {
-  document.getElementById('panel-control').style.display = 'none';
-  document.getElementById('panel-license').style.display = 'block';
-  document.getElementById('btn-cancel-license').style.display = 'block';
-}
-
-// ─── Start Trial ─────────────────────────────────────────────
-async function startTrial() {
-  const btn = document.getElementById('btn-trial');
-  const feedback = document.getElementById('feedback-license');
-
-  btn.disabled = true;
-  setWithIcon(btn, 'loader', t('trial.creating'), 20, 'spin');
-  feedback.className = 'feedback loading';
-  feedback.textContent = t('trial.connecting');
-
-  try {
-    const result = await texacore.startTrial();
-
-    if (result.success) {
-      feedback.className = 'feedback success';
-      const msg = result.existing
-        ? t('trial.alreadyHave')
-        : t('trial.activated');
-      feedback.textContent = msg;
-      // اقتران التبديل بإعادة تشغيل فعلية لتطبيق الباقة
-      await restartSystemForLicense();
-    } else {
-      feedback.className = 'feedback error';
-      feedback.textContent = `${result.error}`;
-    }
-  } catch (err) {
-    feedback.className = 'feedback error';
-    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
-  }
-
-  btn.disabled = false;
-  setWithIcon(btn, 'gift', t('license.trialBtn'), 20, '');
-}
-
-// ─── Start Free (offline) ────────────────────────────────────
-async function startFree() {
-  const btn = document.getElementById('btn-free');
-  const feedback = document.getElementById('feedback-license');
-
-  btn.disabled = true;
-  setWithIcon(btn, 'loader', t('free.creating'), 20, 'spin');
-  feedback.className = 'feedback loading';
-  feedback.textContent = t('free.activating');
-
-  try {
-    const result = await texacore.startFree();
-
-    if (result.success) {
-      feedback.className = 'feedback success';
-      feedback.textContent = t('free.activated');
-      // اقتران التبديل بإعادة تشغيل فعلية لتطبيق الباقة المجانية
-      await restartSystemForLicense();
-    } else {
-      feedback.className = 'feedback error';
-      feedback.textContent = `${result.error}`;
-    }
-  } catch (err) {
-    feedback.className = 'feedback error';
-    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
-  }
-
-  btn.disabled = false;
-  setWithIcon(btn, 'sparkles', t('license.freeBtn'), 20, '');
-}
-
-// ─── Start ERP ───────────────────────────────────────────────
 async function startERP() {
-  const btn = document.getElementById('btn-start');
-  const feedback = document.getElementById('feedback-control');
-  const port = document.getElementById('input-port').value || 80;
-  const enableCloud = document.getElementById('input-cloud').checked;
-  const subdomain = currentState.config?.subdomain || document.getElementById('input-subdomain').value;
+  const btn = $('btn-start');
+  const feedback = $('feedback-control');
+  const port = parseInt($('input-port').value, 10) || 8080;
+  const enableCloud = $('input-cloud').checked;
+  const subdomain = (currentState.config && currentState.config.subdomain) || $('input-subdomain').value;
 
   if (enableCloud && !subdomain) {
     feedback.className = 'feedback error';
     feedback.textContent = t('cloud.errReserveFirst');
+    selectTab('links');
     return;
   }
-
+  _starting = true;
   btn.disabled = true;
-  btn.innerHTML = `<span class="btn-icon">${icon('loader', 20, 'spin')}</span><span>${t('status.starting')}</span>`;
+  setStartButton('loader', t('status.starting'), true);
   feedback.className = 'feedback loading';
   feedback.textContent = t('system.startingServices');
-
   try {
     const result = await texacore.startERP({
-      licenseKey: currentState.config?.licenseKey,
-      dbPassword: currentState.config?.dbPassword || 'texacore2026',
-      port: parseInt(port),
+      licenseKey: currentState.config && currentState.config.licenseKey,
+      dbPassword: (currentState.config && currentState.config.dbPassword) || 'texacore2026',
+      port,
       enableCloud,
-      subdomain
+      subdomain,
     });
-
     if (result.success) {
       feedback.className = 'feedback success';
-
-      // Show migration summary if available
       let migInfo = '';
-      if (result.migrations && result.migrations.applied > 0) {
-        migInfo = ` (${result.migrations.applied} ${t('migration.migrationsApplied')})`;
-      }
-
-      feedback.textContent = result.ready
-        ? `${t('system.works')}${migInfo} → http://localhost:${result.port}`
-        : t('system.loadingWait');
-
-      // Hide migration progress box
-      const migBox = document.getElementById('migration-progress-box');
+      if (result.migrations && result.migrations.applied > 0) migInfo = ` (${result.migrations.applied} ${t('migration.migrationsApplied')})`;
+      feedback.textContent = result.ready ? `${t('system.works')}${migInfo}` : t('system.loadingWait');
+      const migBox = $('migration-progress-box');
       if (migBox) migBox.style.display = 'none';
-      
       await refreshState();
+      setTimeout(() => { if (feedback.className.includes('success')) { feedback.textContent = ''; feedback.className = 'feedback'; } }, 6000);
     } else {
       feedback.className = 'feedback error';
       feedback.textContent = `${result.error}`;
@@ -634,43 +307,53 @@ async function startERP() {
     feedback.className = 'feedback error';
     feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
   }
-
+  _starting = false;
   btn.disabled = false;
-  btn.innerHTML = `<span class="btn-icon">${icon('play', 20)}</span><span>${t('btn.start')}</span>`;
+  setStartButton('play', t('btn.start'));
+}
+// the start button = icon + a labelled span (the label keeps its id so a language switch can re-word it)
+function setStartButton(iconName, label, spin) {
+  const btn = $('btn-start');
+  if (!btn) return;
+  btn.textContent = '';
+  btn.appendChild(iconEl(iconName, 16, spin ? 'icon-lead spin' : 'icon-lead'));
+  const sp = document.createElement('span'); sp.id = 'btn-start-label'; sp.setAttribute('data-i18n', 'btn.start'); sp.textContent = label;
+  if (spin) sp.removeAttribute('data-i18n');
+  btn.appendChild(sp);
 }
 
-// ─── Stop ERP ────────────────────────────────────────────────
 // The red button only ASKS: the question appears inside the window (no native dialog) and nothing is stopped until «yes» is pressed.
 // «Cancel» has the focus, Esc cancels, and an unanswered question withdraws itself after 15 s.
 let _stopAskTimer = null;
 function requestStopERP() {
-  const box = document.getElementById('stop-confirm');
-  if (!box) { stopERP(); return; }
-  box.style.display = 'block';
-  document.getElementById('btn-stop-cancel')?.focus();
+  const overlay = $('overlay-stop');
+  if (!overlay) { stopERP(); return; }
+  overlay.style.display = 'flex';
+  const box = $('stop-confirm');
+  if (box) box.style.display = 'flex';
+  $('btn-stop-cancel')?.focus();
   clearTimeout(_stopAskTimer);
   _stopAskTimer = setTimeout(cancelStopERP, 15000);
 }
 function cancelStopERP() {
   clearTimeout(_stopAskTimer);
-  const box = document.getElementById('stop-confirm');
-  if (box) box.style.display = 'none';
+  const overlay = $('overlay-stop');
+  if (overlay) overlay.style.display = 'none';
 }
 document.addEventListener('keydown', (e) => {
-  if (e.key === 'Escape' && document.getElementById('stop-confirm')?.style.display === 'block') cancelStopERP();
+  if (e.key === 'Escape' && $('overlay-stop') && $('overlay-stop').style.display === 'flex') cancelStopERP();
+  if (e.key === 'Escape' && $('overlay-password') && $('overlay-password').style.display === 'flex') toggleAdminPasswordPanel();
 });
 
 async function stopERP() {
   clearTimeout(_stopAskTimer);
-  const confirmBox = document.getElementById('stop-confirm');
-  if (confirmBox) confirmBox.style.display = 'none';
-  const btn = document.getElementById('btn-stop');
-  const feedback = document.getElementById('feedback-control');
-
+  const overlay = $('overlay-stop');
+  if (overlay) overlay.style.display = 'none';
+  const btn = $('btn-stop');
+  const feedback = $('feedback-control');
   btn.disabled = true;
   feedback.className = 'feedback loading';
   feedback.textContent = t('system.stopping');
-
   try {
     const result = await texacore.stopERP();
     if (result.success) {
@@ -685,32 +368,60 @@ async function stopERP() {
     feedback.className = 'feedback error';
     feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
   }
-
   btn.disabled = false;
 }
 
-// ─── Open Browser ────────────────────────────────────────────
-function openERP() {
-  const port = document.getElementById('input-port').value || 80;
-  texacore.openBrowser(parseInt(port));
-}
-
-function openCloudUrl() {
-  const subdomain = currentState.config?.subdomain;
-  if (subdomain) {
-    texacore.openBrowser(`https://${subdomain}.texacore.ai`);
+// Stop, then start again with what is configured (a new licence applies its plan; a new port applies its address)
+async function restartServices(opts = {}) {
+  const fb = $('feedback-license') || $('feedback-control');
+  const out = $('feedback-control');
+  const say = (cls, text) => { for (const f of [fb, out]) { if (f) { f.className = 'feedback ' + cls; f.textContent = text; } } };
+  try {
+    say('loading', t('ui.restart.working'));
+    try { await texacore.stopERP(); } catch (e) { console.warn('[restart] stop:', e); }
+    await new Promise((r) => setTimeout(r, 1800));       // PostgreSQL lets go of its port before the next start
+    await refreshState();
+    const c = (currentState && currentState.config) || {};
+    const result = await texacore.startERP({
+      licenseKey: c.licenseKey,
+      dbPassword: c.dbPassword || 'texacore2026',
+      port: opts.port || parseInt(c.port, 10) || 8080,
+      enableCloud: !!c.enableCloud,
+      subdomain: c.subdomain,
+    });
+    await refreshState();
+    if (result && result.success) say('success', t('ui.restart.done'));
+    else say('error', t('ui.restart.failed') + ' ' + ((result && result.error) || ''));
+    setTimeout(() => { for (const f of [fb, out]) { if (f && f.className.includes('success')) { f.textContent = ''; f.className = 'feedback'; } } }, 6000);
+  } catch (e) {
+    console.error('[restart] failed:', e);
+    say('error', t('ui.restart.failed') + ' ' + e.message);
   }
 }
+async function restartSystemForLicense() { return restartServices(); }
 
+// ─── Open the program ────────────────────────────────────────
+function openERP() {
+  const port = currentPort();
+  const mode = $('hero') && $('hero').dataset.mode;
+  const code = companyCode(chosenCompanyId());
+  if (mode === 'ready' && code) texacore.openBrowser(`http://localhost:${port}/login?c=${code}`);
+  else texacore.openBrowser(port);
+}
+function openCloudUrl() {
+  const subdomain = currentState.config && currentState.config.subdomain;
+  if (subdomain) texacore.openBrowser(`https://${subdomain}.texacore.ai`);
+}
 function openEmployeeUrl() {
-  const url = document.getElementById('employee-url')?.dataset.url;
+  const url = $('employee-url') && $('employee-url').dataset.url;
   if (url) texacore.openBrowser(url);
 }
+function openLanEmployeeUrl() { const u = $('lan-employee-url') && $('lan-employee-url').dataset.url; if (u) texacore.openBrowser(u); }
 
-// ─── Employee links (Blocks 1 and 2) + the add-an-employee form (Block 3) ────────────────────────────────────
-// ONE chosen company drives everything: the company selector of Block 1 (shown with 2+ companies), the company field of the form, and both employee links
-//   · office  (Block 1): http://<LAN address>[:port]/login?c=<code>   - for staff on the office network, works without internet
-//   · anywhere (Block 2): https://<name>.texacore.ai/login?c=<code>   - over the internet, only while this computer stays on and connected
+// ─── Employee links (Blocks 1 and 2) ────────────────────────────────────────
+// ONE chosen company (the hero's selector) drives both links:
+//   · office   (Links tab, left):  http://<LAN address>[:port]/login?c=<code>   - for staff on the office network, works without internet
+//   · anywhere (Links tab, right): https://<name>.texacore.ai/login?c=<code>    - over the internet, only while this computer stays on and connected
 // <code> is the first segment of the company's id (8 characters), never the URL-encoded Arabic name; «?c=» opens that company's sign-in directly.
 let _empCompanies = [];
 let _empRefreshing = false;
@@ -729,38 +440,65 @@ function cloudEmployeeLink(state, companyId) {
   if (!sub || !companyId) return '';
   return `https://${sub}.texacore.ai/login?c=${companyCode(companyId)}`;
 }
-// the company the links and the form are about: the picked one if it still exists, else the first (the list is newest-first)
+// the company the links are about: the picked one if it still exists, else the first (the list is newest-first)
 function chosenCompanyId() {
   if (_chosenCompanyId && _empCompanies.some((c) => c.id === _chosenCompanyId)) return _chosenCompanyId;
   return (_empCompanies[0] && _empCompanies[0].id) || '';
 }
 function setChosenCompany(id) {
   _chosenCompanyId = id || '';
-  for (const sid of ['link-company', 'emp-company']) {
-    const sel = document.getElementById(sid);
-    if (sel && sel.value !== _chosenCompanyId) sel.value = _chosenCompanyId;
-  }
+  const sel = $('link-company');
+  if (sel && sel.value !== _chosenCompanyId) sel.value = _chosenCompanyId;
 }
 function showLink(rowId, anchorId, url) {
-  const row = document.getElementById(rowId);
-  const a = document.getElementById(anchorId);
-  if (row) row.style.display = url ? 'block' : 'none';
-  if (a) { a.textContent = url || '—'; a.dataset.url = url || ''; }
+  const row = $(rowId);
+  const a = $(anchorId);
+  if (row) row.style.display = url ? 'flex' : 'none';
+  if (a) { a.textContent = url || '—'; a.dataset.url = url || ''; a.title = url || ''; }
 }
 function renderLinks(state) {
   const st = state || currentState || {};
   const id = chosenCompanyId();
+  const running = !!st.containerRunning;
   showLink('lan-link-row', 'lan-employee-url', lanEmployeeLink(st, id));
   showLink('cloud-employee-row', 'employee-url', cloudEmployeeLink(st, id));
-  const none = document.getElementById('lan-no-company');
-  if (none) none.style.display = (_empListed && !_empCompanies.length) ? 'block' : 'none';
-  const pick = document.getElementById('link-company-row');
-  if (pick) pick.style.display = _empCompanies.length > 1 ? 'flex' : 'none';
+  const none = $('lan-no-company');
+  if (none) none.style.display = (running && _empListed && !_empCompanies.length) ? 'block' : 'none';
+  const stopped = $('lan-stopped');
+  if (stopped) stopped.style.display = (!running && !_empCompanies.length) ? 'block' : 'none';
+  // «open» needs the system running; «copy» always works
+  for (const bid of ['open-lan-employee-url', 'open-employee-url']) { const b = $(bid); if (b) b.disabled = !running; }
+  const portal = $('btn-open-cloud'); if (portal) portal.disabled = !running;
+}
+function fillCompanySelect(companies) {
+  const sel = $('link-company');
+  if (!sel) return;
+  sel.textContent = '';
+  if (!companies.length) { const o = document.createElement('option'); o.value = ''; o.textContent = '—'; sel.appendChild(o); return; }
+  for (const c of companies) { const o = document.createElement('option'); o.value = c.id; o.textContent = c.name; sel.appendChild(o); }
+}
+// the last known company list (display only: names for a stopped system), kept in this window's storage
+const CACHE_KEY = 'texacore.launcher.companies';
+function loadCachedCompanies() {
+  try {
+    const raw = localStorage.getItem(CACHE_KEY);
+    const list = raw ? JSON.parse(raw) : null;
+    if (Array.isArray(list) && list.length && list.every((c) => c && typeof c.id === 'string' && typeof c.name === 'string')) {
+      _empCompanies = list.slice(0, 50);
+      fillCompanySelect(_empCompanies);
+      setChosenCompany(_empCompanies[0].id);
+      return;
+    }
+  } catch { /* storage blocked: fine */ }
+  fillCompanySelect([]);
+}
+function saveCachedCompanies(list) {
+  try { localStorage.setItem(CACHE_KEY, JSON.stringify(list.slice(0, 50).map((c) => ({ id: c.id, name: c.name })))); } catch { /* storage blocked */ }
 }
 async function refreshEmployeesBox(state) {
-  const box = document.getElementById('employees-box');
-  if (!box || _empRefreshing) return;
-  if (_empCompanies.length && Date.now() - _empLast < 30000) return;     // the company list rarely changes; the poll runs every ~5 s
+  if (_empRefreshing) return;
+  if (!(state || currentState).containerRunning) { renderLinks(state || currentState); return; }
+  if (_empListed && _empCompanies.length && Date.now() - _empLast < 30000) return;     // the company list rarely changes; the poll runs every ~5 s
   _empRefreshing = true;
   _empLast = Date.now();
   try {
@@ -768,257 +506,279 @@ async function refreshEmployeesBox(state) {
     if (!r || !r.success) return;                                         // services may be down: keep what is shown
     _empListed = true;
     const companies = r.companies || [];
-    if (!companies.length) { _empCompanies = []; box.style.display = 'none'; renderLinks(state || currentState); return; }
-    box.style.display = 'block';
     const sameList = JSON.stringify(companies.map((c) => c.id)) === JSON.stringify(_empCompanies.map((c) => c.id));
-    if (!sameList) {
+    if (!companies.length) { _empCompanies = []; fillCompanySelect([]); saveCachedCompanies([]); }
+    else if (!sameList) {
       const keep = chosenCompanyId();
       _empCompanies = companies;
-      for (const sid of ['link-company', 'emp-company']) {
-        const sel = document.getElementById(sid);
-        if (!sel) continue;
-        sel.innerHTML = '';
-        for (const c of companies) { const o = document.createElement('option'); o.value = c.id; o.textContent = c.name; sel.appendChild(o); }
-      }
+      fillCompanySelect(companies);
       setChosenCompany(companies.some((c) => c.id === keep) ? keep : companies[0].id);
-      await loadEmployeeRoles();
+      saveCachedCompanies(companies);
     }
-    renderLinks(state || currentState);
+    renderState(state || currentState);
   } catch { /* services may be down */ } finally { _empRefreshing = false; }
 }
-// ─── Backups box (2.0.2) ─────────────────────────────────────
-// Every file the program keeps in step (the company file, and for a Rashid company the program's own second copy): where it is, when it was
-// last in step ("last sync 3 minutes ago"), whether it is OK / syncing / failing - and WHY (folder missing, no permission, disk full, a cloud
-// folder that is not downloaded) - plus "sync now" and "show in Finder". Text only goes in through textContent (a path is data, never markup).
-let _bkRefreshing = false;
-let _bkBusy = false;
-// ─── «Where is my data» (2.0.5): the ONE live company file, read-only, with «show in Finder» ───────────────────────────
-// The whole database of this install (every company) is written to ONE file every minute. This line is always on the main screen so the owner sees where
-// everything is saved - and, when several companies exist, that they all share it. Text goes in through textContent only (a path is data, never markup).
-function liveFileView(st, companyCount) {
-  const live = st && typeof st.liveFile === 'string' && st.liveFile ? st.liveFile : '';
-  if (!live) return null;
-  const primary = ((st && st.targets) || []).find((x) => x.role === 'primary') || null;
-  const n = Number.isFinite(companyCount) ? companyCount : 0;
-  const planned = Number(st && st.plannedCompanies) || 0;
-  return {
-    path: live,
-    label: n > 1 ? t('live.many').replace('{n}', String(n)) : t('live.single'),
-    note: planned > 0 ? t('live.planned').replace('{n}', String(planned)) : (primary && primary.exists === false && !primary.lastSuccess ? t('live.notYet') : ''),
-    canReveal: !!(primary && primary.exists),
-  };
-}
-function renderLiveFile(st) {
-  const row = document.getElementById('live-file-row');
-  if (!row) return;
-  const v = liveFileView(st, typeof _empCompanies !== 'undefined' ? _empCompanies.length : 0);
-  if (!v) { row.style.display = 'none'; return; }
-  row.style.display = 'flex';
-  document.getElementById('live-file-label').textContent = v.label;
-  const pathEl = document.getElementById('live-file-path');
-  pathEl.textContent = v.path; pathEl.title = v.path;
-  const note = document.getElementById('live-file-note');
-  note.textContent = v.note; note.style.display = v.note ? 'block' : 'none';
-  const btn = document.getElementById('btn-live-file-show');
-  document.getElementById('live-file-show-label').textContent = bkRevealLabel();
-  btn.disabled = !v.canReveal;
-  btn.onclick = () => { window.texacore.revealBackup(v.path); };
-}
-document.addEventListener('i18n-applied', () => { try { if (typeof _lastBackupStatus !== 'undefined' && _lastBackupStatus) renderLiveFile(_lastBackupStatus); } catch { /* ignore */ } });
-let _lastBackupStatus = null;
-function bkAgo(iso) {
-  if (!iso) return t('bk.never');
-  const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
-  if (secs < 60) return t('bk.justNow');
-  if (secs < 3600) return t('bk.minutesAgo').replace('{n}', String(Math.floor(secs / 60)));
-  if (secs < 86400) return t('bk.hoursAgo').replace('{n}', String(Math.floor(secs / 3600)));
-  return t('bk.daysAgo').replace('{n}', String(Math.floor(secs / 86400)));
-}
-function bkRevealLabel() { return /^mac/i.test(navigator.platform || '') ? t('bk.showMac') : /^win/i.test(navigator.platform || '') ? t('bk.showWin') : t('bk.showOther'); }
-function bkProviderName(p) { return ({ icloud: 'iCloud', onedrive: 'OneDrive', dropbox: 'Dropbox', gdrive: 'Google Drive' })[p] || t('bk.cloudService'); }
-function bkCloudKey(dir) { return 'texacore.bk.cloudWarned:' + dir; }
-async function refreshBackupsBox() {
-  const box = document.getElementById('backups-box');
-  if (!box || _bkRefreshing) return;
-  _bkRefreshing = true;
-  try {
-    const st = await window.texacore.backupStatus();
-    _lastBackupStatus = st;
-    renderLiveFile(st);
-    const targets = (st && st.targets) || [];
-    if (!targets.length) { box.style.display = 'none'; return; }
-    box.style.display = 'block';
-    const rows = document.getElementById('bk-rows');
-    rows.textContent = '';
-    for (const tg of targets) {
-      const row = document.createElement('div');
-      row.style.cssText = 'background:var(--bg-primary); border:1px solid var(--border); border-radius:var(--radius-sm); padding:10px 12px;';
-      row.dataset.role = tg.role; row.dataset.state = tg.state;
-      const head = document.createElement('div');
-      head.style.cssText = 'font-size:12px; font-weight:700; margin-bottom:4px;';
-      head.textContent = tg.role === 'copy' ? t('bk.roleCopy') : t('bk.rolePrimary');
-      const pathEl = document.createElement('div');
-      pathEl.style.cssText = 'font-family:monospace; font-size:11px; color:var(--text-muted); word-break:break-all; direction:ltr; text-align:left;';
-      pathEl.textContent = tg.path; pathEl.title = tg.path;
-      const line = document.createElement('div');
-      line.style.cssText = 'font-size:12px; margin-top:6px; display:flex; gap:6px; align-items:flex-start;';
-      const ico = document.createElement('span');
-      const ok = tg.state === 'ok' || tg.state === 'pending';
-      const color = tg.state === 'error' ? '#b91c1c' : tg.state === 'syncing' ? 'var(--accent)' : tg.state === 'ok' ? '#16a34a' : 'var(--text-muted)';
-      ico.style.color = color;
-      ico.appendChild(iconEl(tg.state === 'error' ? 'triangle-alert' : tg.state === 'syncing' ? 'loader' : 'check', 16, tg.state === 'syncing' ? 'spin' : ''));
-      const txt = document.createElement('span');
-      txt.style.cssText = 'flex:1; min-width:0; word-break:break-word; color:' + color + ';';
-      if (tg.state === 'error') {
-        const reason = t('bk.r.' + ((tg.error && tg.error.reason) || 'unknown'));
-        txt.textContent = t('bk.failed').replace('{reason}', reason) + (tg.lastSuccess ? ' · ' + t('bk.last').replace('{ago}', bkAgo(tg.lastSuccess)) : '');
-      } else if (tg.state === 'syncing') {
-        txt.textContent = t('bk.syncing');
-      } else if (tg.state === 'pending') {
-        txt.textContent = t('bk.pending');
-      } else {
-        txt.textContent = t('bk.last').replace('{ago}', bkAgo(tg.lastSuccess));
-      }
-      void ok;
-      line.appendChild(ico); line.appendChild(txt);
-      const actions = document.createElement('div');
-      actions.style.cssText = 'margin-top:6px;';
-      const show = document.createElement('button');
-      show.type = 'button'; show.className = 'btn';
-      show.style.cssText = 'font-size:11px; padding:4px 10px;';
-      show.textContent = bkRevealLabel(); show.disabled = !tg.exists;
-      show.addEventListener('click', () => { window.texacore.revealBackup(tg.path); });
-      actions.appendChild(show);
-      row.appendChild(head); row.appendChild(pathEl); row.appendChild(line);
-      if (tg.exists && tg.onThisComputer === false) {
-        const off = document.createElement('div');
-        off.style.cssText = 'font-size:11px; margin-top:4px; color:#92400e;';
-        off.textContent = t('bk.notOnComputer');
-        row.appendChild(off);
-      }
-      row.appendChild(actions);
-      rows.appendChild(row);
-    }
-    // a visible warning once it keeps failing (or any target is failing)
-    const warn = document.getElementById('bk-warn');
-    const failing = targets.filter((x) => x.state === 'error');
-    if (failing.length && ((st.consecutiveFailures || 0) >= 2 || failing.some((x) => x.role === 'copy'))) {
-      const first = failing[0];
-      warn.textContent = t('bk.warnRepeated').replace('{reason}', t('bk.r.' + ((first.error && first.error.reason) || 'unknown')));
-      warn.style.display = 'block';
-    } else { warn.style.display = 'none'; }
-    // a cloud-synced folder: say so ONCE per folder (dismissed → remembered)
-    const cloudEl = document.getElementById('bk-cloud');
-    const cloudT = targets.find((x) => x.cloudFolder && !localStorage.getItem(bkCloudKey(x.dir)));
-    if (cloudT) {
-      cloudEl.textContent = '';
-      const msg = document.createElement('span');
-      msg.textContent = (cloudT.cloudFolder.provider === 'icloud' ? t('bk.cloudICloud') : t('bk.cloudOther').replace('{p}', bkProviderName(cloudT.cloudFolder.provider))) + ' ';
-      const ok = document.createElement('button');
-      ok.type = 'button'; ok.className = 'btn'; ok.style.cssText = 'font-size:11px; padding:3px 10px; margin-inline-start:6px;';
-      ok.textContent = t('bk.understood');
-      ok.addEventListener('click', () => { try { localStorage.setItem(bkCloudKey(cloudT.dir), '1'); } catch { /* storage blocked */ } cloudEl.style.display = 'none'; });
-      cloudEl.appendChild(msg); cloudEl.appendChild(ok);
-      cloudEl.style.display = 'block';
-    } else { cloudEl.style.display = 'none'; }
-    const btn = document.getElementById('btn-bk-now');
-    if (btn && !_bkBusy) btn.disabled = !!st.running;
-  } catch { /* services may be down */ } finally { _bkRefreshing = false; }
-}
-async function syncBackupsNow() {
-  if (_bkBusy) return;
-  _bkBusy = true;
-  const btn = document.getElementById('btn-bk-now');
-  if (btn) { btn.disabled = true; btn.textContent = t('bk.syncing'); }
-  try { await window.texacore.backupNow(); } catch { /* the box shows the error from the status */ }
-  _bkBusy = false;
-  if (btn) { btn.disabled = false; btn.textContent = t('bk.syncNow'); }
-  await refreshBackupsBox();
-}
-
-async function loadEmployeeRoles() {
-  const sel = document.getElementById('emp-role');
-  const cid = document.getElementById('emp-company').value;
-  sel.innerHTML = '';
-  if (!cid) return;
-  const r = await window.texacore.listEmployeeRoles(cid);
-  const lang = (typeof CURRENT_LANG === 'string' && CURRENT_LANG) || 'en';
-  const roles = (r && r.roles) || [];
-  const hint = document.getElementById('emp-roles-hint');
-  if (hint) hint.style.display = roles.some((x) => !/^(company_owner|tenant_owner|tenant_admin)$/.test(x.code)) ? 'none' : 'block';
-  for (const role of roles) {
-    const o = document.createElement('option'); o.value = role.id;
-    o.textContent = (lang === 'ar' ? role.name_ar : role.name_en) || role.name_en || role.name_ar || role.code;
-    sel.appendChild(o);
-  }
-}
-async function onEmployeeCompanyChange(sel) {
+function onEmployeeCompanyChange(sel) {
   setChosenCompany((sel && sel.value) || '');
   renderLinks(currentState);
-  await loadEmployeeRoles();
-}
-function openLanEmployeeUrl() { const u = document.getElementById('lan-employee-url')?.dataset.url; if (u) texacore.openBrowser(u); }
-// «Open the roles page»: the program's own page where an employee role is created (route /system-config/users-permissions, first tab = roles), on this computer
-function openRolesPage() {
-  const port = parseInt(document.getElementById('input-port')?.value, 10) || 80;
-  texacore.openBrowser(`http://localhost:${port}/system-config/users-permissions`);
 }
 async function copyText(text) {
   try { await navigator.clipboard.writeText(text); } catch {
-    const ta = document.createElement('textarea'); ta.value = text; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
+    const ta = document.createElement('textarea'); ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0'; document.body.appendChild(ta); ta.select(); document.execCommand('copy'); document.body.removeChild(ta);
   }
 }
-// Copy a link exactly as it is shown (cloud link, local/LAN link) and say so on the button for a moment
+// Copy a link exactly as it is shown and say so on the button for a moment
 async function copyLink(linkId, btnId) {
-  const text = (document.getElementById(linkId)?.textContent || '').trim();
+  const text = (($(linkId) && $(linkId).textContent) || '').trim();
   if (!text || text === '—') return;
   await copyText(text);
-  const btn = document.getElementById(btnId);
+  const btn = $(btnId);
   if (btn) {
     btn.textContent = t('emp.copied'); btn.classList.add('copied');
     setTimeout(() => { btn.textContent = t('emp.copy'); btn.classList.remove('copied'); }, 1500);
   }
 }
-async function addEmployee() {
-  const out = document.getElementById('emp-result');
-  const btn = document.getElementById('btn-add-employee');
-  const data = {
-    companyId: document.getElementById('emp-company').value, roleId: document.getElementById('emp-role').value,
-    fullName: document.getElementById('emp-name').value.trim(), email: document.getElementById('emp-email').value.trim(),
-  };
-  const show = (html, color) => { out.style.display = 'block'; out.style.color = color || 'inherit'; out.innerHTML = html; };
-  const esc = (v) => String(v).replace(/[&<>"']/g, (ch) => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[ch]));
-  if (!data.companyId) { show(esc(t('emp.noCompany')), 'var(--danger)'); return; }
-  btn.disabled = true;
-  try {
-    const r = await window.texacore.inviteEmployee(data);
-    if (!r || !r.success) {
-      const msg = r && r.code === 'PLAN_LIMIT_EXCEEDED' ? t('emp.errLimit') : (r && r.code === 'EMAIL_EXISTS' ? t('emp.errExists') : `${t('emp.errGeneric')} ${esc((r && r.error) || '')}`);
-      show(esc(msg), 'var(--danger)');
-      return;
+
+// ─── The network address (office link) and its picker ────────
+function renderLanAddress(state) {
+  const lan = state && state.lan;
+  const addr = $('lan-addr');
+  if (!addr) return;
+  addr.textContent = (lan && lan.address) || (state && state.localIp) || '—';
+  const ifc = $('lan-iface');
+  if (ifc) ifc.textContent = lan && lan.iface ? `(${lan.iface}${lan.auto ? '' : ' · ' + t('ui.lan.chosen')})` : '';
+  const sel = $('lan-select');
+  if (sel && lan && Array.isArray(lan.candidates) && !_lanPickerBusy) {
+    const sig = JSON.stringify([lan.candidates.map((c) => c.address), lan.auto, lan.address]);
+    if (sel.dataset.sig !== sig) {
+      sel.dataset.sig = sig;
+      sel.textContent = '';
+      const auto = document.createElement('option'); auto.value = ''; auto.textContent = `${t('ui.lan.auto')} (${(lan.auto ? lan.address : '') || '—'})`;
+      sel.appendChild(auto);
+      for (const c of lan.candidates) {
+        const o = document.createElement('option'); o.value = c.address;
+        o.textContent = `${c.address} — ${c.name}${c.virtual ? ' · ' + t('ui.lan.virtual') : ''}`;
+        sel.appendChild(o);
+      }
+      sel.value = lan.auto ? '' : lan.address;
     }
-    show(`<div style="font-weight:700; color:#16a34a;">${esc(t('emp.created'))}: ${esc(r.fullName)} — ${esc(r.email)}</div>
-      <div style="margin-top:6px;">${esc(t('emp.otp'))}</div>
-      <div style="font-family:monospace; font-size:18px; font-weight:700; letter-spacing:1px; user-select:all;" dir="ltr">${esc(r.oneTimePassword)}</div>
-      <div style="color:var(--text-muted); margin-top:4px;">${esc(t('emp.otpHint'))}</div>`);
-    document.getElementById('emp-name').value = ''; document.getElementById('emp-email').value = '';
-  } catch (e) { show(`${esc(t('emp.errGeneric'))} ${esc(e.message)}`, 'var(--danger)'); } finally { btn.disabled = false; }
+    const hint = $('lan-pick-hint');
+    if (hint) hint.textContent = lan.candidates.length > 1 ? t('ui.lan.pickHint') : t('ui.lan.onlyOne');
+  }
+}
+let _lanPickerBusy = false;
+function toggleLanPicker() {
+  const p = $('lan-picker'), b = $('btn-lan-change');
+  if (!p) return;
+  const show = p.style.display === 'none' || !p.style.display;
+  p.style.display = show ? 'flex' : 'none';
+  if (b) b.setAttribute('aria-expanded', show ? 'true' : 'false');
+  if (show) { const s = $('lan-select'); if (s) s.focus(); }
+}
+async function onLanPick(value) {
+  _lanPickerBusy = true;
+  try {
+    const r = await texacore.setLanAddress(value || '');
+    if (r && r.success) { if (currentState) { currentState.lan = r.lan; currentState.localIp = r.lan.address; } const s = $('lan-select'); if (s) s.dataset.sig = ''; showToast(t('ui.lan.saved')); }
+    else showToast((r && r.error) || t('ui.lan.failed'));
+  } catch (e) { showToast(e.message); }
+  _lanPickerBusy = false;
+  renderState(currentState);
 }
 
-// ─── Cloud Logic ─────────────────────────────────────────────
+// ─── Cloud access ("من أي مكان") ─────────────────────────────
 // role="switch" needs aria-checked to follow the real state (set programmatically from the saved config, and by every click / Space press)
 function syncSwitch(el) {
-  const i = el || document.getElementById('input-cloud');
+  const i = el || $('input-cloud');
   if (i) i.setAttribute('aria-checked', i.checked ? 'true' : 'false');
 }
+let _verifiedAliveSubdomain = null;  // cache: skip re-checking a subdomain we already confirmed alive
+let _deletedSubdomain = null;        // a saved subdomain confirmed deleted — keeps the render on the setup view
+function renderCloud(state) {
+  const cfg = state.config || {};
+  const enabled = !!cfg.enableCloud;
+  const sw = $('input-cloud');
+  if (sw && document.activeElement !== sw) sw.checked = enabled;
+  syncSwitch();
+  const on = sw ? sw.checked : enabled;
+  $('cloud-content').style.display = on ? 'flex' : 'none';
+  $('cloud-off-note').style.display = on ? 'none' : 'block';
+  $('chip-tunnel').style.display = on ? 'inline-flex' : 'none';
 
+  if (cfg.subdomain && _deletedSubdomain !== cfg.subdomain) {
+    const inp = $('input-subdomain');
+    if (!_tunnelNameTaken && inp && document.activeElement !== inp) inp.value = cfg.subdomain;     // name_taken: leave the field to the user (choose another name)
+    $('cloud-setup').style.display = _tunnelNameTaken ? 'flex' : 'none';
+    $('cloud-active').style.display = 'flex';
+    $('cloud-url').textContent = `https://${cfg.subdomain}.texacore.ai`;
+    $('cloud-url').dataset.url = `https://${cfg.subdomain}.texacore.ai`;
+    $('cloud-url').title = `https://${cfg.subdomain}.texacore.ai`;
+    // the saved subdomain may have been deleted from the cloud: verify it still resolves (cached; retried on error)
+    verifyCloudSubdomain(cfg.subdomain);
+  } else {
+    $('cloud-setup').style.display = 'flex';
+    $('cloud-active').style.display = 'none';
+    if (cfg.subdomain && _deletedSubdomain === cfg.subdomain) {
+      const warn = $('subdomain-deleted-warning');
+      if (warn) { setWithIcon(warn, 'triangle-alert', t('subdomain.deleted')); warn.style.display = 'block'; }
+      const inp = $('input-subdomain');
+      if (inp && !inp.value) { inp.value = cfg.subdomain; checkSubdomain(cfg.subdomain); }
+    }
+  }
+}
+// Verify the configured subdomain still exists. On a definitive "deleted" result, switch from the active view to setup, surface a warning and pre-fill the old name.
+async function verifyCloudSubdomain(subdomain) {
+  if (!subdomain || !window.texacore || !window.texacore.verifySubdomain) return;
+  if (_verifiedAliveSubdomain === subdomain) return;  // already confirmed — avoid a DNS lookup every poll
+  try {
+    const r = await texacore.verifySubdomain();
+    if (r && r.valid === false && r.reason === 'deleted') {
+      _verifiedAliveSubdomain = null;
+      _deletedSubdomain = subdomain;
+      $('cloud-active').style.display = 'none';
+      $('cloud-setup').style.display = 'flex';
+      const warn = $('subdomain-deleted-warning');
+      if (warn) { setWithIcon(warn, 'triangle-alert', t('subdomain.deleted')); warn.style.display = 'block'; }
+      const inp = $('input-subdomain');
+      if (inp) { inp.value = subdomain; checkSubdomain(subdomain); }
+    } else if (r && r.valid === true) {
+      _verifiedAliveSubdomain = subdomain;
+      if (_deletedSubdomain === subdomain) _deletedSubdomain = null;
+    }
+  } catch { /* network / verify error — keep the active view, retry next refresh */ }
+}
+
+// The connection status comes from the REAL connector state (main → ServiceManager.getTunnelStatus → tunnel-monitor.js): «connected» only when
+// cloudflared is running AND has logged a registered tunnel connection. 2.0.0 showed «connected» whenever the services ran, even with no cloudflared at all.
+function renderTunnelStatus(state) {
+  const el = $('tunnel-status');
+  const det = $('tunnel-detail');
+  if (!el) return;
+  const tn = state && state.tunnel;
+  let text; let color; let ico; let detail = ''; let chip = 'bad';
+  if (!state || !state.containerRunning || !tn || !tn.enabled) {
+    text = t('cloud.disconnected'); color = 'var(--danger-text)'; ico = 'circle-x';
+  } else if (tn.state === 'connected') {
+    text = t('cloud.connected'); color = 'var(--url)'; ico = 'circle-check'; chip = 'ok';
+  } else if (tn.state === 'starting') {
+    text = tn.reason === 'repairing' ? t('cloud.repairing') : tn.reason === 'verifying_route' ? t('cloud.verifying') : t('cloud.connecting'); color = 'var(--warning)'; ico = 'loader'; chip = 'warn';
+  } else if (tn.state === 'route_mismatch') {
+    text = t('cloud.st.routeMismatch'); color = 'var(--danger-text)'; ico = 'triangle-alert';
+    detail = tn.detail || '';
+  } else if (tn.state === 'connected_unverified') {
+    text = t('cloud.st.unverified'); color = 'var(--warning)'; ico = 'triangle-alert'; chip = 'warn';
+    detail = tn.detail || '';
+  } else if (tn.state === 'name_taken') {
+    text = t('cloud.st.nameTaken'); color = 'var(--danger-text)'; ico = 'triangle-alert';
+  } else if (tn.state === 'error') {
+    text = (t('cloud.err.' + tn.reason) !== 'cloud.err.' + tn.reason ? t('cloud.err.' + tn.reason) : t('cloud.disconnected')); color = 'var(--danger-text)'; ico = 'circle-x';
+    detail = tn.detail || '';
+  } else if (tn.reason === 'subdomain_deleted') {
+    text = t('cloud.off.subdomain_deleted'); color = 'var(--danger-text)'; ico = 'triangle-alert';
+  } else {
+    text = t('cloud.disconnected'); color = 'var(--danger-text)'; ico = 'circle-x';
+  }
+  // the chip carries a short word; the long reason lives in the red box below the links
+  const short = (tn && tn.enabled && state.containerRunning && ['error', 'route_mismatch', 'name_taken'].includes(tn.state)) ? t('cloud.disconnected') : text;
+  setWithIcon(el, ico, tn && tn.state === 'connected' ? text : short, 16, ico === 'loader' ? 'icon-lead spin' : 'icon-lead');
+  el.style.color = color;
+  el.dataset.tunnelState = tn ? `${tn.state}${tn.reason ? ':' + tn.reason : ''}` : 'none';
+  el.dataset.tunnelIcon = ico;
+  const chipEl = $('chip-tunnel');
+  // a stopped system is not a broken tunnel: the chip stays neutral until the system runs
+  if (chipEl) chipEl.className = 'chip chip-sm ' + (state && state.containerRunning ? chip : '');
+  if (det) { det.textContent = detail; det.style.display = detail ? 'block' : 'none'; }
+  renderTunnelFix(tn, !!(state && state.containerRunning && tn && tn.enabled), text);
+}
+
+// 2.0.2: «connected» is shown only when the public link was PROVEN to reach this computer (tunnel-route.js). When it does not (route_mismatch), cannot be verified
+// (connected_unverified) or the name belongs to an earlier licence (name_taken), the red box says why in words and offers «إصلاح الرابط». RC2: when the connector is simply
+// down (stopped, exited, a transient error) it offers «إعادة الاتصال» (the fast reconnect: same tunnel id). For a taken name the subdomain field is shown too.
+let _tunnelNameTaken = false;       // while true the setup view (the subdomain input) stays visible beside the active view
+function tunnelRepairMessage(r) {
+  if (!r || !r.outcome) return '';
+  const key = 'cloud.repair.' + r.outcome;
+  if (r.outcome === 'taken') return t(r.reason === 'quarantined' ? 'cloud.nameTakenQuarantined' : 'cloud.nameTaken');
+  if (t(key) === key) return '';
+  return t(key).replace('{min}', String(Math.max(1, Math.ceil((r.retryAfterSec || 60) / 60))));
+}
+function renderTunnelFix(tn, active, statusText) {
+  const box = $('tunnel-fix-box');
+  if (!box) return;
+  const btn = $('btn-fix-link');
+  const recon = $('btn-reconnect');
+  const msg = $('tunnel-route-msg');
+  const rep = $('tunnel-repair-msg');
+  const st = active && tn ? tn.state : null;
+  let line = '';
+  if (st === 'route_mismatch') line = t('cloud.route.' + tn.reason) !== 'cloud.route.' + tn.reason ? t('cloud.route.' + tn.reason) : t('cloud.route.no_route');
+  else if (st === 'connected_unverified') line = (t('cloud.unverified.' + tn.reason) !== 'cloud.unverified.' + tn.reason) ? t('cloud.unverified.' + tn.reason) : t('cloud.connectedUnverified');
+  else if (st === 'name_taken') line = t(tn.reason === 'quarantined' ? 'cloud.nameTakenQuarantined' : 'cloud.nameTaken');
+  else if (st === 'starting' && tn.reason === 'repairing') line = t('cloud.repairing');
+  else if (active && tn && st !== 'connected' && st !== 'starting') line = (statusText && statusText !== t('cloud.disconnected')) ? statusText : t('ui.cloud.downText');
+  const show = !!line;
+  box.style.display = show ? 'flex' : 'none';
+  if (msg) msg.textContent = line;
+  const canFix = st === 'route_mismatch' || st === 'name_taken';
+  const canReconnect = !!(active && tn && !canFix && st !== 'connected' && st !== 'starting' && st !== 'connected_unverified');
+  if (btn) { btn.style.display = canFix ? 'inline-flex' : 'none'; btn.disabled = !!(tn && tn.repairing) || _repairBusy; }
+  if (recon) { recon.style.display = canReconnect ? 'inline-flex' : 'none'; recon.disabled = _reconnectBusy; }
+  // what the last repair attempt said (kept for 10 minutes; «fixed» only while the link is fine)
+  const r = tn && tn.repair;
+  const fresh = r && (Date.now() - r.at < 10 * 60 * 1000);
+  const rtext = fresh && (r.outcome !== 'fixed' || st === 'connected') ? tunnelRepairMessage(r) : '';
+  if (rep) { rep.textContent = rtext; rep.style.display = rtext ? 'block' : 'none'; }
+  if (rtext && r.outcome === 'fixed') box.style.display = 'flex';
+  _tunnelNameTaken = st === 'name_taken';
+  const setup = $('cloud-setup');
+  if (setup && _tunnelNameTaken) setup.style.display = 'flex';
+  else if (setup && !_tunnelNameTaken && _nameTakenForcedSetup && currentState && currentState.config && currentState.config.subdomain) setup.style.display = 'none';
+  _nameTakenForcedSetup = _tunnelNameTaken;
+  box.dataset.tunnelFix = st || 'none';
+}
+let _nameTakenForcedSetup = false;
+let _repairBusy = false;
+let _reconnectBusy = false;
+async function repairTunnelLink() {
+  const btn = $('btn-fix-link');
+  const rep = $('tunnel-repair-msg');
+  if (_repairBusy || !window.texacore || !window.texacore.repairTunnelLink) return;
+  _repairBusy = true;
+  if (btn) { btn.disabled = true; setWithIcon(btn, 'loader', t('cloud.repairing'), 16, 'icon-lead spin'); }
+  try {
+    const r = await window.texacore.repairTunnelLink();
+    const text = tunnelRepairMessage(r);
+    if (rep && text) { rep.textContent = text; rep.style.display = 'block'; }
+  } catch (e) {
+    if (rep) { rep.textContent = t('cloud.repair.network'); rep.style.display = 'block'; }
+  } finally {
+    _repairBusy = false;
+    if (btn) { btn.textContent = t('cloud.fixBtn'); btn.disabled = false; }
+    refreshStatus();
+  }
+}
+// «إعادة الاتصال»: the same fast reconnect the switch does (reuse the existing tunnel token, same tunnel id)
+async function reconnectTunnel() {
+  const btn = $('btn-reconnect');
+  if (_reconnectBusy || !window.texacore || !window.texacore.setCloudAccess) return;
+  _reconnectBusy = true;
+  if (btn) { btn.disabled = true; setWithIcon(btn, 'loader', t('cloud.connecting'), 16, 'icon-lead spin'); }
+  try {
+    await window.texacore.setCloudAccess(true);
+  } catch (e) { showToast(t('cloud.toggleFailed')); }
+  _reconnectBusy = false;
+  if (btn) { btn.textContent = t('ui.cloud.reconnect'); btn.disabled = false; }
+  await refreshStatus();
+  for (const ms of [1500, 4000, 9000]) setTimeout(() => { refreshStatus(); }, ms);
+}
 async function toggleCloudView() {
   syncSwitch();
-  const isChecked = document.getElementById('input-cloud').checked;
-  document.getElementById('cloud-content').style.display = isChecked ? 'block' : 'none';
-  // Actually enable/disable cloud access — start/stop the Cloudflare tunnel NOW
-  // (not just show/hide the panel). Turning it off cuts the public subdomain.
-  const statusEl = document.getElementById('tunnel-status');
+  const isChecked = $('input-cloud').checked;
+  $('cloud-content').style.display = isChecked ? 'flex' : 'none';
+  $('cloud-off-note').style.display = isChecked ? 'none' : 'block';
+  $('chip-tunnel').style.display = isChecked ? 'inline-flex' : 'none';
+  // Actually enable/disable cloud access — start/stop the Cloudflare tunnel NOW (not just show/hide the panel). Turning it off cuts the public subdomain.
+  const statusEl = $('tunnel-status');
   try {
     if (statusEl) {
       setWithIcon(statusEl, 'loader', isChecked ? t('cloud.connecting') : t('cloud.disconnecting'), 16, 'icon-lead spin');
@@ -1033,121 +793,30 @@ async function toggleCloudView() {
     for (const ms of [1500, 4000, 9000]) setTimeout(() => { refreshStatus(); }, ms);
   } catch (e) {
     console.error('[Cloud] setCloudAccess failed:', e);
-    if (statusEl) { setWithIcon(statusEl, 'triangle-alert', t('cloud.toggleFailed')); statusEl.style.color = 'var(--danger)'; }
-  }
-}
-
-// ─── Admin portal password (بوابة الإدارة) ──────────────────
-async function saveAdminPassword() {
-  const input = document.getElementById('input-admin-password');
-  const statusEl = document.getElementById('admin-password-status');
-  const btn = document.getElementById('btn-save-admin-password');
-  const val = (input?.value || '').trim();
-  const n = adminMinLength;
-  if (val.length < n) {
-    if (statusEl) { setWithIcon(statusEl, 'triangle-alert', t('admin.tooShort').replace('{n}', n)); statusEl.style.color = 'var(--danger)'; }
-    return;
-  }
-  try {
-    if (btn) { btn.disabled = true; btn.textContent = '...'; }
-    const res = await window.texacore.setAdminPassword(val);
-    if (res && res.success) {
-      if (input) input.value = '';
-      if (statusEl) { setWithIcon(statusEl, 'circle-check', t('admin.savedOk')); statusEl.style.color = 'var(--accent)'; }
-      // Collapse the box shortly after a successful change.
-      setTimeout(() => {
-        const panel = document.getElementById('admin-password-panel');
-        if (panel) panel.style.display = 'none';
-        setChevron(false);
-      }, 1600);
-    } else {
-      const key = res && res.code ? 'admin.err.' + res.code : null;
-      const msg = key && t(key) !== key ? t(key).replace('{n}', (res && res.minLength) || adminMinLength) : ((res && res.error) || t('admin.saveFailed'));
-      if (statusEl) { setWithIcon(statusEl, 'triangle-alert', msg); statusEl.style.color = 'var(--danger)'; }
-    }
-  } catch (e) {
-    if (statusEl) { setWithIcon(statusEl, 'triangle-alert', e.message); statusEl.style.color = 'var(--danger)'; }
-  } finally {
-    if (btn) { btn.disabled = false; btn.textContent = t('common.save'); }
-  }
-}
-
-// Reflect whether a custom admin password is set (vs the license-key default).
-// The password policy has ONE source (src/admin-password.js, enforced by ServiceManager.setAdminPassword); the window only words it.
-let adminMinLength = 8;
-let adminStatus = null;
-function applyAdminPolicyTexts() {
-  const input = document.getElementById('input-admin-password');
-  if (input) input.placeholder = t('admin.placeholder').replace('{n}', adminMinLength);
-  const statusEl = document.getElementById('admin-password-status');
-  if (statusEl && adminStatus && adminStatus.success) {
-    const key = adminStatus.customized ? 'admin.statusCustom' : (adminStatus.hasDefault ? 'admin.statusDefault' : 'admin.statusNone');
-    setWithIcon(statusEl, adminStatus.customized || !adminStatus.hasDefault ? 'lock' : 'info', t(key).replace('{n}', adminMinLength));
-    statusEl.style.color = 'var(--text-muted)';
-  }
-}
-document.addEventListener('i18n-applied', applyAdminPolicyTexts);
-async function refreshAdminPasswordStatus() {
-  const statusEl = document.getElementById('admin-password-status');
-  if (!statusEl || !window.texacore?.getAdminPasswordStatus) return;
-  try {
-    const s = await window.texacore.getAdminPasswordStatus();
-    if (s && s.success) {
-      adminStatus = s;
-      if (Number.isInteger(s.minLength) && s.minLength > 0) adminMinLength = s.minLength;
-      applyAdminPolicyTexts();
-    }
-  } catch { /* ignore */ }
-}
-
-// The label of the collapsible header: text + a chevron that turns over when the box is open (the label is the inner span; the icon is kept).
-function setChevron(open) {
-  const chevron = document.getElementById('admin-password-chevron');
-  if (!chevron) return;
-  const label = chevron.querySelector('[data-i18n]');
-  if (label) { label.setAttribute('data-i18n', open ? 'admin.toggleClose' : 'admin.toggleChange'); label.textContent = t(open ? 'admin.toggleClose' : 'admin.toggleChange'); }
-  chevron.classList.toggle('chevron-open', !!open);
-}
-
-// Collapsible: the button reveals the change-password box; it hides again
-// after a successful save (or when toggled off).
-function toggleAdminPasswordPanel() {
-  const panel = document.getElementById('admin-password-panel');
-  if (!panel) return;
-  const show = !panel.style.display || panel.style.display === 'none';
-  panel.style.display = show ? 'block' : 'none';
-  setChevron(show);
-  if (show) {
-    refreshAdminPasswordStatus();
-    setTimeout(() => document.getElementById('input-admin-password')?.focus(), 50);
+    if (statusEl) { setWithIcon(statusEl, 'triangle-alert', t('cloud.toggleFailed')); statusEl.style.color = 'var(--danger-text)'; }
   }
 }
 
 let checkTimeout;
 function checkSubdomain(value) {
-  const statusEl = document.getElementById('domain-status');
-  const btn = document.getElementById('btn-register-domain');
-  
+  const statusEl = $('domain-status');
+  const btn = $('btn-register-domain');
   if (!value) {
     statusEl.textContent = t('subdomain.prompt');
-    statusEl.style.color = 'var(--text-muted)';
+    statusEl.style.color = 'var(--muted)';
     btn.disabled = true;
     return;
   }
-
-  // Basic format validation
   const cleaned = value.toLowerCase().replace(/[^a-z0-9-]/g, '');
   if (cleaned !== value || !/^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$/.test(value)) {
     setWithIcon(statusEl, 'circle-x', t('subdomain.onlyLatin'));
-    statusEl.style.color = 'var(--danger)';
+    statusEl.style.color = 'var(--danger-text)';
     btn.disabled = true;
     return;
   }
-
   setWithIcon(statusEl, 'loader', t('subdomain.checking'), 16, 'icon-lead spin');
   statusEl.style.color = 'var(--warning)';
   btn.disabled = true;
-
   clearTimeout(checkTimeout);
   checkTimeout = setTimeout(async () => {
     try {
@@ -1157,21 +826,20 @@ function checkSubdomain(value) {
         body: JSON.stringify({ subdomain: value })
       });
       const data = await res.json();
-
       if (data.available) {
         setWithIcon(statusEl, 'circle-check', t('subdomain.available'));
-        statusEl.style.color = 'var(--accent)';
+        statusEl.style.color = 'var(--url)';
         btn.disabled = false;
       } else {
         const reason = data.reason === 'reserved' ? t('subdomain.reservedName') :
                        data.reason === 'taken' ? t('subdomain.taken') :
                        data.reason === 'invalid_format' ? t('subdomain.badFormat') : t('subdomain.unavailable');
         setWithIcon(statusEl, 'circle-x', reason);
-        statusEl.style.color = 'var(--danger)';
+        statusEl.style.color = 'var(--danger-text)';
         btn.disabled = true;
       }
     } catch (err) {
-      // Offline fallback — allow registration (server will validate)
+      // offline fallback — allow registration (the server validates)
       setWithIcon(statusEl, 'triangle-alert', t('subdomain.checkFailed'));
       statusEl.style.color = 'var(--warning)';
       btn.disabled = false;
@@ -1180,60 +848,553 @@ function checkSubdomain(value) {
 }
 
 async function registerSubdomain() {
-  const input = document.getElementById('input-subdomain');
-  const btn = document.getElementById('btn-register-domain');
-  const statusEl = document.getElementById('domain-status');
-  
+  const input = $('input-subdomain');
+  const btn = $('btn-register-domain');
+  const statusEl = $('domain-status');
   if (!input.value) return;
-
   btn.disabled = true;
   setWithIcon(btn, 'loader', t('subdomain.reserving'), 16, 'spin');
-
   try {
     const result = await window.texacore.registerSubdomain(input.value);
-    
     if (result.success) {
       if (!currentState.config) currentState.config = {};
       currentState.config.subdomain = input.value;
       currentState.config.enableCloud = true;
-
-      // Just registered → clear any "deleted" state and trust it as alive
-      // (the new DNS record may take a moment to propagate; don't re-verify and
-      // bounce back to setup). Hide the deletion warning if it was showing.
+      // just registered → clear any "deleted" state and trust it as alive (the new DNS record may take a moment to propagate)
       _deletedSubdomain = null;
       _verifiedAliveSubdomain = input.value;
-      const delWarn = document.getElementById('subdomain-deleted-warning');
+      const delWarn = $('subdomain-deleted-warning');
       if (delWarn) delWarn.style.display = 'none';
-
-      document.getElementById('cloud-setup').style.display = 'none';
-      document.getElementById('cloud-active').style.display = 'block';
-      document.getElementById('cloud-url').textContent = result.url || `https://${input.value}.texacore.ai`;
+      $('cloud-setup').style.display = 'none';
+      $('cloud-active').style.display = 'flex';
+      $('cloud-url').textContent = result.url || `https://${input.value}.texacore.ai`;
       renderLinks(currentState);
-
-      alert(t('subdomain.reserved'));
+      btn.textContent = t('subdomain.registerBtn');
+      showToast(t('subdomain.reserved'), 5000);
     } else {
       setWithIcon(statusEl, 'circle-x', result.error);
-      statusEl.style.color = 'var(--danger)';
+      statusEl.style.color = 'var(--danger-text)';
       btn.textContent = t('subdomain.registerNow');
       btn.disabled = false;
     }
   } catch (err) {
     setWithIcon(statusEl, 'circle-x', err.message);
-    statusEl.style.color = 'var(--danger)';
+    statusEl.style.color = 'var(--danger-text)';
     btn.textContent = t('subdomain.registerNow');
     btn.disabled = false;
   }
 }
 
-// ─── Enter key support ──────────────────────────────────────
-document.addEventListener('keydown', (e) => {
-  if (e.key === 'Enter') {
-    const activePanel = document.querySelector('.panel[style*="display: block"], .panel:not([style*="display: none"])');
-    if (activePanel?.id === 'panel-license') {
-      activateLicense();
-    }
+// ─── Admin portal password (بوابة الإدارة) — a dialog ───────
+async function saveAdminPassword() {
+  const input = $('input-admin-password');
+  const statusEl = $('admin-password-status');
+  const btn = $('btn-save-admin-password');
+  const val = (input && input.value || '').trim();
+  const n = adminMinLength;
+  if (val.length < n) {
+    if (statusEl) { setWithIcon(statusEl, 'triangle-alert', t('admin.tooShort').replace('{n}', n)); statusEl.style.color = 'var(--danger-text)'; }
+    return;
   }
-});
+  try {
+    if (btn) { btn.disabled = true; btn.textContent = '...'; }
+    const res = await window.texacore.setAdminPassword(val);
+    if (res && res.success) {
+      if (input) input.value = '';
+      if (statusEl) { setWithIcon(statusEl, 'circle-check', t('admin.savedOk')); statusEl.style.color = 'var(--url)'; }
+      // close the dialog shortly after a successful change
+      setTimeout(() => { const ov = $('overlay-password'); if (ov && ov.style.display === 'flex') toggleAdminPasswordPanel(); }, 1600);
+    } else {
+      const key = res && res.code ? 'admin.err.' + res.code : null;
+      const msg = key && t(key) !== key ? t(key).replace('{n}', (res && res.minLength) || adminMinLength) : ((res && res.error) || t('admin.saveFailed'));
+      if (statusEl) { setWithIcon(statusEl, 'triangle-alert', msg); statusEl.style.color = 'var(--danger-text)'; }
+    }
+  } catch (e) {
+    if (statusEl) { setWithIcon(statusEl, 'triangle-alert', e.message); statusEl.style.color = 'var(--danger-text)'; }
+  } finally {
+    if (btn) { btn.disabled = false; btn.textContent = t('common.save'); }
+  }
+}
+
+// The password policy has ONE source (src/admin-password.js, enforced by ServiceManager.setAdminPassword); the window only words it.
+let adminMinLength = 8;
+let adminStatus = null;
+function applyAdminPolicyTexts() {
+  const input = $('input-admin-password');
+  if (input) input.placeholder = t('admin.placeholder').replace('{n}', adminMinLength);
+  const statusEl = $('admin-password-status');
+  if (statusEl && adminStatus && adminStatus.success) {
+    const key = adminStatus.customized ? 'admin.statusCustom' : (adminStatus.hasDefault ? 'admin.statusDefault' : 'admin.statusNone');
+    setWithIcon(statusEl, adminStatus.customized || !adminStatus.hasDefault ? 'lock' : 'info', t(key).replace('{n}', adminMinLength));
+    statusEl.style.color = 'var(--muted)';
+  }
+}
+document.addEventListener('i18n-applied', applyAdminPolicyTexts);
+async function refreshAdminPasswordStatus() {
+  const statusEl = $('admin-password-status');
+  if (!statusEl || !window.texacore || !window.texacore.getAdminPasswordStatus) return;
+  try {
+    const s = await window.texacore.getAdminPasswordStatus();
+    if (s && s.success) {
+      adminStatus = s;
+      if (Number.isInteger(s.minLength) && s.minLength > 0) adminMinLength = s.minLength;
+      applyAdminPolicyTexts();
+    }
+  } catch { /* ignore */ }
+}
+// «تغيير كلمة مرور البوابة» opens the dialog; the same call closes it (Esc too)
+function toggleAdminPasswordPanel() {
+  const overlay = $('overlay-password');
+  if (!overlay) return;
+  const show = overlay.style.display !== 'flex';
+  overlay.style.display = show ? 'flex' : 'none';
+  if (show) {
+    refreshAdminPasswordStatus();
+    setTimeout(() => { const i = $('input-admin-password'); if (i) i.focus(); }, 50);
+  } else {
+    const b = $('btn-toggle-admin-password'); if (b) b.focus();
+  }
+}
+
+// ─── Licence tab ─────────────────────────────────────────────
+let _licensePanelOpen = false;     // «إدخال مفتاح»: the activation form shown over an active licence
+function renderLicense(state) {
+  const lv = licenseView(state);
+  const has = !!state.hasLicense;
+  const li = state.licenseInfo;
+  const showPanel = !has || _licensePanelOpen;
+  $('panel-license').style.display = showPanel ? 'flex' : 'none';
+  $('license-active').style.display = (has && !_licensePanelOpen) ? 'flex' : 'none';
+  $('license-actions').style.display = showPanel ? 'none' : 'flex';
+  $('btn-cancel-license').style.display = (has && _licensePanelOpen) ? 'inline-block' : 'none';
+  $('license-expired-note').style.display = has ? 'none' : 'flex';
+  if (!has && state.config && state.config.licenseKey && document.activeElement !== $('input-license') && !$('input-license').value) $('input-license').value = state.config.licenseKey;
+
+  // tier chip
+  const chip = $('badge-tier-chip'); const tier = $('badge-tier');
+  let chipCls = 'chip chip-sm push'; let tierText = '';
+  if (lv.kind === 'trial') { chipCls += ' warn'; tierText = t('ui.tier.trial'); }
+  else if (lv.kind === 'free') { chipCls += ' ok'; tierText = t('ui.tier.free'); }
+  else if (lv.kind === 'expired' || lv.kind === 'none') { chipCls += ' bad'; tierText = lv.kind === 'expired' ? t('ui.chip.expired') : t('status.inactive'); }
+  else { chipCls += ' ok'; tierText = String(lv.tier || 'PRO').toUpperCase(); }
+  if (chip) chip.className = chipCls;
+  if (tier) tier.textContent = tierText;
+
+  // days left + bar + the sentence
+  const days = $('badge-days'); const exp = $('badge-expires'); const meter = $('license-meter'); const fill = $('license-meter-fill'); const desc = $('license-desc');
+  if (lv.kind === 'free' || lv.kind === 'paid-open') {
+    days.textContent = t('license.neverExpires'); exp.textContent = '';
+    meter.style.display = 'none';
+    desc.textContent = lv.kind === 'free' ? t('ui.license.freeDesc') : t('ui.license.paidDesc');
+  } else if (lv.daysLeft !== null && li) {
+    const n = Math.max(0, lv.daysLeft);
+    days.textContent = fillText(lv.kind === 'trial' ? t('ui.license.daysLeftOf') : t('ui.license.daysLeft'), { n, d: daysWord(n), total: lv.total });
+    exp.textContent = `${t('ui.license.ends')} ${fmtDate(new Date(lv.expires), { day: 'numeric', month: 'long', year: 'numeric' })}`;
+    meter.style.display = 'block';
+    const used = Math.max(0, Math.min(100, Math.round(((lv.total - n) / lv.total) * 100)));
+    fill.style.width = used + '%';
+    fill.className = 'meter-fill' + (n <= 3 ? ' bad' : (lv.kind === 'trial' ? '' : ' ok'));
+    meter.setAttribute('aria-label', fillText(t('ui.license.meterAria'), { used: lv.total - n, total: lv.total }));
+    desc.textContent = lv.kind === 'trial' ? t('ui.license.trialDesc') : t('ui.license.paidDesc');
+  } else {
+    days.textContent = '—'; exp.textContent = ''; meter.style.display = 'none'; desc.textContent = '';
+  }
+  // the support code = the full licence key (for fast support / activation / extension)
+  const codeEl = $('support-code');
+  if (codeEl && li && li.license_key) { codeEl.textContent = li.license_key; codeEl.title = li.license_key; }
+}
+// kept under its old name: the support card and the tests refer to the licence row by it
+function updateControlPanel(state) { renderState(state); }
+
+// Copy the support code (licence key) to the clipboard, with a fallback.
+function copySupportCode() {
+  const code = (($('support-code') && $('support-code').textContent) || '').trim();
+  if (!code || code === '—') return;
+  const flash = () => {
+    const btn = $('btn-copy-key');
+    if (btn) { btn.textContent = t('common.copied'); btn.classList.add('copied'); setTimeout(() => { btn.textContent = t('common.copy'); btn.classList.remove('copied'); }, 1500); }
+  };
+  if (navigator.clipboard && navigator.clipboard.writeText) navigator.clipboard.writeText(code).then(flash).catch(() => fallbackCopy(code, flash));
+  else fallbackCopy(code, flash);
+}
+function fallbackCopy(text, done) {
+  try {
+    const ta = document.createElement('textarea');
+    ta.value = text; ta.style.position = 'fixed'; ta.style.opacity = '0';
+    document.body.appendChild(ta); ta.select();
+    document.execCommand('copy'); document.body.removeChild(ta);
+    if (done) done();
+  } catch { /* ignore */ }
+}
+
+function showLicensePanel() {
+  _licensePanelOpen = true;
+  renderState(currentState);
+  const i = $('input-license'); if (i) i.focus();
+}
+function hideLicensePanel() { _licensePanelOpen = false; renderState(currentState); }
+
+async function activateLicense() {
+  const input = $('input-license');
+  const btn = $('btn-activate');
+  const feedback = $('feedback-license');
+  const key = input.value.trim();
+  if (!key) {
+    feedback.className = 'feedback error';
+    feedback.textContent = t('license.errNoKey');
+    input.focus();
+    return;
+  }
+  btn.disabled = true;
+  setWithIcon(btn, 'loader', t('license.activating'), 16, 'icon-lead spin');
+  feedback.className = 'feedback loading';
+  feedback.textContent = t('license.connectingLicense');
+  try {
+    const result = await texacore.activateLicense(key);
+    if (result.success) {
+      feedback.className = 'feedback success';
+      feedback.textContent = `${t('license.activatedOk')} ${result.license.tier} — ${t('license.expiresPrefix')} ${new Date(result.license.expires_at).toLocaleDateString()}`;
+      _licensePanelOpen = false;
+      await restartSystemForLicense();       // every licence change is paired with a real stop → start so the new plan applies with no stale state
+    } else {
+      feedback.className = 'feedback error';
+      feedback.textContent = `${t('license.activateFailed')} ${result.error}`;
+    }
+  } catch (err) {
+    feedback.className = 'feedback error';
+    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
+  }
+  btn.disabled = false;
+  btn.textContent = t('license.activateBtn');
+}
+
+async function startTrial() {
+  const btn = $('btn-trial');
+  const feedback = $('feedback-license');
+  btn.disabled = true;
+  setWithIcon(btn, 'loader', t('trial.creating'), 16, 'icon-lead spin');
+  feedback.className = 'feedback loading';
+  feedback.textContent = t('trial.connecting');
+  try {
+    const result = await texacore.startTrial();
+    if (result.success) {
+      feedback.className = 'feedback success';
+      feedback.textContent = result.existing ? t('trial.alreadyHave') : t('trial.activated');
+      _licensePanelOpen = false;
+      await restartSystemForLicense();
+    } else {
+      feedback.className = 'feedback error';
+      feedback.textContent = `${result.error}`;
+    }
+  } catch (err) {
+    feedback.className = 'feedback error';
+    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
+  }
+  btn.disabled = false;
+  btn.textContent = t('license.trialBtn');
+}
+
+async function startFree() {
+  const btn = $('btn-free');
+  const feedback = $('feedback-license');
+  btn.disabled = true;
+  setWithIcon(btn, 'loader', t('free.creating'), 16, 'icon-lead spin');
+  feedback.className = 'feedback loading';
+  feedback.textContent = t('free.activating');
+  try {
+    const result = await texacore.startFree();
+    if (result.success) {
+      feedback.className = 'feedback success';
+      feedback.textContent = t('free.activated');
+      _licensePanelOpen = false;
+      await restartSystemForLicense();
+    } else {
+      feedback.className = 'feedback error';
+      feedback.textContent = `${result.error}`;
+    }
+  } catch (err) {
+    feedback.className = 'feedback error';
+    feedback.textContent = `${t('common.errorPrefix')} ${err.message}`;
+  }
+  btn.disabled = false;
+  btn.textContent = t('license.freeBtn');
+}
+
+// ─── Support card: version, port (advanced), updates, the run log ───────────
+let _portDirty = false;
+function renderSupport(state) {
+  const cfgPort = state.config && parseInt(state.config.port, 10);
+  const input = $('input-port');
+  if (input && cfgPort && !_portDirty && document.activeElement !== input) input.value = cfgPort;
+  onPortChange(true);
+}
+// editing the port while the system runs: it only takes effect after a restart - say so and offer it
+function onPortChange(fromRender) {
+  const input = $('input-port');
+  if (!input) return;
+  const running = !!(currentState && currentState.containerRunning);
+  const cfgPort = currentState && currentState.config && parseInt(currentState.config.port, 10);
+  const val = parseInt(input.value, 10);
+  if (!fromRender) _portDirty = !!val && val !== cfgPort;
+  const valid = Number.isInteger(val) && val >= 1 && val <= 65535;
+  const changed = valid && !!cfgPort && val !== cfgPort;
+  $('btn-apply-port').style.display = (running && changed) ? 'inline-flex' : 'none';
+  const hint = $('port-hint');
+  hint.style.display = (changed || !valid) ? 'block' : 'none';
+  hint.textContent = !valid ? t('ui.port.invalid') : (running ? t('ui.port.hint') : t('ui.port.hintStopped'));
+}
+async function applyPortChange() {
+  const input = $('input-port');
+  const val = parseInt(input.value, 10);
+  if (!(Number.isInteger(val) && val >= 1 && val <= 65535)) { onPortChange(); return; }
+  $('btn-apply-port').disabled = true;
+  _portDirty = false;
+  await restartServices({ port: val });
+  $('btn-apply-port').disabled = false;
+  onPortChange(true);
+}
+async function checkForUpdateNow() {
+  const out = $('update-check-result');
+  const btn = $('btn-check-update');
+  if (btn) btn.disabled = true;
+  if (out) out.textContent = t('ui.update.checking');
+  try {
+    const r = await texacore.checkForUpdate();
+    if (out) out.textContent = r && r.available ? fillText(t('ui.update.found'), { v: r.version || '' }) : t('ui.update.none');
+  } catch { if (out) out.textContent = t('ui.update.failed'); }
+  if (btn) btn.disabled = false;
+  setTimeout(() => { if (out) out.textContent = ''; }, 8000);
+}
+async function openRunLog() {
+  try { const r = await texacore.openRunLog(); if (r && !r.success) showToast(r.error || t('ui.support.logFailed')); }
+  catch (e) { showToast(e.message); }
+}
+
+// ─── Files tab ───────────────────────────────────────────────
+// «Where is my data» (2.0.5): the ONE live company file, with «show in Finder», when it was last in step, a failure that stays visible, «sync now»,
+// «change location», the newest backups and «backup now». Text only goes in through textContent (a path is data, never markup).
+function liveFileView(st, companyCount) {
+  const live = st && typeof st.liveFile === 'string' && st.liveFile ? st.liveFile : '';
+  if (!live) return null;
+  const primary = ((st && st.targets) || []).find((x) => x.role === 'primary') || null;
+  const n = Number.isFinite(companyCount) ? companyCount : 0;
+  const planned = Number(st && st.plannedCompanies) || 0;
+  return {
+    path: live,
+    label: n > 1 ? t('live.many').replace('{n}', String(n)) : t('live.single'),
+    note: planned > 0 ? t('live.planned').replace('{n}', String(planned)) : (primary && primary.exists === false && !primary.lastSuccess ? t('live.notYet') : ''),
+    canReveal: !!(primary && primary.exists),
+  };
+}
+// iCloud Drive and Documents are the two places the default no longer uses: a file there keeps its notice (iCloud may not keep it on this computer;
+// macOS may ask for the Documents permission again after an update)
+function pathArea(p) {
+  const s = String(p || '').replace(/\\/g, '/');
+  if (/\/Library\/Mobile Documents\//i.test(s) || /\/iCloud Drive\//i.test(s)) return 'icloud';
+  if (/\/Documents(\/|$)/i.test(s)) return 'documents';
+  return null;
+}
+function renderLiveFile(st) {
+  const v = liveFileView(st, typeof _empCompanies !== 'undefined' ? _empCompanies.length : 0);
+  const pathEl = $('live-file-path');
+  const label = $('live-file-label');
+  const btn = $('btn-live-file-show');
+  const noteEl = $('live-file-note');
+  const area = $('files-icloud');
+  const def = $('files-default-note');
+  if (!pathEl) return;
+  if (!v) {
+    pathEl.textContent = '—'; pathEl.title = '';
+    if (btn) btn.disabled = true;
+    if (area) area.style.display = 'none';
+    if (def) def.style.display = 'flex';
+    return;
+  }
+  label.textContent = _empCompanies.length > 1 ? fillText(t('ui.files.descMany'), { n: _empCompanies.length }) : t('ui.files.desc');
+  pathEl.textContent = v.path; pathEl.title = v.path;
+  noteEl.textContent = v.note; noteEl.style.display = v.note ? 'block' : 'none';
+  $('live-file-show-label').textContent = bkRevealLabel();
+  btn.disabled = !v.canReveal;
+  btn.onclick = () => { window.texacore.revealBackup(v.path); };
+  const a = pathArea(v.path);
+  if (area) { area.textContent = a === 'icloud' ? t('bk.cloudICloud') : a === 'documents' ? t('ui.files.documentsNote') : ''; area.style.display = a ? 'block' : 'none'; }
+  if (def) def.style.display = a ? 'none' : 'flex';
+}
+document.addEventListener('i18n-applied', () => { try { if (typeof _lastBackupStatus !== 'undefined' && _lastBackupStatus) renderLiveFile(_lastBackupStatus); renderSyncChip(_lastBackupStatus); renderRecentBackups(_lastRecent); } catch { /* ignore */ } });
+let _lastBackupStatus = null;
+let _lastRecent = null;
+function bkAgo(iso) {
+  if (!iso) return t('bk.never');
+  const secs = Math.max(0, Math.floor((Date.now() - new Date(iso).getTime()) / 1000));
+  if (secs < 60) return t('bk.justNow');
+  if (secs < 3600) return t('bk.minutesAgo').replace('{n}', String(Math.floor(secs / 60)));
+  if (secs < 86400) return t('bk.hoursAgo').replace('{n}', String(Math.floor(secs / 3600)));
+  return t('bk.daysAgo').replace('{n}', String(Math.floor(secs / 86400)));
+}
+function bkRevealLabel() { return t('ui.files.show'); }
+function renderSyncChip(st) {
+  const chip = $('sync-chip'), dot = $('sync-dot'), text = $('sync-text');
+  if (!chip) return;
+  const tg = ((st && st.targets) || []).find((x) => x.role === 'primary') || ((st && st.targets) || [])[0];
+  let cls = 'chip chip-sm push', d = 'dot', tx = '—';
+  if (!tg) { tx = t('ui.sync.none'); }
+  else if (tg.state === 'error') { cls += ' bad'; d += ' red'; tx = t('ui.sync.failed'); }
+  else if (tg.state === 'syncing') { cls += ' warn'; d += ' blue'; tx = t('bk.syncing'); }
+  else if (tg.state === 'pending') { d += ' yellow'; tx = t('bk.pending'); }
+  else { cls += ' ok'; d += ' green'; tx = t('bk.last').replace('{ago}', bkAgo(tg.lastSuccess)); }
+  chip.className = cls; dot.className = d; text.textContent = tx;
+}
+let _bkRefreshing = false;
+let _bkBusy = false;
+async function refreshBackupsBox() {
+  if (_bkRefreshing) return;
+  _bkRefreshing = true;
+  try {
+    const st = await window.texacore.backupStatus();
+    _lastBackupStatus = st;
+    renderLiveFile(st);
+    renderSyncChip(st);
+    const targets = (st && st.targets) || [];
+    // a visible warning once it keeps failing (or any target is failing) - the reason in words
+    const warn = $('bk-warn');
+    const failing = targets.filter((x) => x.state === 'error');
+    if (failing.length) {
+      const first = failing[0];
+      warn.textContent = t('bk.failed').replace('{reason}', t('bk.r.' + ((first.error && first.error.reason) || 'unknown')));
+      warn.style.display = 'flex';
+    } else { warn.style.display = 'none'; }
+    const btn = $('btn-bk-now');
+    if (btn && !_bkBusy) btn.disabled = !!st.running;
+    const mv = $('btn-move-file');
+    if (mv && !_moveBusy) mv.disabled = !(st && st.liveFile);
+  } catch { /* services may be down */ } finally { _bkRefreshing = false; }
+}
+async function syncBackupsNow() {
+  if (_bkBusy) return;
+  _bkBusy = true;
+  const btn = $('btn-bk-now');
+  if (btn) { btn.disabled = true; btn.textContent = t('bk.syncing'); }
+  try { await window.texacore.backupNow(); } catch { /* the chip shows the error from the status */ }
+  _bkBusy = false;
+  if (btn) { btn.disabled = false; btn.textContent = t('bk.syncNow'); }
+  await refreshBackupsBox();
+}
+
+// the newest backups: kind · when · size · «show»
+function backupWhen(ms) {
+  const d = new Date(ms);
+  const now = new Date();
+  const sameDay = (a, b) => a.getFullYear() === b.getFullYear() && a.getMonth() === b.getMonth() && a.getDate() === b.getDate();
+  const y = new Date(now.getTime() - 86400000);
+  const hm = fmtDate(d, { hour: '2-digit', minute: '2-digit', hourCycle: 'h23' });
+  if (sameDay(d, now)) return `${t('ui.when.today')} ${hm}`;
+  if (sameDay(d, y)) return `${t('ui.when.yesterday')} ${hm}`;
+  return `${fmtDate(d, { day: 'numeric', month: 'long' })} ${hm}`;
+}
+function renderRecentBackups(r) {
+  const list = $('bk-list');
+  if (!list) return;
+  list.textContent = '';
+  const items = (r && r.items) || [];
+  $('bk-empty').style.display = items.length ? 'none' : 'block';
+  for (const it of items) {
+    const row = document.createElement('div'); row.className = 'row'; row.dataset.kind = it.kind;
+    const when = document.createElement('span'); when.className = 'row-main'; when.textContent = backupWhen(it.mtimeMs);
+    const meta = document.createElement('span'); meta.className = 'muted';
+    meta.textContent = `${t('ui.bk.kind.' + it.kind)} · ${fmtMB(it.size)}`;
+    const show = document.createElement('button'); show.type = 'button'; show.className = 'linkbtn';
+    show.textContent = t('ui.files.show');
+    show.addEventListener('click', () => { window.texacore.revealBackup(it.path); });
+    row.append(when, meta, show);
+    list.appendChild(row);
+  }
+}
+async function refreshRecentBackups() {
+  try {
+    const r = await window.texacore.listBackups(3);
+    _lastRecent = r;
+    renderRecentBackups(r);
+  } catch { /* ignore */ }
+}
+async function createBackupNow() {
+  const btn = $('btn-backup-now');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  btn.textContent = t('bk.syncing');
+  try {
+    const r = await window.texacore.createBackup();
+    if (r && r.success) showToast(fillText(t('ui.bk.done'), { size: fmtMB(r.size) }));
+    else showToast(r && r.code === 'SERVICES_DOWN' ? t('ui.bk.needsSystem') : fillText(t('ui.bk.failed'), { e: (r && r.error) || '?' }), 5000);
+  } catch (e) { showToast(fillText(t('ui.bk.failed'), { e: e.message }), 5000); }
+  btn.disabled = false;
+  btn.textContent = t('ui.bk.now');
+  refreshRecentBackups();
+}
+
+// «تغيير المكان»: the main process copies the live file to a folder the owner picks, verifies the copy, switches to it and KEEPS the old file
+let _moveBusy = false;
+async function moveLiveFile() {
+  if (_moveBusy) return;
+  const out = $('move-result');
+  if (!window.texacore.moveLiveFile) { out.textContent = t('ui.move.unavailable'); out.style.display = 'block'; return; }
+  _moveBusy = true;
+  const btn = $('btn-move-file');
+  btn.disabled = true;
+  out.style.display = 'block'; out.textContent = t('ui.move.working');
+  try {
+    const r = await window.texacore.moveLiveFile();
+    if (r && r.success) {
+      out.textContent = fillText(t('ui.move.done'), { to: r.to, from: r.from });
+      refreshBackupsBox();
+    } else if (r && r.canceled) {
+      out.textContent = '';
+    } else {
+      const key = 'ui.move.err.' + ((r && r.code) || 'unknown');
+      out.textContent = (t(key) !== key ? t(key) : fillText(t('ui.move.err.unknown'), { e: (r && r.error) || '?' }));
+    }
+  } catch (e) { out.textContent = fillText(t('ui.move.err.unknown'), { e: e.message }); }
+  _moveBusy = false;
+  btn.disabled = false;
+}
+
+// «فتح ملف…» (red zone): pick in the OS window, then open through the replace-all gate (the main process takes the pre-open backup)
+async function pickAndOpenCompanyFile() {
+  const st = $('open-file-status');
+  const btn = $('btn-open-file');
+  if (btn.disabled) return;
+  btn.disabled = true;
+  st.className = 'note'; st.textContent = '';
+  try {
+    const p = await window.texacore.pickCompanyFile();
+    if (!p || !p.success) {
+      if (p && !p.canceled) { st.className = 'note err'; st.textContent = fillText(t('upgrade.failed'), { e: p.error || '?' }); }
+      btn.disabled = false;
+      return;
+    }
+    st.textContent = fillText(t('ui.open.picked'), { name: p.name });
+    await openPickedFile(false, st);
+  } catch (e) { st.textContent = fillText(t('upgrade.failed'), { e: e.message }); }
+  btn.disabled = false;
+}
+async function openPickedFile(confirmed, st) {
+  let r;
+  try { r = await window.texacore.openPickedCompanyFile(confirmed ? { confirmReplaceAll: true } : undefined); } catch (e) { r = { success: false, error: e.message }; }
+  if (r && !r.success && r.code === 'REPLACE_ALL_CONFIRM_REQUIRED') {
+    // nothing was touched: ask, and only an explicit yes calls again (the main process then saves a backup of the current companies first)
+    if (await askReplaceAll(r)) { st.textContent = t('upgrade.opening'); return openPickedFile(true, st); }
+    st.textContent = t('ui.open.canceled');
+    return;
+  }
+  if (r && r.success) {
+    const n = r.copyErrors || 0;
+    st.textContent = n ? fillText(t('upgrade.doneWithErrors'), { n, f: r.copyErrorsLog || '' }) : fillText(t('upgrade.done'), { c: r.companyName || '' });
+    _empLast = 0;
+    try { await refreshState(); await refreshEmployeesBox(currentState); } catch { /* ignore */ }
+    refreshRecentBackups();
+  } else {
+    st.textContent = (r && r.code === 'LEGACY_TCDB') ? t('upgrade.legacyRefused') : fillText(t('upgrade.failed'), { e: (r && r.error) || '?' });
+  }
+}
 
 // ─── OTA Update Widget ───────────────────────────────────────
 // Shows the automatic update from "found" to "ready", driven by the main process: 'update-status' carries the detailed download status
@@ -1425,8 +1586,6 @@ document.addEventListener('keydown', (e) => {
   });
 })();
 
-
-// ─── One-time upgrade notice ──────────────────────────────────
 // ─── Replace-all confirmation (2.0.5) ───────────────────────────────────────────────────────────────────────────────────────
 // Opening a company file REPLACES every company of this computer, for every user. The main process refuses (REPLACE_ALL_CONFIRM_REQUIRED + the list + the connected
 // sessions) until the window has asked; «Cancel» is the focused default and Escape. Resolves true only on the explicit «Yes, replace».
@@ -1444,7 +1603,8 @@ function replaceConfirmView(info) {
 function askReplaceAll(info) {
   return new Promise((resolve) => {
     const box = document.getElementById('replace-confirm');
-    if (!box) { resolve(false); return; }
+    const overlay = document.getElementById('overlay-replace');
+    if (!box || !overlay) { resolve(false); return; }
     const v = replaceConfirmView(info);
     document.getElementById('replace-confirm-text').textContent = v.text;
     document.getElementById('replace-confirm-companies-title').textContent = v.companiesTitle;
@@ -1455,12 +1615,12 @@ function askReplaceAll(info) {
     document.getElementById('replace-confirm-sessions').textContent = v.sessions;
     const yes = document.getElementById('btn-replace-yes');
     const no = document.getElementById('btn-replace-cancel');
-    const done = (answer) => { box.style.display = 'none'; yes.onclick = null; no.onclick = null; document.removeEventListener('keydown', onKey, true); resolve(answer); };
+    const done = (answer) => { overlay.style.display = 'none'; yes.onclick = null; no.onclick = null; document.removeEventListener('keydown', onKey, true); resolve(answer); };
     const onKey = (e) => { if (e.key === 'Escape') { e.preventDefault(); done(false); } };
     yes.onclick = () => done(true);
     no.onclick = () => done(false);
     document.addEventListener('keydown', onKey, true);
-    box.style.display = 'block';
+    overlay.style.display = 'flex';
     try { no.focus(); } catch { /* not focusable yet */ }
   });
 }
@@ -1470,7 +1630,8 @@ function askReplaceAll(info) {
 // which only acts on what the notice itself lists.
 (function initUpgradeNotice() {
   const box = document.getElementById('upgrade-notice');
-  if (!box || !window.texacore || !window.texacore.getUpgradeNotice) return;
+  const overlay = document.getElementById('overlay-upgrade');
+  if (!box || !overlay || !window.texacore || !window.texacore.getUpgradeNotice) return;
   const el = (id) => document.getElementById(id);
   let note = null;
   let busy = false;
@@ -1479,7 +1640,8 @@ function askReplaceAll(info) {
   function setStatus(text, cls) { const st = el('upgrade-status'); st.textContent = text || ''; st.className = 'upgrade-status' + (cls ? ' ' + cls : ''); }
 
   function render() {
-    if (!note) { box.style.display = 'none'; return; }
+    if (!note) { box.style.display = 'none'; overlay.style.display = 'none'; return; }
+    overlay.style.display = 'flex';
     box.style.display = 'block';
     el('upgrade-line-a').textContent = t('upgrade.a').replace('{v}', 'v' + (note.appVersion || ''));
     el('upgrade-folder').textContent = note.folder || '';
@@ -1496,7 +1658,7 @@ function askReplaceAll(info) {
       const pa = document.createElement('div'); pa.className = 'upgrade-file-path'; pa.textContent = f.path; pa.title = f.path;
       info.append(nm, pa); li.append(info);
       if (f.exists) {
-        const b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-ghost'; setWithIcon(b, 'folder-open', t('upgrade.open'), 16, ''); b.disabled = busy;
+        const b = document.createElement('button'); b.type = 'button'; b.className = 'btn btn-sm'; setWithIcon(b, 'folder-open', t('upgrade.open'), 16, ''); b.disabled = busy;
         b.dataset.path = f.path; b.addEventListener('click', () => openFile(f.path));
         li.append(b);
       } else {

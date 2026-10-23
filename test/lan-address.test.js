@@ -158,3 +158,33 @@ test('main.js uses this picker (not the first non-internal address of any interf
   assert.match(body, /lanAddressProvider\.get\(\)/);
   assert.doesNotMatch(body, /for \(const devName in interfaces\)/);
 });
+
+// ── 2.0.5 RC2: the launcher's «network address» picker ──
+const { listLanCandidates, createLanAddressProvider } = L;
+const PICK_IFACES = {
+  lo0: [{ address: '127.0.0.1', family: 'IPv4', internal: true }],
+  utun9: [{ address: '12.1.1.4', family: 'IPv4' }],
+  en1: [{ address: '10.0.0.7', family: 'IPv4' }],
+  en0: [{ address: '192.168.1.5', family: 'IPv4' }, { address: 'fe80::1', family: 'IPv6' }, { address: '169.254.3.3', family: 'IPv4' }],
+};
+
+test('listLanCandidates: usable IPv4 only, physical adapters first, tunnels last and marked', () => {
+  const l = listLanCandidates(PICK_IFACES);
+  assert.deepEqual(l.map((c) => c.address), ['192.168.1.5', '10.0.0.7', '12.1.1.4']);
+  assert.deepEqual(l.map((c) => c.virtual), [false, false, true]);
+  assert.deepEqual(listLanCandidates({}), []);
+});
+
+test('the provider keeps the automatic pick unless the owner chose an address that still exists; info() says which', () => {
+  const mk = (override) => createLanAddressProvider({ networkInterfaces: () => PICK_IFACES, platform: 'linux', detect: () => Promise.resolve(null), getOverride: () => override });
+  const auto = mk(null);
+  assert.equal(auto.get(), '192.168.1.5');
+  assert.equal(auto.info().auto, true);
+  const chosen = mk('10.0.0.7');
+  assert.equal(chosen.get(), '10.0.0.7');
+  assert.deepEqual({ a: chosen.info().address, i: chosen.info().iface, auto: chosen.info().auto }, { a: '10.0.0.7', i: 'en1', auto: false });
+  const gone = mk('172.16.9.9');                            // the chosen address left this machine (another network): back to the automatic pick
+  assert.equal(gone.get(), '192.168.1.5');
+  assert.equal(gone.info().auto, true);
+  assert.equal(gone.info().candidates.length, 3);
+});
