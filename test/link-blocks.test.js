@@ -302,3 +302,10 @@ test('the cloud card carries the agreed security help line (muted, wrapping, an 
   assert.match(css, /\.help \{[^}]*color: var\(--muted\)[^}]*font-size: var\(--fs-s\)/);
   assert.doesNotMatch(css.match(/\.help \{[^}]*\}/)[0], /white-space: nowrap/);
 });
+
+test('the word beside the cloud switch follows the switch (on / off), in every language', () => {
+  assert.match(html, /<span id="cloud-switch-label">/);
+  const fn = slice('function syncSwitch(el)', 'let _verifiedAliveSubdomain');
+  assert.match(fn, /t\(i\.checked \? 'ui\.cloud\.enabled' : 'ui\.cloud\.disabled'\)/);
+  for (const lang of LANGS) { assert.ok(I18N[lang]['ui.cloud.enabled'] && I18N[lang]['ui.cloud.disabled'], lang); assert.notEqual(I18N[lang]['ui.cloud.enabled'], I18N[lang]['ui.cloud.disabled'], lang); }
+});

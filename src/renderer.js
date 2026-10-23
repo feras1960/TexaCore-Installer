@@ -591,7 +591,10 @@ async function onLanPick(value) {
 function syncSwitch(el) {
   const i = el || $('input-cloud');
   if (i) i.setAttribute('aria-checked', i.checked ? 'true' : 'false');
+  const lab = $('cloud-switch-label');         // the word beside the switch always agrees with it: «مفعّل» / «متوقف»
+  if (lab && i) lab.textContent = t(i.checked ? 'ui.cloud.enabled' : 'ui.cloud.disabled');
 }
+document.addEventListener('i18n-applied', () => { try { syncSwitch(); } catch { /* page not ready */ } });
 let _verifiedAliveSubdomain = null;  // cache: skip re-checking a subdomain we already confirmed alive
 let _deletedSubdomain = null;        // a saved subdomain confirmed deleted — keeps the render on the setup view
 function renderCloud(state) {
