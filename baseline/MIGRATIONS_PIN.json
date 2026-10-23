@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "2e96db59f35d5c65bc90a1dfaeac296089398d7d",
+  "erpCommit": "7782584c097ab4858d25df3c066b119d939da76e",
   "migrations": [
     {
       "order": 1,
@@ -374,11 +374,39 @@
       "file": "20270237c_chart_template_currency_box_names.sql",
       "sha256": "e721d0cc89e291d00d516fc7f9cf3f15c2011217147129bf07ff5d1603c3e9c8",
       "bytes": 74362
+    },
+    {
+      "order": 54,
+      "name": "20270238a_safeupdate_where_true",
+      "file": "20270238a_safeupdate_where_true.sql",
+      "sha256": "a2ff764aeb0cd77b30b1a2201c7fb4dc7afbba5af8dc6678b91ecc0bdd1a0b76",
+      "bytes": 4724
+    },
+    {
+      "order": 55,
+      "name": "20270237b_journal_entry_number_allocator",
+      "file": "20270237b_journal_entry_number_allocator.sql",
+      "sha256": "5fef451db6a10b38fc86336cf461188265b89f35c2b8f2aea26c7ecb10de5099",
+      "bytes": 354886
+    },
+    {
+      "order": 56,
+      "name": "20270237d_system_journal_numbers",
+      "file": "20270237d_system_journal_numbers.sql",
+      "sha256": "4c6e888d9601f7c6cee0d2f7368c44841f21992c476ad817ac8514e8c842748d",
+      "bytes": 107851
+    },
+    {
+      "order": 57,
+      "name": "20270237e_revoke_create_container_journal_entry",
+      "file": "20270237e_revoke_create_container_journal_entry.sql",
+      "sha256": "20508f47cc99b37dcbb96cb97bd1e84c1120e94e92b23a822dfaa49f8ca82806",
+      "bytes": 6983
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "a7ac55a04e1d88cbb5441886111423dbff4f1c64c9c0244a7959287d864b34bb",
-    "bytes": 31611
+    "sha256": "f3506c80d24cd67e13e92a898d6dd353f379453caa608832fa357ef88f321f3b",
+    "bytes": 192
   }
 }
