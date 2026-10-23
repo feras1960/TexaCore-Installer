@@ -137,6 +137,9 @@
               </label>
             </div>
 
+            <!-- how the connection is protected: Cloudflare terminates TLS at its edge, so this is NOT worded as end-to-end -->
+            <div class="help" id="cloud-secure-note"><svg class="icon icon-16" aria-hidden="true" focusable="false"><use href="#i-info"></use></svg><span data-i18n="ui.cloud.secureNote">الاتصال مشفّر في كل الطريق: من جهاز الموظف إلى Cloudflare عبر HTTPS، ومنها إلى هذا الجهاز عبر نفق مشفّر يفتحه جهازك بنفسه. لا يُفتح أي منفذ على جهازك أو على الراوتر، ولا يدخل أحد إلا بتسجيل الدخول وصلاحياته.</span></div>
+
             <div id="cloud-content" style="display:none;">
               <!-- Setup (cloud access not set up yet): choose the sub-domain -->
               <div id="cloud-setup" class="col">

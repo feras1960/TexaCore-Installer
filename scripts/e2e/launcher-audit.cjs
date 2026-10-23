@@ -2,6 +2,7 @@
 // Real-browser audit of the launcher's NEW COMPANY wizard (/local-setup) against a running app (2.0.4): the default folder shown to the user, the five steps,
 // the first login, and what happens when macOS has not allowed the company file's folder (the harness pretends - POST /api/e2e-folder-access, never the real privacy settings).
 //   node scripts/e2e/launcher-audit.cjs --erp <ERP> --ui http://localhost:47395 --name "Audit Co" --file-base AuditCo --email a@b.test --password 'x' [--country Ukraine]
+//        [--storage-path '~/Documents/TexaCore']  type another folder than the default in step 1
 //        [--perm-script '<json>']   what to do when the permission step shows: {click:'perm-program'|'perm-retry'|'perm-skip'|'perm-open-settings'} | {sim:{...}} | {wait:ms}
 // Prints ONE line: AUDIT <json> = { step1:{storagePath,placeholderTexts}, texts:[...per step headings], submitted, permission:{seen,mode,title,body,hasProgramButton,actions}, afterUrl, loggedIn,
 //   activeCompany, createAnswer:{status,code,success,tcdbPlacement,tcdbPath}, alerts, toast }
@@ -10,6 +11,7 @@ const path = require('path');
 const arg = (n, d = '') => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const ERP = arg('erp'); const UI = arg('ui'); const NAME = arg('name', 'Audit Co'); const FILE_BASE = arg('file-base', 'AuditCo'); const EMAIL = arg('email', 'audit@e2e.test');
 const PASSWORD = arg('password', 'Audit#2026xyz'); const COUNTRY = arg('country', 'Ukraine'); const SHOTS = arg('shots', ''); const TAG = arg('tag', 'audit');
+const STORAGE_PATH = arg('storage-path', '');     // RC2: the default is ~/TexaCore; a scenario that needs another folder (Documents) types it
 const PERM_SCRIPT = (() => { try { return JSON.parse(arg('perm-script', '[]')); } catch { return []; } })();
 const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
 
@@ -36,6 +38,7 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
     // ── step 1: where the company file is saved ──
     out.step1 = { storagePath: await page.locator('#storagePath').inputValue(), dbFileName: await page.locator('#dbFileName').inputValue() };
     out.texts.push(await heading());
+    if (STORAGE_PATH) await page.locator('#storagePath').fill(STORAGE_PATH);
     await page.locator('#dbFileName').fill(FILE_BASE);
     if (SHOTS) await page.screenshot({ path: path.join(SHOTS, `${TAG}-1.png`) }).catch(() => {});
     await next();

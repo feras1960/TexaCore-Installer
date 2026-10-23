@@ -7,6 +7,7 @@
 const I18N = {
   ar: {
     // ── launcher 2.0.5 RC2 (tabs, hero, chips, files, licence, support) ──
+    'ui.cloud.secureNote': 'الاتصال مشفّر في كل الطريق: من جهاز الموظف إلى Cloudflare عبر HTTPS، ومنها إلى هذا الجهاز عبر نفق مشفّر يفتحه جهازك بنفسه. لا يُفتح أي منفذ على جهازك أو على الراوتر، ولا يدخل أحد إلا بتسجيل الدخول وصلاحياته.',
     'ui.files.descMany': 'ملف واحد يحفظ كل الشركات ({n}) ويتحدّث تلقائياً كل دقيقة.',
     'ui.localEdition': 'النسخة المحلية',
     'ui.language': 'اللغة',
@@ -372,6 +373,7 @@ const I18N = {
 
   en: {
     // ── launcher 2.0.5 RC2 (tabs, hero, chips, files, licence, support) ──
+    'ui.cloud.secureNote': 'The connection is encrypted all the way: from the employee’s device to Cloudflare over HTTPS, and from Cloudflare to this computer through an encrypted tunnel that your computer opens itself. No port is opened on your computer or router, and nobody gets in without signing in and having the permissions.',
     'ui.files.descMany': 'One file holds all {n} companies and updates itself every minute.',
     'ui.localEdition': 'Local edition',
     'ui.language': 'Language',
@@ -737,6 +739,7 @@ const I18N = {
 
   ru: {
     // ── launcher 2.0.5 RC2 (tabs, hero, chips, files, licence, support) ──
+    'ui.cloud.secureNote': 'Соединение зашифровано на всём пути: от устройства сотрудника до Cloudflare по HTTPS, а оттуда до этого компьютера — через зашифрованный туннель, который открывает сам ваш компьютер. На компьютере и роутере не открывается ни один порт, и войти можно только после авторизации и в рамках своих прав.',
     'ui.files.descMany': 'Один файл хранит все компании ({n}) и обновляется каждую минуту.',
     'ui.localEdition': 'Локальная версия',
     'ui.language': 'Язык',
@@ -1102,6 +1105,7 @@ const I18N = {
 
   uk: {
     // ── launcher 2.0.5 RC2 (tabs, hero, chips, files, licence, support) ──
+    'ui.cloud.secureNote': 'З’єднання зашифроване на всьому шляху: від пристрою співробітника до Cloudflare через HTTPS, а звідти до цього комп’ютера — через зашифрований тунель, який відкриває сам ваш комп’ютер. Жоден порт не відкривається ні на комп’ютері, ні на роутері, і ніхто не заходить без входу в систему та власних прав доступу.',
     'ui.files.descMany': 'Один файл зберігає всі компанії ({n}) та оновлюється щохвилини.',
     'ui.localEdition': 'Локальна версія',
     'ui.language': 'Мова',

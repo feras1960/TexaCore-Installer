@@ -285,3 +285,20 @@ test('«tunnel down» shows the reason and «إعادة الاتصال» (the fa
   assert.match(fix, /canReconnect/);
   assert.match(fix, /btn\.style\.display = canFix \? 'inline-flex' : 'none'/);
 });
+
+test('the cloud card carries the agreed security help line (muted, wrapping, an info icon) - in four languages, never worded as «end-to-end»', () => {
+  const cloud = links.slice(links.indexOf('id="cloud-box"'));
+  assert.match(cloud, /class="help" id="cloud-secure-note"><svg class="icon icon-16"[^>]*><use href="#i-info"><\/use><\/svg><span data-i18n="ui\.cloud\.secureNote"/);
+  // it sits under the header (status line) and before the links
+  assert.ok(cloud.indexOf('id="cloud-secure-note"') > cloud.indexOf('id="tunnel-status"') && cloud.indexOf('id="cloud-secure-note"') < cloud.indexOf('id="cloud-content"'));
+  assert.equal(I18N.ar['ui.cloud.secureNote'], 'الاتصال مشفّر في كل الطريق: من جهاز الموظف إلى Cloudflare عبر HTTPS، ومنها إلى هذا الجهاز عبر نفق مشفّر يفتحه جهازك بنفسه. لا يُفتح أي منفذ على جهازك أو على الراوتر، ولا يدخل أحد إلا بتسجيل الدخول وصلاحياته.');
+  for (const lang of LANGS) {
+    const v = I18N[lang]['ui.cloud.secureNote'];
+    assert.ok(v && v.length > 120, lang);
+    assert.doesNotMatch(v, /end[- ]to[- ]end|от начала до конца|наскрізн|сквозн|طرف إلى طرف/i, `${lang} must not claim end-to-end`);
+    assert.match(v, /Cloudflare/, lang);
+  }
+  // muted, the small size token (the design allows three sizes only), wrapping
+  assert.match(css, /\.help \{[^}]*color: var\(--muted\)[^}]*font-size: var\(--fs-s\)/);
+  assert.doesNotMatch(css.match(/\.help \{[^}]*\}/)[0], /white-space: nowrap/);
+});
