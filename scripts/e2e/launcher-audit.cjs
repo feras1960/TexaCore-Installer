@@ -15,7 +15,7 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
 
 (async () => {
   if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--disable-features=MacAppCodeSignClone'] });
   try {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 1000 }, locale: 'en-US' });
     const page = await ctx.newPage();
@@ -25,7 +25,7 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
       if (!/\/api\/create-local-company$/.test(r.url()) || r.request().method() !== 'POST') return;
       let b = null; try { b = await r.json(); } catch { /* not json */ }
       let sent = {}; try { sent = JSON.parse(r.request().postData() || '{}'); } catch { /* not json */ }
-      out.createCalls.push({ status: r.status(), code: b && b.code, success: !!(b && b.success), state: b && b.state, area: b && b.area, tcdbPlacement: b && b.tcdbPlacement, tcdbPath: b && b.tcdbPath, fallback: sent.fileFolderFallback || null });
+      out.createCalls.push({ status: r.status(), code: b && b.code, success: !!(b && b.success), state: b && b.state, area: b && b.area, tcdbPlacement: b && b.tcdbPlacement, tcdbPath: b && b.tcdbPath, sharedLiveFile: b && b.sharedLiveFile, plannedTcdbPath: b && b.plannedTcdbPath, fallback: sent.fileFolderFallback || null });
       out.createAnswer = out.createCalls[out.createCalls.length - 1];
     });
     await page.goto(`${UI}/local-setup`, { waitUntil: 'networkidle', timeout: 120000 });

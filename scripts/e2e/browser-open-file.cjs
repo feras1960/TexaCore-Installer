@@ -28,7 +28,7 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
 
 (async () => {
   if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--disable-features=MacAppCodeSignClone'] });
   try {
     const ctx = await browser.newContext({ viewport: { width: 1280, height: 900 } });
     const page = await ctx.newPage();
@@ -88,6 +88,13 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
     let permStepIdx = 0; let permWasShown = false;
     const t0 = Date.now();
     while (Date.now() - t0 < 240000) {   // (a restore of a 6 MB company file takes 25-60 s, longer on a busy machine)
+      // 2.0.5: the page asks «replace all companies?» (cancel is the default) before a file that replaces them - the harness plays the user who agrees
+      if (await page.locator('[data-testid="replace-all-confirm"]').count()) {
+        out.replaceAllConfirm = (out.replaceAllConfirm || 0) + 1;
+        await page.locator('[data-testid="replace-all-confirm"]').first().click();
+        await page.waitForTimeout(600);
+        continue;
+      }
       if (await page.locator('[data-testid="tcdb-passphrase-prompt"]').count()) {
         out.prompt = true;
         if (!PHRASE) break;

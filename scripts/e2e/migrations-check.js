@@ -66,7 +66,8 @@ const rawRequest = (method, url, { headers = {}, body = null } = {}) => new Prom
   });
   req.on('error', reject); if (body) req.write(body); req.end();
 });
-const multipart = (file, filename, fields = {}) => {
+const multipart = (file, filename, fields0 = {}) => {
+  const fields = { confirmReplaceAll: 'true', ...fields0 };   // 2.0.5: replacing every company needs an explicit yes
   const b = '----mig' + crypto.randomBytes(6).toString('hex');
   const parts = [];
   for (const [k, v] of Object.entries(fields)) parts.push(Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));

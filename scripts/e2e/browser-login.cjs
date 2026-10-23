@@ -12,7 +12,7 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
 
 (async () => {
   fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--disable-features=MacAppCodeSignClone'] });
   try {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await ctx.newPage();
@@ -21,7 +21,10 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
       const u = r.url();
       if (r.status() >= 400 && /\/(rest|auth)\/v1\//.test(u) && !/rpc\/(get_user_tenants|get_template_preview)/.test(u)) failures.push(`${r.status()} ${u.replace(/^https?:\/\/[^/]+/, '').slice(0, 100)}`);
     });
-    await page.goto(CODE ? `${UI}/login?c=${CODE}` : `${UI}/login`, { waitUntil: 'networkidle', timeout: 90000 });
+    // 2.0.5: 'load', then a bounded wait for network quiet. From a LAN address the login page asks /portal-api/companies (the admin-portal session) and gets a 401 whose body the page never reads, so Chrome keeps that
+    // request open for good and 'networkidle' alone never comes (a harmless client detail; the page is usable as soon as it loads)
+    await page.goto(CODE ? `${UI}/login?c=${CODE}` : `${UI}/login`, { waitUntil: 'load', timeout: 90000 });
+    await page.waitForLoadState('networkidle', { timeout: 8000 }).catch(() => {});
     await page.screenshot({ path: path.join(SHOTS, '1-login.png') });
     if (!CODE) {
       const card = COMPANY ? page.getByRole('button', { name: new RegExp(COMPANY) }) : page.locator('button', { hasText: 'Local Database' }).first();

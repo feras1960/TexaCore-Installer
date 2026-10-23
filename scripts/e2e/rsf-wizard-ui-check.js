@@ -93,7 +93,7 @@ const get = (url, headers = {}) => new Promise((resolve, reject) => {
   const hb = () => { try { return fs.readFileSync(path.join(userData, 'logs', 'heartbeat.log'), 'utf8'); } catch { return ''; } };
   const bundleDir = APP ? path.join(path.resolve(APP), 'Contents', 'Resources', 'frontend') : path.join(__dirname, '..', '..', 'frontend');
 
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--disable-features=MacAppCodeSignClone'] });
   let { child, ready } = boot('1');
   try {
     await ready;
@@ -148,7 +148,7 @@ const get = (url, headers = {}) => new Promise((resolve, reject) => {
     // ── S2 part 1: a profile that holds a stale precache from an "older install" ──
     const profile = path.join(WORK, 'chrome-profile');
     await R.check('S2a a profile whose service worker precache holds a STALE 1.x-style /config.js: the stale copy is really what the page gets for the bare path (control)', async () => {
-      const ctx = await chromium.launchPersistentContext(profile, { channel: 'chrome', headless: true, viewport: { width: 1440, height: 1000 } });
+      const ctx = await chromium.launchPersistentContext(profile, { channel: 'chrome', headless: true, args: ['--disable-features=MacAppCodeSignClone'], viewport: { width: 1440, height: 1000 } });
       try {
         const page = ctx.pages()[0] || await ctx.newPage();
         // the OLD web bundle's service worker (precaches config.js), installed over the old server
@@ -182,7 +182,7 @@ const get = (url, headers = {}) => new Promise((resolve, reject) => {
     await ready;
 
     await R.check('S2b after the upgrade (a new boot of the app) the SAME profile still has the old worker and the stale precache — and the wizard works', async () => {
-      const ctx = await chromium.launchPersistentContext(profile, { channel: 'chrome', headless: true, viewport: { width: 1440, height: 1000 } });
+      const ctx = await chromium.launchPersistentContext(profile, { channel: 'chrome', headless: true, args: ['--disable-features=MacAppCodeSignClone'], viewport: { width: 1440, height: 1000 } });
       try {
         const page = ctx.pages()[0] || await ctx.newPage();
         const state = await (async () => { await page.goto(`${UI}/login`, { waitUntil: 'domcontentloaded', timeout: 120000 }); return page.evaluate(async () => ({ controller: !!navigator.serviceWorker.controller, regs: (await navigator.serviceWorker.getRegistrations()).length })); })();

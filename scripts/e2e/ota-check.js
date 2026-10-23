@@ -378,7 +378,7 @@ const mockRows = (mock, since = 0) => mock.state.requests.slice(since).map((r) =
           const cc = await request('POST', `http://127.0.0.1:${PORTS.admin}/api/create-local-company`, { headers: H(), body: { companyName: 'OTA Co', adminEmail: 'owner@ota.test', adminPassword: 'OtaPass#2026', localCurrency: 'UAH', mainCurrency: 'USD', country: 'UA', storagePath: path.join(dir, 'tcdb'), dbFileName: 'ota' } });
           if (!cc.json || !cc.json.success) throw new Error(`company: ${cc.text.slice(0, 160)}`);
           const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
-          const browser = await chromium.launch({ channel: 'chrome', headless: true });
+          const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--disable-features=MacAppCodeSignClone'] });
           try {
             const page = await (await browser.newContext({ viewport: { width: 1440, height: 900 } })).newPage();
             await page.goto(`http://127.0.0.1:${PORTS.ui}/login?c=${String(cc.json.companyId).split('-')[0]}`, { waitUntil: 'networkidle', timeout: 90000 });

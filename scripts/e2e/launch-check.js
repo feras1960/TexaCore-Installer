@@ -540,8 +540,8 @@ async function main() {
     });
 
     // ── 4.9–4.11 the LAN is a second open front: the UI server listens on 0.0.0.0 (office PCs open the ERP from it) ──
-    const lanIp = Object.values(os.networkInterfaces()).flat().filter((i) => i && (i.family === 'IPv4' || i.family === 4) && !i.internal && !String(i.address).startsWith('169.254.'))
-      .map((i) => i.address)[0] || '';
+    // 2.0.5 harness: the address the PRODUCT shows to staff (src/lan-address.js: the default-route adapter, never a VPN tunnel such as utun9) - the first interface of os.networkInterfaces() is a tunnel on a Mac with a VPN
+    const lanIp = (() => { const a = require('../../src/lan-address').pickLanAddress(os.networkInterfaces()); return a && a !== '127.0.0.1' ? a : ''; })();
     const refusedTcp = (host, port) => new Promise((resolve) => {
       const sock = net.connect({ host, port, timeout: 3000 });
       sock.on('connect', () => { sock.destroy(); resolve(false); });
@@ -799,7 +799,8 @@ async function main() {
         });
         req.on('error', reject); if (body) req.write(body); req.end();
       });
-      const multipart = (file, filename, fields = {}) => {
+      const multipart = (file, filename, fields0 = {}) => {
+        const fields = { confirmReplaceAll: 'true', ...fields0 };   // 2.0.5: replacing every company needs an explicit yes (REPLACE_ALL_CONFIRM_REQUIRED without it) - the user's click in the real page
         const b = '----rel202' + crypto.randomBytes(6).toString('hex');
         const parts = [];
         for (const [k, v] of Object.entries(fields)) parts.push(Buffer.from(`--${b}\r\nContent-Disposition: form-data; name="${k}"\r\n\r\n${v}\r\n`));
@@ -817,6 +818,34 @@ async function main() {
       fs.writeFileSync(rsfFile, rsfBytes);   // the installer no longer parses .rsf (the ERP wizard does) - it only has to know WHERE the file is and hand out its bytes
       const copyDir = path.join(userData, 'texacore-data', 'backups');
       let pick1 = null; let created1 = null; let created2 = null;
+      // 2.0.5 (company files, part 1): a company created NEXT TO others keeps the install's live file (its own chosen file is only recorded as planned); only the FIRST company of an empty database
+      // gets its file as the live one. 7.2-7.4, 7.7b and 8.1 are about that first company: they start on an empty database, the way a new install is (the product's own /api/delete-company).
+      // PostgREST + GoTrue answer (a dead service shows up HERE, with its name, instead of as a connection error three checks later)
+      const servicesHealthy = async (when, ms = 60000) => {
+        const t0 = Date.now(); let last = '';
+        for (;;) {
+          try {
+            const a = await request('GET', `${API}/rest/v1/tenants?select=id&limit=1`, { headers: { apikey: secrets.anonKey, Authorization: `Bearer ${secrets.anonKey}` } });
+            const g = await request('GET', `${API}/auth/v1/health`, { headers: { apikey: secrets.anonKey } });
+            if (a.status > 0 && a.status < 500 && g.status === 200) return;
+            last = `rest ${a.status}, auth ${g.status}`;
+          } catch (e) { last = e.message; }
+          if (Date.now() - t0 > ms) throw new Error(`PostgREST / GoTrue do not answer ${when}: ${last}`);
+          await new Promise((r) => setTimeout(r, 500));
+        }
+      };
+      const wipeCompanies = async () => {
+        const rows = (await pg('SELECT id FROM public.companies')).rows;
+        for (const c of rows) {
+          const d = await api('POST', '/api/delete-company', { companyId: c.id });
+          if (!d.json || !d.json.success) throw new Error(`delete-company ${c.id} → ${d.status} ${d.text.slice(0, 200)}`);
+        }
+        const left = (await pg('SELECT count(*)::int n FROM public.companies')).rows[0].n;
+        if (left !== 0) throw new Error(`${left} companies left after the wipe`);
+        await new Promise((r) => setTimeout(r, 3000));     // the delete toggles triggers on every table: PostgREST reloads its schema cache several times
+        await servicesHealthy('after the wipe');
+        return rows.length;
+      };
 
       await R.check('7.1 the app opens the native window and knows the real path: a reference + the folder, the bytes are served (identical), a made-up reference is refused', async () => {
         await dialog({ open: rsfFile });
@@ -853,6 +882,7 @@ async function main() {
       });
 
       await R.check('7.2 a company made from the Rashid file: its .tcdb is BESIDE the .rsf (<rsf name>.tcdb) AND a second copy sits in the program\'s own backup folder; both are written', async () => {
+        await wipeCompanies();      // 2.0.5: the first company of an empty database (see wipeCompanies)
         await dialog({ open: rsfFile });
         pick1 = (await api('POST', '/api/pick-company-file', {})).json;
         const r = await api('POST', '/api/create-local-company', body({ adminEmail: 'rashid-beside@e2e.test', companyName: 'شركة الرشيد', storagePath: undefined, dbFileName: undefined, purpose: 'rsf_import', rsfSourceRef: pick1.ref }));
@@ -917,16 +947,21 @@ async function main() {
         const r = await api('POST', '/api/create-local-company', body({ adminEmail: 'rashid-beside2@e2e.test', companyName: 'شركة الرشيد 2', storagePath: undefined, dbFileName: undefined, purpose: 'rsf_import', rsfSourceRef: p2.ref }));
         if (!r.json || !r.json.success) throw new Error(`create → ${r.text.slice(0, 300)}`);
         created2 = r.json;
-        if (created2.tcdbPath !== path.join(rashidDir, 'شركة الرشيد (2).tcdb')) throw new Error(`tcdb ${created2.tcdbPath}`);
-        if (created2.tcdbCopyPath !== path.join(copyDir, 'شركة الرشيد (2).tcdb')) throw new Error(`copy ${created2.tcdbCopyPath}`);
-        await waitFor(async () => { const s_ = await status(); return s_.backupPath === created2.tcdbPath && s_.targets.length === 2 && s_.targets.every((t) => t.state === 'ok'); }, 'the second company\'s targets');
+        // 2.0.5: the first company's file stays the live one; this company's chosen file ("(2)") is only RECORDED - nothing is written under that name and no second copy is made
+        const first5 = path.join(rashidDir, 'شركة الرشيد.tcdb');
+        if (created2.sharedLiveFile !== true || created2.liveFilePath !== first5 || created2.tcdbPath !== first5) throw new Error(`the live file did not stay: ${JSON.stringify({ shared: created2.sharedLiveFile, live: created2.liveFilePath, tcdb: created2.tcdbPath })}`);
+        if (created2.plannedTcdbPath !== path.join(rashidDir, 'شركة الرشيد (2).tcdb')) throw new Error(`planned ${created2.plannedTcdbPath}`);
+        if (fs.existsSync(created2.plannedTcdbPath)) throw new Error('the planned file was written');
+        if (created2.tcdbCopyPath) throw new Error(`a second copy was made for a company that does not own the live file: ${created2.tcdbCopyPath}`);
+        const st5 = await status();
+        if (st5.backupPath !== first5 || st5.targets.length !== 2 || !st5.targets.every((t) => t.state === 'ok')) throw new Error(`the live targets changed: ${JSON.stringify(st5.targets.map((t) => t.path))}`);
         const now = fs.readFileSync(path.join(rashidDir, 'شركة الرشيد.tcdb'));
         if (now.subarray(0, 4).toString('latin1') !== 'TCDB' || now.length < first.length * 0.5) throw new Error('the first company\'s file was replaced by something else');
         // the by-hand path never replaces a file either: asking for the same folder + name again gives "(2)"
         const manual = await api('POST', '/api/create-local-company', body({ adminEmail: 'by-hand@e2e.test', companyName: 'By hand', storagePath: rashidDir, dbFileName: 'شركة الرشيد' }));
         if (!manual.json || !manual.json.success) throw new Error(`by-hand create → ${manual.text.slice(0, 300)}`);
-        if (manual.json.tcdbPath !== path.join(rashidDir, 'شركة الرشيد (3).tcdb') || manual.json.tcdbCopyPath) throw new Error(`by-hand ${manual.json.tcdbPath} copy=${manual.json.tcdbCopyPath} (a by-hand company has ONE file)`);
-        return 'beside: (2); by hand: (3), one file only';
+        if (manual.json.sharedLiveFile !== true || manual.json.plannedTcdbPath !== path.join(rashidDir, 'شركة الرشيد (3).tcdb') || manual.json.tcdbCopyPath || fs.existsSync(manual.json.plannedTcdbPath)) throw new Error(`by-hand ${JSON.stringify({ shared: manual.json.sharedLiveFile, planned: manual.json.plannedTcdbPath, copy: manual.json.tcdbCopyPath })} (a planned name is taken once: "(3)"; nothing is written)`);
+        return 'the live file stays; beside: planned (2), by hand: planned (3); no file written for either, one live file only';
       });
 
       let protectedExport = null; let counts0 = null;
@@ -1020,6 +1055,7 @@ async function main() {
       }
 
       await R.check('7.7b opening another .tcdb never writes this company\'s data over the PREVIOUS company\'s program copy; the previous manager stops', async () => {
+        await wipeCompanies();      // 2.0.5: the company whose program copy must survive is the FIRST of an empty database (a company created next to others does not own the live file any more)
         await dialog({ open: rsfFile });
         const p3 = (await api('POST', '/api/pick-company-file', {})).json;
         const r = await api('POST', '/api/create-local-company', body({ adminEmail: 'rashid-third@e2e.test', companyName: 'شركة ثالثة', storagePath: undefined, dbFileName: undefined, purpose: 'rsf_import', rsfSourceRef: p3.ref }));
@@ -1064,7 +1100,7 @@ async function main() {
         return target;
       };
       const pickTcdb = async (file) => { await dialog({ open: file }); const r = (await api('POST', '/api/pick-company-file', {})).json; await dialog({ open: null }); return r; };
-      const openPicked = (ref, extra = {}) => api('POST', '/api/open-picked-tcdb', { ref, ...extra });
+      const openPicked = (ref, extra = {}) => api('POST', '/api/open-picked-tcdb', { ref, confirmReplaceAll: true, ...extra });
       const walk = (d) => (fs.existsSync(d) ? fs.readdirSync(d).sort() : []);
       const counts4 = async () => (await pg('SELECT (SELECT count(*) FROM public.companies)::int c, (SELECT count(*) FROM public.tenants)::int t, (SELECT count(*) FROM auth.users)::int u, (SELECT count(*) FROM public.chart_of_accounts)::int a')).rows[0];
 
@@ -1173,7 +1209,7 @@ async function main() {
       const openInBrowser = (file, tag, extra = []) => {
         const out = require('child_process').spawnSync('node', [path.join(__dirname, 'browser-open-file.cjs'), '--erp', ERP, '--ui', ui2, '--file', file, '--shots', path.join(WORK, 'shots-open'), '--tag', tag, ...extra], { encoding: 'utf8', timeout: 240000 });
         const line = (out.stdout || '').split('\n').find((l) => l.startsWith('OPENFILE '));
-        if (!line) throw new Error(`browser step failed (exit ${out.status}): ${(out.stderr || out.stdout || '').slice(0, 400)}`);
+        if (!line) throw new Error(`browser step failed (exit ${out.status}${out.signal ? ', signal ' + out.signal : ''}${out.error ? ', ' + out.error.message : ''}): ${((out.stderr || '') + ' | ' + (out.stdout || '')).slice(-700)}`);
         return JSON.parse(line.slice('OPENFILE '.length));
       };
       const locateApi = (b) => api('POST', '/api/locate-picked-file', b);
@@ -1368,9 +1404,9 @@ async function main() {
         try {
           await locker.query('BEGIN');
           await locker.query('LOCK TABLE public.companies IN ACCESS SHARE MODE');   // the restore's TRUNCATE (ACCESS EXCLUSIVE) now waits for this
-          const firstP = request('POST', `${ADMIN}/api/open-picked-tcdb`, { headers: H, body: { ref: loc.ref }, timeout: 300000 });
+          const firstP = request('POST', `${ADMIN}/api/open-picked-tcdb`, { headers: H, body: { ref: loc.ref, confirmReplaceAll: true }, timeout: 300000 });
           await new Promise((r) => setTimeout(r, 4000));
-          second = await request('POST', `${ADMIN}/api/open-picked-tcdb`, { headers: H, body: { ref: loc.ref }, timeout: 60000 });
+          second = await request('POST', `${ADMIN}/api/open-picked-tcdb`, { headers: H, body: { ref: loc.ref, confirmReplaceAll: true }, timeout: 60000 });
           first = await firstP;
         } finally { try { await locker.query('ROLLBACK'); } catch { /* connection gone */ } await locker.end().catch(() => {}); }
         if (second.status !== 409 || second.json.code !== 'RESTORE_BUSY') throw new Error(`a second open while one runs → ${second.status} ${second.text.slice(0, 160)}`);
@@ -1386,7 +1422,7 @@ async function main() {
         if (!(await status()).syncing) throw new Error('the timer is not running again');
         if (fileSha(picked) !== pickedSha) throw new Error('the picked file changed while the previous file synced');
         if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('the failed open changed the rows');
-        const ok = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref });
+        const ok = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref, confirmReplaceAll: true });
         if (ok.status !== 200 || !ok.json.success) throw new Error(`after the lock is gone the same file opens: ${ok.status} ${ok.text.slice(0, 200)}`);
         return `open failed (${first.status}: ${first.text.slice(0, 90)}…); second open 409 RESTORE_BUSY; picked file byte-identical, nothing beside it, no temp SQL; live target back to ${path.basename(prev)} and syncing (mtime +${Math.round(fs.statSync(prev).mtimeMs - prevMtime0)} ms); rows unchanged; the same file then opens fine`;
       });
@@ -1436,13 +1472,17 @@ async function main() {
         if (!res.start || res.start.hasSha || res.start.size !== fs.statSync(target).size) throw new Error(`start ${JSON.stringify(res.start)}`);
         if (!res.candidateStates.includes('placeholder') || !res.order.includes('locate-materialize')) throw new Error(`states ${res.candidateStates.join(',')} order ${res.order.join('>')}`);
         const dl = res.statusTexts.filter((t) => NOTE_CLOUD.test(t) && NOTE_CLOUD_MB.test(t));
-        if (!dl.length || !dl.some((t) => /24\.\d|23\.\d|\b2[34]\b/.test(t))) throw new Error(`download lines ${JSON.stringify(res.statusTexts)}`);
+        // the progress line names the file's size in MB (the owner's real file is ~24 MB; the 2.9 MB sample says «x of 2.8 MB») - compare with the size of the file this run was given
+        const mbText = (fs.statSync(target).size / 1048576).toFixed(1);
+        if (!dl.length || !dl.some((t) => t.includes(mbText) || /24\.\d|23\.\d|\b2[34]\b/.test(t))) throw new Error(`download lines (file is ${mbText} MB) ${JSON.stringify(res.statusTexts)}`);
         if (!res.located || res.located.success !== true || res.located.type !== 'rsf' || path.resolve(res.located.filePath) !== path.resolve(target)) throw new Error(`located ${JSON.stringify(res.located)}`);
         if (!res.routes.some((r) => r.route === 'picked-file' && r.status === 200)) throw new Error(`the page did not read the located file through the app: ${JSON.stringify(res.routes)}`);
         const planned = path.join(dir, '2023 مطور بعد الصيانة.tcdb');
         if (!res.note || res.note.testId !== 'rsf-company-file-target' || !res.note.text.includes(planned)) throw new Error(`form note ${JSON.stringify(res.note)}`);
         if (!res.currency || !res.currency.ended || res.currency.failureShown) throw new Error(`currency read ${JSON.stringify(res.currency)}`);
-        if (!/UAH/.test(res.currency.detected) && !res.currency.combos.some((t) => /UAH/.test(t))) throw new Error(`the file's currency (UAH) is not shown: ${JSON.stringify(res.currency)}`);
+        // the owner's real file is in UAH; the 2.9 MB sample (Sample.rsf) is a Syrian company in SYP with USD as the second currency - the page must show the file's OWN currency either way
+        const wantCur = /sample/i.test(path.basename(RSF)) ? 'SYP' : 'UAH';
+        if (!new RegExp(wantCur).test(res.currency.detected) && !res.currency.combos.some((t) => new RegExp(wantCur).test(t))) throw new Error(`the file's currency (${wantCur}) is not shown: ${JSON.stringify(res.currency)}`);
         if (walk(dir).join('|') !== '2023 مطور بعد الصيانة.rsf') throw new Error(`files beside: ${walk(dir).join(', ')}`);
         return `download line «${dl[dl.length - 1].slice(0, 80)}»; located; read via GET /api/picked-file; form: company file planned beside the .rsf; currency read ended in ${res.currency.ms} ms: «${res.currency.detected}»`;
       });
@@ -1577,7 +1617,7 @@ async function main() {
         const target = await exportTo(path.join(dir, 'Sync Perm.tcdb'));
         await simReset();
         const loc = (await locateApi(bodyOf(target))).json;
-        const opened = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref });
+        const opened = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref, confirmReplaceAll: true });
         if (opened.status !== 200) throw new Error(`open → ${opened.status} ${opened.text.slice(0, 160)}`);
         await waitFor(async () => { const s_ = await status(); return s_.backupPath && path.resolve(s_.backupPath) === path.resolve(target); }, 'the file as the live target');
         await api('POST', '/api/backup', {});
@@ -1634,7 +1674,7 @@ async function main() {
         const f2in = path.join(LA, 'crafted', 'meta-inplace.tcdb'); fs.mkdirSync(path.dirname(f2in), { recursive: true }); fs.copyFileSync(f2, f2in);   // (inside a searched folder, so the app can locate it)
         const loc = (await locateApi(bodyOf(f2in))).json;
         if (!loc.success) throw new Error(`could not locate the crafted file: ${JSON.stringify(loc).slice(0, 160)}`);
-        const op = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref });
+        const op = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref, confirmReplaceAll: true });
         if (op.status !== 422 || op.json.code !== 'TCDB_UNSAFE_SQL') throw new Error(`open-picked-tcdb → ${op.status} ${op.text.slice(0, 200)}`);
         if (fs.existsSync(marker)) throw new Error('A COMMAND RAN: the marker file exists');
         if (JSON.stringify(await counts4()) !== JSON.stringify(c0)) throw new Error('a refused file changed the rows');
@@ -1761,6 +1801,37 @@ async function main() {
         return 'bare -> no secret; same-origin / none / same-origin Referer -> secret; cross-site / foreign Origin / foreign Referer -> none; the anon key is always there';
       });
 
+      // ═══ 2.0.5 company files (part 1): replacing every company needs an explicit yes, and what is replaced is saved first ═══
+      await R.check('7.13 (2.0.5) replacing every company needs an explicit yes: an upload without it is refused 409 (REPLACE_ALL_CONFIRM_REQUIRED) BEFORE anything is written and NOTHING changes; with the yes it works and a .tcdb of what was replaced is saved first (backups/pre-open)', async () => {
+        const exp = await api('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'TexaCore-GATE' });
+        if (!exp.json || !exp.json.success) throw new Error(`export → ${exp.text.slice(0, 200)}`);
+        const bytes = fs.readFileSync(exp.json.path);
+        const preDir = path.join(userData, 'texacore-data', 'backups', 'pre-open');
+        const listPre = () => (fs.existsSync(preDir) ? fs.readdirSync(preDir).filter((f) => /^before-open-.*\.tcdb$/.test(f)).sort() : []);
+        const restoreDir = TCDB_IN_COMPANY_FOLDER ? rashidDir : path.join(WORK, 'restore-tcdb');
+        const filesBefore = fs.existsSync(restoreDir) ? fs.readdirSync(restoreDir).sort().join('|') : '';
+        const c0 = await rowCounts(); const pre0 = listPre();
+        const nCompanies = (await pg('SELECT count(*)::int n FROM public.companies')).rows[0].n;
+        if (nCompanies < 1) throw new Error('the scenario needs at least one company in the database');
+        const m0 = multipart(bytes, 'gate.tcdb', { confirmReplaceAll: 'false' });
+        const no = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m0.ct }, body: m0.body });
+        if (no.status !== 409 || !(no.json && (no.json.code === 'REPLACE_ALL_CONFIRM_REQUIRED' || /replace ALL current companies/i.test(String(no.json.error))))) throw new Error(`without the yes → ${no.status} ${no.buf.toString().slice(0, 200)}`);
+        const filesAfter = fs.existsSync(restoreDir) ? fs.readdirSync(restoreDir).sort().join('|') : '';
+        if (filesAfter !== filesBefore) throw new Error(`a refused upload wrote files: ${filesBefore} -> ${filesAfter}`);
+        if (JSON.stringify(await rowCounts()) !== JSON.stringify(c0)) throw new Error('a refused upload changed the database');
+        if (listPre().join('|') !== pre0.join('|')) throw new Error('a refused upload wrote a pre-open backup');
+        const m1 = multipart(bytes, 'gate.tcdb');
+        const yes = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m1.ct }, body: m1.body });
+        if (yes.status !== 200 || !yes.json.success) throw new Error(`with the yes → ${yes.status} ${yes.buf.toString().slice(0, 250)}`);
+        const pre1 = listPre();
+        if (pre1.length < 1 || pre1.length !== Math.min(10, pre0.length + 1)) throw new Error(`pre-open backups ${pre0.length} -> ${pre1.length}`);
+        const newest = fs.readFileSync(path.join(preDir, pre1[pre1.length - 1]));
+        if (newest.subarray(0, 4).toString('latin1') !== 'TCDB' || newest.length < 100000) throw new Error('the pre-open backup is not a company file');
+        if (JSON.stringify(await rowCounts()) !== JSON.stringify(c0)) throw new Error(`rows changed by restoring an export of the same database: ${JSON.stringify(c0)} -> ${JSON.stringify(await rowCounts())}`);
+        await servicesHealthy('after the restore');
+        return `${nCompanies} companies: no yes → 409, nothing written or changed; yes → 200, rows ${JSON.stringify(c0)} intact, pre-open backup ${pre1[pre1.length - 1]} (${newest.length} bytes)`;
+      });
+
       // ═══ 2.0.4 launcher audit: the NEW COMPANY wizard in a real browser, with HOME pointing at a scratch folder (so "~/Documents/TexaCore" - the default - is the scratch one) ═══
       const HOME_DIR = path.join(WORK, 'home');
       const runAudit = (tag, extra) => {
@@ -1773,6 +1844,7 @@ async function main() {
 
       await R.check('8.1 (2.0.4 audit) new company through the wizard UI: the default folder shown is ~/Documents/TexaCore, the five steps work (country Ukraine -> UAH), the admin is created and logged in, and the company file is where the page said (here the scratch HOME)', async () => {
         fs.mkdirSync(path.join(HOME_DIR, 'Documents'), { recursive: true });
+        await wipeCompanies();      // 2.0.5: the first company of an empty database gets its chosen file as the live one (8.2 / 8.3 then check the rule for the companies after it)
         await simReset();
         const a = runAudit('8-1', ['--name', 'Audit One', '--file-base', 'AuditOne', '--email', 'audit1@e2e.test']);
         if (a.step1.storagePath !== '~/Documents/TexaCore') throw new Error(`default folder shown: ${a.step1.storagePath}`);
@@ -1797,12 +1869,14 @@ async function main() {
         if (!/Documents|المستندات|Документи|Документы/.test(a.permission.title)) throw new Error(`step title ${a.permission.title}`);
         if (a.createCalls.length !== 2 || a.createCalls[0].code !== 'FOLDER_PERMISSION' || a.createCalls[0].area !== 'documents' || a.createCalls[1].success !== true || a.createCalls[1].fallback !== 'program' || a.createCalls[1].tcdbPlacement !== 'program-folder') throw new Error(`create calls ${JSON.stringify(a.createCalls)}`);
         const progDir = path.join(userData, 'texacore-data', 'company-files');
-        if (path.resolve(path.dirname(a.createCalls[1].tcdbPath)) !== path.resolve(progDir)) throw new Error(`file at ${a.createCalls[1].tcdbPath}`);
+        const chosen2 = a.createCalls[1].plannedTcdbPath || a.createCalls[1].tcdbPath;      // 2.0.5: next to another company the chosen file is only recorded (plannedTcdbPath)
+        if (a.createCalls[1].sharedLiveFile !== true) throw new Error(`the live file moved: ${JSON.stringify(a.createCalls[1])}`);
+        if (path.resolve(path.dirname(chosen2)) !== path.resolve(progDir)) throw new Error(`file at ${chosen2}`);
         const adm = await hasAdmin('audit2@e2e.test');
         if (adm.u !== 1 || adm.t !== 1) throw new Error(`admin rows ${JSON.stringify(adm)} (the refused first attempt must have created nothing, the second exactly one)`);
         if (fs.existsSync(path.join(docs, 'TexaCore', 'AuditTwo.tcdb'))) throw new Error('a file was written into the not-allowed Documents folder');
         if (!a.loggedIn || !a.activeCompany || a.activeCompany.name !== 'Audit Two') throw new Error(`after: ${JSON.stringify({ loggedIn: a.loggedIn, company: a.activeCompany, url: a.afterUrl })}`);
-        return `step «${a.permission.title}» with the program-folder button; 1st create FOLDER_PERMISSION (nothing created), 2nd with fallback=program -> ${path.relative(WORK, a.createCalls[1].tcdbPath)}; logged in`;
+        return `step «${a.permission.title}» with the program-folder button; 1st create FOLDER_PERMISSION (nothing created), 2nd with fallback=program -> ${path.relative(WORK, chosen2)} (recorded; the live file stays); logged in`;
       });
 
       await R.check('8.3 (2.0.4 audit) new company while macOS is still ASKING about Documents: the page waits («pending» step), continues by itself when the user allows, and the file lands in Documents/TexaCore', async () => {
@@ -1813,9 +1887,11 @@ async function main() {
         if (!a.permission.seen || a.permission.mode !== 'pending') throw new Error(`permission step ${JSON.stringify(a.permission)}`);
         if (a.createCalls.length !== 2 || a.createCalls[0].code !== 'FOLDER_PERMISSION' || a.createCalls[0].state !== 'pending' || a.createCalls[1].success !== true || a.createCalls[1].tcdbPlacement !== 'chosen') throw new Error(`create calls ${JSON.stringify(a.createCalls)}`);
         const want = path.join(docs, 'TexaCore', 'AuditThree.tcdb');
-        if (path.resolve(a.createCalls[1].tcdbPath) !== path.resolve(want)) throw new Error(`file at ${a.createCalls[1].tcdbPath}`);
+        const chosen3 = a.createCalls[1].plannedTcdbPath || a.createCalls[1].tcdbPath;      // 2.0.5: next to another company the chosen file is only recorded (plannedTcdbPath)
+        if (a.createCalls[1].sharedLiveFile !== true) throw new Error(`the live file moved: ${JSON.stringify(a.createCalls[1])}`);
+        if (path.resolve(chosen3) !== path.resolve(want)) throw new Error(`file at ${chosen3}`);
         if (!a.loggedIn || !a.activeCompany || a.activeCompany.name !== 'Audit Three') throw new Error(`after: ${JSON.stringify({ loggedIn: a.loggedIn, company: a.activeCompany })}`);
-        return `pending step «${a.permission.body.slice(0, 70)}…» -> allowed by itself -> created in ${path.relative(WORK, want)}; logged in`;
+        return `pending step «${a.permission.body.slice(0, 70)}…» -> allowed by itself -> recorded for ${path.relative(WORK, want)} (the live file stays); logged in`;
       });
 
       await R.check('8.4 (2.0.4 audit) a company file in a READ-ONLY folder / read-only file opens: the picked file is never written, the company file gets a free name in the TexaCore folder (here the scratch HOME), the rows are intact', async () => {
@@ -1828,7 +1904,7 @@ async function main() {
         try {
           const loc = (await locateApi(bodyOf(f))).json;
           if (!loc.success) throw new Error(`locate -> ${JSON.stringify(loc).slice(0, 160)}`);
-          const r = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref });
+          const r = await api('POST', '/api/open-picked-tcdb', { ref: loc.ref, confirmReplaceAll: true });
           if (r.status !== 200 || !r.json.success || r.json.inPlace !== false) throw new Error(`open -> ${r.status} ${r.text.slice(0, 240)}`);
           const dflt = path.join(HOME_DIR, 'Documents', 'TexaCore');
           if (path.resolve(path.dirname(r.json.tcdbPath)) !== path.resolve(dflt)) throw new Error(`the company file went to ${r.json.tcdbPath}, expected a free name in ${dflt}`);

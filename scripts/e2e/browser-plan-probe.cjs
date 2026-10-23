@@ -14,7 +14,7 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
 
 (async () => {
   if (SHOTS) fs.mkdirSync(SHOTS, { recursive: true });
-  const browser = await chromium.launch({ channel: 'chrome', headless: true });
+  const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--disable-features=MacAppCodeSignClone'] });
   try {
     const ctx = await browser.newContext({ viewport: { width: 1440, height: 900 } });
     const page = await ctx.newPage();

@@ -104,7 +104,7 @@ const freeRow = async (code = 'free') => (await pg('SELECT max_users, max_compan
     await R.check('A2 the free plan works from the bundled definition: production numbers, the free modules, a subscription on it', async () => {
       await sleep(5500);                                                    // > 2 sync ticks: they must change nothing while offline
       const f = await freeRow();
-      const want = { max_users: 1, max_companies: 1, max_branches: 1, max_warehouses: 1, max_products: -1, max_invoices_monthly: 200, max_customers: 200, max_documents: 500 };
+      const want = { max_users: 1, max_companies: -1, max_branches: 1, max_warehouses: 1, max_products: -1, max_invoices_monthly: 200, max_customers: 200, max_documents: 500 };
       for (const [k, v] of Object.entries(want)) if (f[k] !== v) throw new Error(`free.${k} = ${f[k]}, want ${v}`);
       if (!f.included_modules.includes('fabric')) throw new Error('free lacks fabric');
       const sub = (await pg(`SELECT sp.code, ts.status FROM public.tenant_subscriptions ts JOIN public.subscription_plans sp ON sp.id = ts.plan_id WHERE ts.tenant_id = $1`, [A.tenantId])).rows[0];
@@ -114,7 +114,7 @@ const freeRow = async (code = 'free') => (await pg('SELECT max_users, max_compan
       if (c1.status >= 300) throw new Error(`offline: creating a customer failed ${c1.status} ${c1.text.slice(0, 160)}`);
       const log = fs.readFileSync(path.join(userData, 'logs', 'heartbeat.log'), 'utf8');
       if (!/cloud catalogue unreachable/.test(log) || !/offline: last synced values/.test(log)) throw new Error('the log does not show the offline path');
-      return `free = users 1, companies 1, branches 1, warehouses 1, products ∞, invoices 200, customers 200, documents 500; modules ${f.included_modules.join(',')}; customer created while offline; ticks changed nothing`;
+      return `free = users 1, companies ∞, branches 1, warehouses 1, products ∞, invoices 200, customers 200, documents 500; modules ${f.included_modules.join(',')}; customer created while offline; ticks changed nothing`;
     });
 
     // ─────────── B: the network returns; the control panel changed the free plan ───────────

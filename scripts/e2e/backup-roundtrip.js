@@ -88,7 +88,7 @@ const integrity = async () => {
       }
       const email = (await pg(`SELECT au.email FROM auth.users au JOIN public.user_profiles up ON up.id=au.id WHERE up.is_tenant_admin ORDER BY au.created_at LIMIT 1`)).rows[0].email;
       // the restore resets sessions but keeps password hashes: sign in with the e2e password used by launch-check for that email
-      const pw = email === 'owner@e2e.test' ? 'E2ePass#2026' : (email.startsWith('rashid+') ? 'E2ePass#2026' : null);
+      const pw = email === 'owner@e2e.test' ? 'E2ePass#2026' : (email.startsWith('rashid+') ? 'E2ePass#2026' : (/^audit\d@e2e\.test$/.test(email) ? 'Audit#2026xyz' : null));   // 2.0.5: launch-check 8.1 starts on an empty database, so the first admin is the wizard's (launcher-audit.cjs default password)
       if (!pw) return `skipped sign-in (unknown password for ${email})`;
       const si = await request('POST', `http://127.0.0.1:${PORTS.gotrue}/token?grant_type=password`, { headers: { apikey: secrets.anonKey }, body: { email, password: pw } });
       if (si.status !== 200) throw new Error(`sign-in as ${email} → ${si.status} ${si.text.slice(0, 120)}`);

@@ -95,7 +95,7 @@ if (USERDATA) {
         await ready; starts.push(Date.now() - t0);
         if (ERP) {
           const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
-          const browser = await chromium.launch({ channel: 'chrome', headless: true });
+          const browser = await chromium.launch({ channel: 'chrome', headless: true, args: ['--disable-features=MacAppCodeSignClone'] });
           try {
             const ctx = await browser.newContext(); const page = await ctx.newPage();
             const t1 = Date.now();
