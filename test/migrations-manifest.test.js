@@ -59,9 +59,13 @@ test('2.0.5 RC2 ships the 57 migrations production received after the 2026-10-13
     "20270233b_mfg_component_cost_known",
     "20270236a_receive_quantity_stock_base_cost",
     "20270237a_new_company_seeds",
-    "20270237c_chart_template_currency_box_names"
+    "20270237c_chart_template_currency_box_names",
+    "20270238a_safeupdate_where_true",
+    "20270237b_journal_entry_number_allocator",
+    "20270237d_system_journal_numbers",
+    "20270237e_revoke_create_container_journal_entry"
 ]);
-  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 53 }, (_, i) => i + 1));
+  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 57 }, (_, i) => i + 1));
   assert.ok(!pin.migrations.some((x) => /20270210l|20270217b/.test(x.name)));
   // the first 19 are exactly what 2.0.4 shipped (same names, same sha256): the upgrade from 2.0.4 applies ONLY the 34 after them
   assert.equal(require('crypto').createHash('sha256').update(JSON.stringify(pin.migrations.slice(0, 19).map((x) => [x.name, x.sha256]))).digest('hex'), '85744a0afb4dc0c7000a047e212257d8ae47158cd6736f431f4175b0a7ae137c', 'the first 19 entries (name + sha256) are byte-for-byte what 2.0.4 pinned');
