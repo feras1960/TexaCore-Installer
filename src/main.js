@@ -1639,8 +1639,8 @@ async function handleCreateLocalCompany(companyData) {
       tenantId,
       adminEmail,
       anonKey,
-      accessToken,
-      refreshToken,
+      // 2.0.5 RC2: a company added to a signed-in admin's own tenant (callerAccessToken) opens NO new session: the page keeps the one it has
+      ...(result.attached ? { attached: true, adminUserId: result.adminUserId, localCurrency: result.localCurrency } : { accessToken, refreshToken }),
       provisioningKey: result.provisioningKey || undefined,
       createdSource: result.createdSource || undefined,
       // 2.0.2: where this company's .tcdb is (null = no file was set up) and why there

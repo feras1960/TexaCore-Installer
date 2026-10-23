@@ -285,7 +285,7 @@ test('an existing user whose invitation is refused leaves nothing to clean (and 
   try {
     const r = await P.inviteLocalUserAsCaller(w.deps, INPUT());
     assert.deepEqual([r.success, r.code, r.reason], [false, 'INVITE_FAILED', 'foreign_tenant_account']);
-    assert.equal(R.statusFor(r), 409);
+    assert.equal(R.statusFor(r), 400);
     assert.deepEqual(w.deleted, []);
     assert.ok(!w.queries.some((q) => /^DELETE|^UPDATE/.test(q.sql)));
   } finally { await w.closeAll(); }

@@ -53,17 +53,20 @@ function httpJson(method, urlStr, { headers = {}, body } = {}) {
 
 const normEmail = (e) => String(e || '').trim().toLowerCase();
 
-/** Validate + normalise the request. Returns { ok, errors[], value }. */
-function normaliseInput(data) {
+/**
+ * Validate + normalise the request. Returns { ok, errors[], value }.
+ * `attach` (2.0.5 RC2): the company is added to the tenant of an ALREADY signed-in admin - no admin account is created, so no admin e-mail / password is asked for.
+ */
+function normaliseInput(data, { attach = false } = {}) {
   const d = data || {};
   const errors = [];
   const companyName = String(d.companyName || '').trim();
   if (!companyName) errors.push('companyName is required');
   let email = normEmail(d.adminEmail);
   if (!email && d.adminUsername) email = normEmail(`${String(d.adminUsername).replace(/\s+/g, '_')}@texacore.local`);
-  if (!email || !EMAIL_RE.test(email)) errors.push('a valid adminEmail is required');
+  if (!attach && (!email || !EMAIL_RE.test(email))) errors.push('a valid adminEmail is required');
   const password = String(d.adminPassword || '');
-  if (password.length < MIN_PASSWORD_LENGTH) errors.push(`adminPassword must be at least ${MIN_PASSWORD_LENGTH} characters`);
+  if (!attach && password.length < MIN_PASSWORD_LENGTH) errors.push(`adminPassword must be at least ${MIN_PASSWORD_LENGTH} characters`);
   const cur = (v) => (v === undefined || v === null || v === '' ? '' : String(v).trim().toUpperCase());
   const localCurrency = cur(d.localCurrency);
   if (!/^[A-Z]{3}$/.test(localCurrency)) errors.push('localCurrency (ISO 4217, 3 letters) is required — it comes from the user\'s choice or the imported file; there is no default');
@@ -86,6 +89,17 @@ function normaliseInput(data) {
   };
 }
 
+/**
+ * The e-mail / admin name is already an account on this computer. The wizard's old advice ("use another e-mail") left a signed-in admin no way to add a second
+ * company to their own tenant, so the answer now names both ways out (2.0.5 RC2): another admin name, or sign in as that admin and create the company from the account.
+ */
+function emailExistsAnswer() {
+  return {
+    success: false, code: 'EMAIL_EXISTS', hint: 'sign_in_or_choose_another',
+    error: 'This admin name/e-mail is already used on this computer. Choose another admin name, or sign in as that admin first and create the company from your account.',
+  };
+}
+
 /** Run fn(client) on a short-lived superuser connection (the installer's own DB access). */
 async function withClient(deps, fn) {
   const client = await deps.connect();
@@ -98,21 +112,109 @@ async function emailExists(client, email) {
 }
 
 /**
+ * Step "the company" of createLocalCompany, shared with the attach flow: through the SERVER functions, as the admin (`rpc` carries the admin's JWT).
+ *   purpose '' / blank → fn_provision_new_company;  'rsf_import' → fn_provision_import_target_company (empty, status 'provisioning', returns the provisioning key).
+ */
+async function provisionCompanyAs(rpc, v, tenantId) {
+  const supported = [...new Set([v.localCurrency, v.mainCurrency].filter(Boolean))];
+  const key = `local-setup:${crypto.randomUUID()}`;
+  if (v.purpose === 'rsf_import') {
+    const r = await rpc('fn_provision_import_target_company', {
+      p_tenant_id: tenantId, p_company_name: v.companyName, p_currency: v.localCurrency, p_country_code: v.country || null,
+      p_idempotency_key: key, p_created_source: 'rsf_import', p_supported_currencies: supported,
+    });
+    if (r.status !== 200 || !r.body || !r.body.company_id) {
+      throw new ProvisioningError('COMPANY_FAILED', `fn_provision_import_target_company failed (${r.status}): ${JSON.stringify(r.body)}`);
+    }
+    return { companyId: r.body.company_id, provisioningKey: r.body.operation_key || key, createdSource: 'rsf_import' };
+  }
+  const r = await rpc('fn_provision_new_company', {
+    p_tenant_id: tenantId, p_idempotency_key: key,
+    p_company: {
+      name: v.companyName, business_type: 'general', company_type: 'production',
+      country_code: v.country || undefined, city: v.city || undefined, phone: v.phone || undefined, address: v.address || undefined,
+      default_currency: v.localCurrency, supported_currencies: supported,
+      chart_template: v.chartTemplate, fiscal_year_start_month: v.fiscalYearStart, language: v.language,
+    },
+  });
+  if (r.status !== 200 || !r.body || !(r.body.company_id || r.body.success)) {
+    throw new ProvisioningError('COMPANY_FAILED', `fn_provision_new_company failed (${r.status}): ${JSON.stringify(r.body)}`);
+  }
+  return { companyId: r.body.company_id, provisioningKey: null, createdSource: null };
+}
+
+/**
+ * 2.0.5 RC2 — «attach»: the wizard is opened by an admin who is ALREADY signed in on this computer (the owner's report: creating a second company with the same
+ * admin name hit EMAIL_EXISTS, and a different name made a second tenant). With callerAccessToken the company is created INSIDE the caller's own tenant:
+ * no tenant, no account, no session is created; the server functions are called with the CALLER's JWT (so every server guard sees him), the caller must be the
+ * tenant's administrator (user_profiles.is_tenant_admin, or the tenants.owner_email), and his own profile.company_id is left alone when it is already set.
+ */
+async function attachCompanyToCaller(deps, v, callerAccessToken, log) {
+  if (typeof callerAccessToken !== 'string' || !callerAccessToken.trim()) return { success: false, code: 'INVALID_SESSION', error: 'the sign-in session is not valid or has expired - sign in again' };
+  const token = callerAccessToken.trim();
+  const caller = await authenticateCaller(deps, token);
+  if (!caller.ok) {
+    return caller.code === 'SERVICES_DOWN'
+      ? { success: false, code: 'SERVICES_DOWN', error: caller.error }
+      : { success: false, code: 'INVALID_SESSION', error: 'the sign-in session is not valid or has expired - sign in again' };
+  }
+  const prof = await withClient(deps, async (c) => {
+    const r = await c.query(
+      `SELECT up.id, up.tenant_id, up.company_id, COALESCE(up.is_tenant_admin, false) AS is_tenant_admin, COALESCE(up.is_active, true) AS is_active,
+              lower(au.email) AS email, lower(t.owner_email) AS owner_email
+         FROM public.user_profiles up JOIN auth.users au ON au.id = up.id LEFT JOIN public.tenants t ON t.id = up.tenant_id
+        WHERE up.id = $1`, [caller.id]);
+    return r.rows[0] || null;
+  });
+  const isAdmin = !!prof && !!prof.tenant_id && prof.is_active !== false && (prof.is_tenant_admin === true || (!!prof.owner_email && prof.owner_email === prof.email));
+  if (!isAdmin) return { success: false, code: 'NOT_TENANT_ADMIN', error: 'Only the tenant administrator can create a company here. Sign in as the administrator, or choose another admin name to create a separate account.' };
+  const tenantId = prof.tenant_id;
+  // the subscription (plan + modules) the company-creation quota check needs - the same step as for a brand-new tenant
+  if (deps.ensureSubscription) await deps.ensureSubscription(tenantId);
+  const rpc = (fn, args) => httpJson('POST', `${deps.restUrl}/rpc/${fn}`, { headers: { apikey: deps.anonKey, Authorization: `Bearer ${token}` }, body: args });
+  const made = await provisionCompanyAs(rpc, v, tenantId);
+  // the admin's active company: only when he has none (an admin who works in another company keeps it)
+  await withClient(deps, async (c) => {
+    await c.query('BEGIN');
+    try {
+      await c.query(`SELECT set_config('app.is_registering', 'true', true)`);
+      await c.query('UPDATE public.user_profiles SET company_id = $2 WHERE id = $1 AND company_id IS NULL', [caller.id, made.companyId]);
+      await c.query('COMMIT');
+    } catch (e) { await c.query('ROLLBACK'); throw e; }
+  });
+  log(`[Provision] company ${made.companyId} attached to tenant ${tenantId} (${v.purpose || 'blank'}), created by the signed-in admin ${caller.id}`);
+  return {
+    success: true, attached: true, tenantId, companyId: made.companyId, adminUserId: caller.id, adminEmail: prof.email || caller.email,
+    provisioningKey: made.provisioningKey, createdSource: made.createdSource, localCurrency: v.localCurrency,
+  };
+}
+
+/**
  * Create tenant + owner + company. See the file header for the rules.
  * deps: { connect(): Promise<pg.Client>, gotrueUrl, restUrl, anonKey, serviceKey, ensureSubscription(tenantId), log }
  * Returns { success:true, ... } or { success:false, code, error } — it never throws for expected failures.
  */
 async function createLocalCompany(deps, rawInput) {
   const log = deps.log || (() => {});
-  const norm = normaliseInput(rawInput);
+  // 2.0.5 RC2: a signed-in admin adds a company to HIS tenant (callerAccessToken) - nothing else is created
+  const attach = !!rawInput && typeof rawInput === 'object' && rawInput.callerAccessToken !== undefined && rawInput.callerAccessToken !== null && rawInput.callerAccessToken !== '';
+  const norm = normaliseInput(rawInput, { attach });
   if (!norm.ok) return { success: false, code: 'INVALID_INPUT', error: norm.errors.join('; '), errors: norm.errors };
   const v = norm.value;
+  if (attach) {
+    try { return await attachCompanyToCaller(deps, v, rawInput.callerAccessToken, log); }
+    catch (err) {
+      log(`[Provision] attach failed: ${err.code || 'error'}`);   // nothing was created by this call: there is nothing to clean up
+      if (servicesDown(err)) return { success: false, code: 'SERVICES_DOWN', error: 'the services are not available' };
+      return { success: false, code: err.code || 'PROVISION_FAILED', error: err.message };
+    }
+  }
 
   const created = { tenantId: null, userId: null };
   try {
     // 1. EMAIL_EXISTS — decided before a single row is written
     if (await withClient(deps, (c) => emailExists(c, v.email))) {
-      return { success: false, code: 'EMAIL_EXISTS', error: 'This email is already registered on this computer. Use another email, or sign in with it.' };
+      return emailExistsAnswer();
     }
 
     // 2. tenant — with its owner_email from the start
@@ -145,7 +247,7 @@ async function createLocalCompany(deps, rawInput) {
       const ec = create.body && (create.body.error_code || create.body.code);
       await cleanup(deps, created, log);
       if (ec === 'email_exists' || create.status === 422) {
-        return { success: false, code: 'EMAIL_EXISTS', error: 'This email is already registered on this computer.' };
+        return emailExistsAnswer();
       }
       return { success: false, code: 'AUTH_USER_FAILED', error: `Could not create the sign-in account (${create.status}): ${JSON.stringify(create.body)}` };
     }
@@ -187,33 +289,8 @@ async function createLocalCompany(deps, rawInput) {
     });
 
     // 7. the company — through the server functions, as the admin
-    const supported = [...new Set([v.localCurrency, v.mainCurrency].filter(Boolean))];
-    const key = `local-setup:${crypto.randomUUID()}`;
-    let companyId; let provisioningKey = null; let createdSource = null;
-    if (v.purpose === 'rsf_import') {
-      const r = await rpc('fn_provision_import_target_company', {
-        p_tenant_id: tenantId, p_company_name: v.companyName, p_currency: v.localCurrency, p_country_code: v.country || null,
-        p_idempotency_key: key, p_created_source: 'rsf_import', p_supported_currencies: supported,
-      });
-      if (r.status !== 200 || !r.body || !r.body.company_id) {
-        throw new ProvisioningError('COMPANY_FAILED', `fn_provision_import_target_company failed (${r.status}): ${JSON.stringify(r.body)}`);
-      }
-      companyId = r.body.company_id; provisioningKey = r.body.operation_key || key; createdSource = 'rsf_import';
-    } else {
-      const r = await rpc('fn_provision_new_company', {
-        p_tenant_id: tenantId, p_idempotency_key: key,
-        p_company: {
-          name: v.companyName, business_type: 'general', company_type: 'production',
-          country_code: v.country || undefined, city: v.city || undefined, phone: v.phone || undefined, address: v.address || undefined,
-          default_currency: v.localCurrency, supported_currencies: supported,
-          chart_template: v.chartTemplate, fiscal_year_start_month: v.fiscalYearStart, language: v.language,
-        },
-      });
-      if (r.status !== 200 || !r.body || !(r.body.company_id || r.body.success)) {
-        throw new ProvisioningError('COMPANY_FAILED', `fn_provision_new_company failed (${r.status}): ${JSON.stringify(r.body)}`);
-      }
-      companyId = r.body.company_id;
-    }
+    const made = await provisionCompanyAs(rpc, v, tenantId);
+    const companyId = made.companyId; const provisioningKey = made.provisioningKey; const createdSource = made.createdSource;
 
     // 8. the admin's active company
     await withClient(deps, async (c) => {

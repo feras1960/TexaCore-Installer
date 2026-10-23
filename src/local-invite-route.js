@@ -15,8 +15,8 @@
 //                              request_ids:[], accepted, companies:[{ company_id, company_name, login_code }] } }
 //   4xx/5xx { success:false, code, reason?, error, current?, max?, retry_after_sec? }
 //     code: BAD_REQUEST 400 (415 json_required, 413 too_large) | AUTH_REQUIRED 401 | NOT_ALLOWED 403 | ROLE_NOT_GRANTABLE 403 | CROSS_ORIGIN 403 |
-//           PLAN_LIMIT_EXCEEDED 403 | RATE_LIMITED 429 (+ Retry-After) | SERVICES_DOWN 503 | INVITE_FAILED 409 (a known refusal: already_member,
-//           foreign_tenant_account, membership_removed, email_exists ...) or 500
+//           PLAN_LIMIT_EXCEEDED 403 | RATE_LIMITED 429 (+ Retry-After) | SERVICES_DOWN 503 | INVITE_FAILED 400 (a refusal the database gave:
+//           already_member, foreign_tenant_account, membership_removed, email_exists ...) or 500
 //
 // Never: a CORS header, the service key / admin secret / local API secret, a token or the one-time password in a log line. Responses are `no-store`.
 // ════════════════════════════════════════════════════════════════
@@ -81,7 +81,7 @@ function readJsonBody(req, limit) {
   });
 }
 
-/** A refusal word the database itself gave (already_member, foreign_tenant_account ...) is a 409; our own internal failures are not. */
+/** A refusal word the database itself gave (already_member, foreign_tenant_account ...) is a 400 (the request cannot be applied); our own internal failures are a 500. */
 function isServerRefusal(reason) {
   const r = String(reason || '');
   return KNOWN_REFUSALS.has(r) || (/^[a-z0-9_]+$/.test(r) && !['error', 'refused', 'account_create_failed', 'jwt'].includes(r));
@@ -95,7 +95,7 @@ function statusFor(f) {
     case 'NOT_ALLOWED': case 'ROLE_NOT_GRANTABLE': case 'CROSS_ORIGIN': case 'PLAN_LIMIT_EXCEEDED': return 403;
     case 'RATE_LIMITED': return 429;
     case 'SERVICES_DOWN': return 503;
-    case 'INVITE_FAILED': return isServerRefusal(f.reason) ? 409 : 500;
+    case 'INVITE_FAILED': return isServerRefusal(f.reason) ? 400 : 500;
     default: return 500;
   }
 }
