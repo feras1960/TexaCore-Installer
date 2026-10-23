@@ -1,6 +1,6 @@
 {
   "name": "texacore-installer",
-  "version": "2.0.4",
+  "version": "2.0.5",
   "buildDate": "2026-10-17",
   "description": "TexaCore ERP — Local Desktop Server (hybrid)",
   "main": "src/main.js",

@@ -23,14 +23,48 @@ test('baseline/MIGRATIONS_PIN.json exists, is valid and tied to the PINNED basel
   assert.equal(pin.baselineSha256, pinSha);
 });
 
-test('2.0.4 ships the 19 migrations production received after the 2026-10-13T13:21Z cut that matter locally, in PRODUCTION\'s apply order (s and t before r and u; v; then x, 20270211a, y - NOT alphabetical: y was applied after 11a - and finally 20270211b, c, d of 16-10); 20270210l is production-only data and is NOT shipped', () => {
-  assert.deepEqual(pin.migrations.map((x) => x.name.replace(/^2027021[01]([a-z]).*/, '$1')), ['i', 'j', 'k', 'q', 'm', 'n', 'o', 'p', 's', 't', 'r', 'u', 'v', 'x', 'a', 'y', 'b', 'c', 'd']);
-  assert.deepEqual(pin.migrations.slice(0, 16).map((x) => x.name.slice(0, 9)), ['20270210i', '20270210j', '20270210k', '20270210q', '20270210m', '20270210n', '20270210o', '20270210p', '20270210s', '20270210t', '20270210r', '20270210u', '20270210v', '20270210x', '20270211a', '20270210y']);
-  assert.deepEqual(pin.migrations.slice(16).map((x) => x.name), ['20270211b_campaign_trial_links', '20270211c_mfg_round2_guards', '20270211d_mfg_round3_quality_costing']);
-  assert.deepEqual(pin.migrations.map((x) => x.order), [1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]);
-  assert.ok(!pin.migrations.some((x) => /20270210l/.test(x.name)));
-  // the first 16 are exactly what 2.0.3 shipped (same names, same sha256): the upgrade from 2.0.3 applies ONLY b, c, d
-  assert.equal(require('crypto').createHash('sha256').update(JSON.stringify(pin.migrations.slice(0, 16).map((x) => [x.name, x.sha256]))).digest('hex'), 'f7ba5616c9674ef39d91c1b232396731293cdf07da459304e7985980c6b106d3', 'the first 16 entries (name + sha256) are byte-for-byte what 2.0.3 pinned');
+test('2.0.5 ships the 53 migrations production received after the 2026-10-13T13:21Z cut that matter locally, in PRODUCTION\'s apply order: the 19 of 2.0.4 first (unchanged), then 20270220x/y (applied 13-15 Oct, no function in common with the 19), then 17-10 to 23-10 as BOARD records them (the 16:40 batch of 20-10 is 19a, b, c, 23a-h; 26d before 26c); 20270210l is production-only data and 20270217b is a catalogue-data migration - neither is shipped', () => {
+  assert.deepEqual(pin.migrations.slice(0, 19).map((x) => x.name.replace(/^2027021[01]([a-z]).*/, '$1')), ['i', 'j', 'k', 'q', 'm', 'n', 'o', 'p', 's', 't', 'r', 'u', 'v', 'x', 'a', 'y', 'b', 'c', 'd']);
+  assert.deepEqual(pin.migrations.slice(19).map((x) => x.name), [
+    "20270220x_ecom_smoke_fixes",
+    "20270220y_ecom_single_erp_customer",
+    "20270213a_exchange_setup_create_only",
+    "20270214a_serial_readers_company_scope",
+    "20270215x_sales_owner_stock_policy",
+    "20270217a_specialized_modules_core",
+    "20270217c_licence_specialized_choice",
+    "20270217d_stock_base_not_fabric",
+    "20270217e_default_choice_from_first_company",
+    "20270218a_posting_capability_gate",
+    "20270218b_voucher_create_capability",
+    "20270221a_crm_opportunity_plan_limit",
+    "20270221b_legal_documents_acceptances",
+    "20270219a_return_draft_writers",
+    "20270219b_return_tables_closed_purchase_guards",
+    "20270219c_return_cancel_door_ecom_cap",
+    "20270223a_workflow_guards_stage_delete_post",
+    "20270223b_quantity_receipt_rpc",
+    "20270223c_client_write_guards",
+    "20270223d_sales_delivery_dead_ends",
+    "20270223e_payment_limits_and_sales_paid_currency",
+    "20270223f_partial_goods_receipt_clear_refusal",
+    "20270223g_reverse_sales_delivery",
+    "20270223h_workflow_guards_residuals",
+    "20270227a_crm_ai_summaries_switch",
+    "20270226a_delivery_note_draft_doors",
+    "20270226b_delivery_note_line_facts",
+    "20270226d_delivery_note_number_allocator_hardening",
+    "20270226c_goods_receipt_draft_doors",
+    "20270233a_mfg_receipt_known_value",
+    "20270233b_mfg_component_cost_known",
+    "20270236a_receive_quantity_stock_base_cost",
+    "20270237a_new_company_seeds",
+    "20270237c_chart_template_currency_box_names"
+]);
+  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 53 }, (_, i) => i + 1));
+  assert.ok(!pin.migrations.some((x) => /20270210l|20270217b/.test(x.name)));
+  // the first 19 are exactly what 2.0.4 shipped (same names, same sha256): the upgrade from 2.0.4 applies ONLY the 34 after them
+  assert.equal(require('crypto').createHash('sha256').update(JSON.stringify(pin.migrations.slice(0, 19).map((x) => [x.name, x.sha256]))).digest('hex'), '85744a0afb4dc0c7000a047e212257d8ae47158cd6736f431f4175b0a7ae137c', 'the first 19 entries (name + sha256) are byte-for-byte what 2.0.4 pinned');
 });
 
 test('the pin holds names, order, sha256 and sizes ONLY: no SQL, no tenant id, no function body (the repo is public)', () => {
@@ -111,8 +145,8 @@ test('the measured inventory delta (baseline/migrations.inventory.json, private)
   assert.deepEqual(r.problems, []);
   assert.ok(r.inventory.catalogDelta && r.inventory.functions);
   assert.ok(Object.keys(r.inventory.functions).length > 50);
-  assert.equal(r.inventory.catalogDelta.tables, 3, 'the runner\'s own bookkeeping table + the two tables 20270211b / 20270211c add');
-  for (const sig of Object.keys(r.inventory.functions)) assert.match(sig, /^public\.[a-z_0-9]+\(.*\)$/, sig);
+  assert.equal(r.inventory.catalogDelta.tables, 12, 'the runner\'s own bookkeeping table + the 11 tables the 53 migrations add');
+  for (const sig of Object.keys(r.inventory.functions)) assert.match(sig, /^(public|licensing)\.[a-z_0-9]+\(.*\)$/, sig);   // 2.0.5: a licensing-schema trigger function is replaced too (the inventory schemas: public, licensing, newpost, tomgenerators)
 });
 
 test('the generated ./migrations is exactly the pin (names, order, sha256, sizes, baseline) and carries the pinned inventory', { skip: !generated || !haveInventory }, () => {
@@ -137,6 +171,8 @@ test('every generated migration is ONE transaction (BEGIN … COMMIT), so a fail
 test('no shipped migration names a production tenant: no uuid literal in any of them (20270210l, which named 16, is not shipped)', { skip: !generated }, () => {
   for (const e of manifestOf().migrations) {
     const sql = fs.readFileSync(path.join(ROOT, 'migrations', e.file), 'utf8');
-    assert.doesNotMatch(sql, /'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'/i, `${e.file}: a uuid literal`);
+    // 20270226b seeds ONE system print template under a fixed, hand-made id (date-shaped, not a tenant, company or user id); nothing else may carry a uuid literal
+    const literals = (sql.match(/'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'/gi) || []).filter((x) => x.toLowerCase() !== "'20270226-0000-4000-8000-000000000026'");
+    assert.deepEqual(literals, [], `${e.file}: a uuid literal`);
   }
 });

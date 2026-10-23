@@ -24,7 +24,7 @@ test('NO plan limit or module list is written in the program: plan-sync.js carri
   const seed = fs.readFileSync(path.join(__dirname, '..', 'src', 'bootstrap', 'reference_seed.sql'), 'utf8');
   // production subscription_plans, owner-provided 2026-10-13: users, companies, branches, warehouses, products, invoices/month, customers, documents
   const row = (code) => new RegExp(`'${code}', '[^']+', '[^']+', '(?:free|paid)', (-?\\d+), (-?\\d+), (-?\\d+), (-?\\d+), (-?\\d+), (-?\\d+), (-?\\d+), (-?\\d+), (-?\\d+), (-?\\d+), (-?\\d+),`).exec(seed).slice(1, 12).map(Number);
-  assert.deepEqual(row('free').slice(0, 8), [1, 1, 1, 1, -1, 200, 200, 500]);
+  assert.deepEqual(row('free').slice(0, 8), [1, -1, 1, 1, -1, 200, 200, 500]);   // 2.0.5: free max_companies is -1 (owner decision 19-10, production since then)
   assert.deepEqual(row('texa-starter').slice(0, 8), [3, 1, 1, 2, 2000, 1000, -1, -1]);
   assert.deepEqual(row('texa-professional').slice(0, 8), [10, 3, 5, 10, 20000, 5000, -1, -1]);
   assert.deepEqual(row('texa-enterprise').slice(0, 8), [-1, -1, -1, -1, -1, -1, -1, -1]);

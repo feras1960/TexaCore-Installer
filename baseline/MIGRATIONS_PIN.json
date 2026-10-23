@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "7dcb21e5415276b8ae43b3e2fff5fa3d75dc8b2c",
+  "erpCommit": "2e96db59f35d5c65bc90a1dfaeac296089398d7d",
   "migrations": [
     {
       "order": 1,
@@ -136,11 +136,249 @@
       "file": "20270211d_mfg_round3_quality_costing.sql",
       "sha256": "3f1b0a4815c7021a22ff8d8f59daf58fcaecac269bf8ce07f83fa8124c3bdd1a",
       "bytes": 176230
+    },
+    {
+      "order": 20,
+      "name": "20270220x_ecom_smoke_fixes",
+      "file": "20270220x_ecom_smoke_fixes.sql",
+      "sha256": "0192048701a7f36e19ce4506ed43094f9a40442ca33dbb9088eb516d2f6c6cfe",
+      "bytes": 41834
+    },
+    {
+      "order": 21,
+      "name": "20270220y_ecom_single_erp_customer",
+      "file": "20270220y_ecom_single_erp_customer.sql",
+      "sha256": "22dedde609b0c7f3e09d7e14b2e2aca39e89bf35163c8d8c86abebea589d78d9",
+      "bytes": 31939
+    },
+    {
+      "order": 22,
+      "name": "20270213a_exchange_setup_create_only",
+      "file": "20270213a_exchange_setup_create_only.sql",
+      "sha256": "c3aa2b19783d2ea615e72bf5c10bc112e76351906b4afc62813e2661a4ed1258",
+      "bytes": 12302
+    },
+    {
+      "order": 23,
+      "name": "20270214a_serial_readers_company_scope",
+      "file": "20270214a_serial_readers_company_scope.sql",
+      "sha256": "04ce02d3d48c78fc65a6f9bd017872025b0d15d867f32bfa143b540e909b3c67",
+      "bytes": 11872
+    },
+    {
+      "order": 24,
+      "name": "20270215x_sales_owner_stock_policy",
+      "file": "20270215x_sales_owner_stock_policy.sql",
+      "sha256": "bb3d82a9779b7d3365f0b788f54a425b6f4d71eacb37a60186f92ceb32a5ae10",
+      "bytes": 155010
+    },
+    {
+      "order": 25,
+      "name": "20270217a_specialized_modules_core",
+      "file": "20270217a_specialized_modules_core.sql",
+      "sha256": "228a41a53c006bd692e74f98dc5a6b7ed55bcd4c577ca3f99a782a616e87b6f9",
+      "bytes": 64328
+    },
+    {
+      "order": 26,
+      "name": "20270217c_licence_specialized_choice",
+      "file": "20270217c_licence_specialized_choice.sql",
+      "sha256": "1483c962960632615d4b686ff50f84255c5dce68b287eefa625ff04bed9fdb99",
+      "bytes": 26281
+    },
+    {
+      "order": 27,
+      "name": "20270217d_stock_base_not_fabric",
+      "file": "20270217d_stock_base_not_fabric.sql",
+      "sha256": "311e7c99cfb79001c3ace0f38bd24d9fce00eff64204346e9bb5939d1b5e73a5",
+      "bytes": 26456
+    },
+    {
+      "order": 28,
+      "name": "20270217e_default_choice_from_first_company",
+      "file": "20270217e_default_choice_from_first_company.sql",
+      "sha256": "8531789217a1167e38e1733cc17753ac040ede3a2a8c8e488f06a890d08e7a8a",
+      "bytes": 10125
+    },
+    {
+      "order": 29,
+      "name": "20270218a_posting_capability_gate",
+      "file": "20270218a_posting_capability_gate.sql",
+      "sha256": "169411498f611d62a61fec5303ae13e21435ecb5c3bbae9057d58337e8716919",
+      "bytes": 27871
+    },
+    {
+      "order": 30,
+      "name": "20270218b_voucher_create_capability",
+      "file": "20270218b_voucher_create_capability.sql",
+      "sha256": "0a6e3d344a3018bef033acd49dffd4fc51552f6c7e893c38a2316c9bea7a7156",
+      "bytes": 23519
+    },
+    {
+      "order": 31,
+      "name": "20270221a_crm_opportunity_plan_limit",
+      "file": "20270221a_crm_opportunity_plan_limit.sql",
+      "sha256": "e27cad83703a4a936f320a87863e10f1ae8e42461f4bfd1644f9a452d74d4602",
+      "bytes": 68625
+    },
+    {
+      "order": 32,
+      "name": "20270221b_legal_documents_acceptances",
+      "file": "20270221b_legal_documents_acceptances.sql",
+      "sha256": "a7818a4b3057e30a986d66b7d717b7dbbf0ab441b57ad5c955e9c4ce33553b22",
+      "bytes": 31883
+    },
+    {
+      "order": 33,
+      "name": "20270219a_return_draft_writers",
+      "file": "20270219a_return_draft_writers.sql",
+      "sha256": "6d86c7283008592203f41cc1bbd6bd6ef2e16aecebbff7b3cd6b6c2803721a37",
+      "bytes": 95780
+    },
+    {
+      "order": 34,
+      "name": "20270219b_return_tables_closed_purchase_guards",
+      "file": "20270219b_return_tables_closed_purchase_guards.sql",
+      "sha256": "6b913326e8c2cc3918684f7b600ef1ebf287292f5ab454652e77bcb35fe10960",
+      "bytes": 16699
+    },
+    {
+      "order": 35,
+      "name": "20270219c_return_cancel_door_ecom_cap",
+      "file": "20270219c_return_cancel_door_ecom_cap.sql",
+      "sha256": "95681d8df45941eff5a59fd2ff2722d812fdd35f586c23e74631b4a6fe91ab79",
+      "bytes": 21700
+    },
+    {
+      "order": 36,
+      "name": "20270223a_workflow_guards_stage_delete_post",
+      "file": "20270223a_workflow_guards_stage_delete_post.sql",
+      "sha256": "245eb97a31c2fdb19c42360716a64c4f434e73456b2bfeeb30118c43ed190626",
+      "bytes": 286517
+    },
+    {
+      "order": 37,
+      "name": "20270223b_quantity_receipt_rpc",
+      "file": "20270223b_quantity_receipt_rpc.sql",
+      "sha256": "ba86a27ecbddec3bcf0ace64c9cc25dc23ef1664e39fa4d914da919144f2cfdc",
+      "bytes": 19204
+    },
+    {
+      "order": 38,
+      "name": "20270223c_client_write_guards",
+      "file": "20270223c_client_write_guards.sql",
+      "sha256": "cb165a098b25cd4942e8beea0ee223ec4ed3d657288b127ee65e20add44d0e7b",
+      "bytes": 17738
+    },
+    {
+      "order": 39,
+      "name": "20270223d_sales_delivery_dead_ends",
+      "file": "20270223d_sales_delivery_dead_ends.sql",
+      "sha256": "b39a1d1c981e55e795c9ffda8fddb6dac2774820a362f684e61b5e6e8d19975c",
+      "bytes": 135067
+    },
+    {
+      "order": 40,
+      "name": "20270223e_payment_limits_and_sales_paid_currency",
+      "file": "20270223e_payment_limits_and_sales_paid_currency.sql",
+      "sha256": "ba81d127076952322722bad63c9a59aa599cb60043947233848cf86ba4675c7a",
+      "bytes": 23452
+    },
+    {
+      "order": 41,
+      "name": "20270223f_partial_goods_receipt_clear_refusal",
+      "file": "20270223f_partial_goods_receipt_clear_refusal.sql",
+      "sha256": "27066811f53b918aec9257f3449c429f9d1b67c9e43772066582f05e7f1ebcd1",
+      "bytes": 42313
+    },
+    {
+      "order": 42,
+      "name": "20270223g_reverse_sales_delivery",
+      "file": "20270223g_reverse_sales_delivery.sql",
+      "sha256": "5a0314bb029610e1eedc155dfa093092f80c225b229a9d1c301923b07aeeaa40",
+      "bytes": 35370
+    },
+    {
+      "order": 43,
+      "name": "20270223h_workflow_guards_residuals",
+      "file": "20270223h_workflow_guards_residuals.sql",
+      "sha256": "ae0773de7bfd958782fc238d2c17fd9a3b3d39663149a00c45a7cd4088e5dc17",
+      "bytes": 145803
+    },
+    {
+      "order": 44,
+      "name": "20270227a_crm_ai_summaries_switch",
+      "file": "20270227a_crm_ai_summaries_switch.sql",
+      "sha256": "2f4abd213ad39ea44114e3ebf585e9917e146fe3a6baf92728f8cd5e590811d0",
+      "bytes": 9273
+    },
+    {
+      "order": 45,
+      "name": "20270226a_delivery_note_draft_doors",
+      "file": "20270226a_delivery_note_draft_doors.sql",
+      "sha256": "68d76750221b10f7286e9975278102114bb69e5f28feace868ef6408d179957f",
+      "bytes": 71010
+    },
+    {
+      "order": 46,
+      "name": "20270226b_delivery_note_line_facts",
+      "file": "20270226b_delivery_note_line_facts.sql",
+      "sha256": "e1de366a924ce89d4ca90d9acda92c2bf16b9dea3311c5ded25d54ab3274aa23",
+      "bytes": 25961
+    },
+    {
+      "order": 47,
+      "name": "20270226d_delivery_note_number_allocator_hardening",
+      "file": "20270226d_delivery_note_number_allocator_hardening.sql",
+      "sha256": "bd27a33be25fe359baa45d0404a683afa1f263a555fbcf3cbf4d457e24da04e8",
+      "bytes": 21591
+    },
+    {
+      "order": 48,
+      "name": "20270226c_goods_receipt_draft_doors",
+      "file": "20270226c_goods_receipt_draft_doors.sql",
+      "sha256": "aa00a79ee42c4943e5da79272d6664f191a935d69272bd7b31c4bc51fdcef62f",
+      "bytes": 123669
+    },
+    {
+      "order": 49,
+      "name": "20270233a_mfg_receipt_known_value",
+      "file": "20270233a_mfg_receipt_known_value.sql",
+      "sha256": "fba11371803d54bc61416385a9a288147eb8f23c72032aaa738ca2c233e3f78d",
+      "bytes": 63782
+    },
+    {
+      "order": 50,
+      "name": "20270233b_mfg_component_cost_known",
+      "file": "20270233b_mfg_component_cost_known.sql",
+      "sha256": "13c57d06de8070d36977cba7d72936ae39538fb8f170ffff74ca8c7f4f440405",
+      "bytes": 37096
+    },
+    {
+      "order": 51,
+      "name": "20270236a_receive_quantity_stock_base_cost",
+      "file": "20270236a_receive_quantity_stock_base_cost.sql",
+      "sha256": "3313817aa99cee32f29b8595fc8b2b38967de5d99163deebee12bc739750dd91",
+      "bytes": 28400
+    },
+    {
+      "order": 52,
+      "name": "20270237a_new_company_seeds",
+      "file": "20270237a_new_company_seeds.sql",
+      "sha256": "8056d2fca6d4282675913853c29effc0d04048ae780343f4c8e6c3dc29b2974b",
+      "bytes": 69088
+    },
+    {
+      "order": 53,
+      "name": "20270237c_chart_template_currency_box_names",
+      "file": "20270237c_chart_template_currency_box_names.sql",
+      "sha256": "e721d0cc89e291d00d516fc7f9cf3f15c2011217147129bf07ff5d1603c3e9c8",
+      "bytes": 74362
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "82af87391c2c1032f912ec7c7e2e2bb7d220208ee64206be88630d67849d65c8",
-    "bytes": 17037
+    "sha256": "a7ac55a04e1d88cbb5441886111423dbff4f1c64c9c0244a7959287d864b34bb",
+    "bytes": 31611
   }
 }
