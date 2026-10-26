@@ -51,9 +51,8 @@ was opened in the packaged 2.0 through the launcher's «فتح» button with the
 - the "replace" step had already truncated the 2.0 tables, the dump's CREATE statements added ~38 tables / ~60 functions to the 2.0 database (integrity: 796 tables vs 758 expected; **38 of them anon-readable without row security**), and the sync would then have overwritten the 1.x file;
 - the signed-in 1.x admin saw no company.
 So `BackupManager.peekDumpMajor()` reads the dump header ("-- Dumped from database version N") and a file written by PostgreSQL < 17 is refused with `LEGACY_TCDB` before the backup manager is pointed at it and before any statement runs
-(`scripts/e2e/legacy-tcdb-check.js`: file byte-identical after a minute, database unchanged, hardening intact). The old data stays safe: the whole 1.x data folder is kept (`texacore-data.v18-backup-<time>`), and so is every .tcdb.
-The launcher's upgrade notice says so (and tells the user to create the company again or import from the Rashid file). A real migration of 1.x data needs a purpose-built converter (restore the dump into a scratch database and copy the common columns into the 2.0 schema,
-company data only) — not in 2.0.0.
+(measured then by a check that was removed in 2.0.5: the file stayed byte-identical after a minute, the database unchanged, the hardening intact). A data folder whose cluster is not PostgreSQL 17 is never started: it is kept whole (`texacore-data.v18-backup-<time>`) and a fresh install is built.
+2.0.5 (final) removed the one-time "upgrade notice" window and everything behind it (the carry-over of the licence / cloud settings from a 1.x folder, the list of old company files, the notice's open buttons): there are no users of the first version, so nothing is migrated from it. The `.tcdb` refusal (`LEGACY_TCDB`) stays.
 
 How the 1.x file was produced (lab only, never the product tree): a worktree of `c05be42`; its bundled PostgreSQL 15.17 restored from git; `scripts/e2e/lab-180-migrations.js` restores the 195 migration files the repo does not track (`migrations/` is ignored) from the ERP git history
 (3 installer-only `20260713L/M/N_local_*` files do not exist anywhere readable, so 299 of 333 migrations applied); every hard-coded service port in that copy moved into the 47391–47399 block — **including the literal `54322` in `main.js`, `migration-runner.js` and `backup-manager.js`, which
@@ -89,7 +88,7 @@ dev mode, or with `--app "dist/mac-arm64/TexaCore ERP.app"` against the PACKAGED
 isolation; admin-API secret; tunnel default-deny; GoTrue signup/admin; plan sync; Rashid import. Exit 0 = all passed; evidence in `<workdir>/results.json`.
 
 ```bash
-node scripts/e2e/states-check.js    --workdir /tmp/st --app "dist/mac-arm64/TexaCore ERP.app"   # interrupted first run / 1.x data dir / restart
+node scripts/e2e/states-check.js    --workdir /tmp/st --app "dist/mac-arm64/TexaCore ERP.app"   # interrupted first run / foreign (PG 15) data dir set aside / restart
 node scripts/e2e/backup-roundtrip.js --workdir /tmp/lc --app "dist/mac-arm64/TexaCore ERP.app"  # .tcdb backup → restore on an existing launch-check install
 npm test                                                                                        # unit tests (60)
 node scripts/check-rpc-coverage.js --erp $ERP                                                   # does the baseline contain every RPC the ERP calls?

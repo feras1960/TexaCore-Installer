@@ -66,9 +66,8 @@ test('prepareDataDir: a legacy dir is moved aside WHOLE, nothing deleted, a fres
   assert.ok(fs.existsSync(path.join(r.movedTo, 'pgdata', 'PG_VERSION')));
   assert.equal(fs.readFileSync(path.join(r.movedTo, 'config.json'), 'utf8'), '{"licenseKey":"K"}');
   assert.ok(fs.existsSync(path.join(r.movedTo, 'backups', 'a.tcdb')));
-  // fresh: no cluster, no backups, no secrets; only the allowlisted settings carried forward (licence key)
-  assert.deepEqual(fs.readdirSync(d).sort(), ['config.json', 'upgrade-notice.json']);
-  assert.deepEqual(JSON.parse(fs.readFileSync(path.join(d, 'config.json'), 'utf8')), { licenseKey: 'K' });
+  // fresh: no cluster, no backups, no secrets, no config, no notice - nothing is carried over from the old folder
+  assert.deepEqual(fs.readdirSync(d), []);
   assert.equal(b.detect(d).state, 'fresh');
 });
 
@@ -300,7 +299,7 @@ test('a baseline with a bare "null;" statement (an object whose definition came 
 });
 
 // ─── what a pre-2.0 dir leaves behind for the new install ───────────────────────────────────────────────────────
-test('legacy dir: moved aside whole; the NEW dir gets the licence and cloud settings but NOT the company list or any backup location', () => {
+test('legacy dir: moved aside whole and untouched; the new dir carries NOTHING over (no licence, no cloud settings, no company list, no backup location, no notice)', () => {
   const d = mkdtemp('dd-');
   fs.mkdirSync(path.join(d, 'pgdata'), { recursive: true }); fs.writeFileSync(path.join(d, 'pgdata', 'PG_VERSION'), '15\n');
   fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify({ licenseKey: 'TRL-2026-OLD', isTrial: true, subdomain: 'acme', enableCloud: true, tunnelToken: 'T', port: 8080, dbPassword: 'old',
@@ -308,22 +307,15 @@ test('legacy dir: moved aside whole; the NEW dir gets the licence and cloud sett
   fs.writeFileSync(path.join(d, 'license.dat'), 'encrypted-licence'); fs.mkdirSync(path.join(d, 'backups')); fs.writeFileSync(path.join(d, 'backups', 'old.tcdb'), 'OLD BACKUP');
   const r = b.prepareDataDir(d);
   assert.equal(r.state, 'legacy_v18');
-  const cfg = JSON.parse(fs.readFileSync(path.join(d, 'config.json'), 'utf8'));
-  assert.deepEqual(cfg, { licenseKey: 'TRL-2026-OLD', isTrial: true, subdomain: 'acme', enableCloud: true, tunnelToken: 'T', port: 8080 });
-  assert.equal(fs.readFileSync(path.join(d, 'license.dat'), 'utf8'), 'encrypted-licence');
-  assert.ok(!fs.existsSync(path.join(d, 'pgdata')) && !fs.existsSync(path.join(d, 'backups')));
+  assert.deepEqual(fs.readdirSync(d), [], 'the new dir is empty');
   // the old dir is untouched
   assert.equal(fs.readFileSync(path.join(r.movedTo, 'backups', 'old.tcdb'), 'utf8'), 'OLD BACKUP');
+  assert.equal(fs.readFileSync(path.join(r.movedTo, 'license.dat'), 'utf8'), 'encrypted-licence');
   assert.ok(JSON.parse(fs.readFileSync(path.join(r.movedTo, 'config.json'), 'utf8')).companies);
-  assert.equal(fs.statSync(path.join(d, 'config.json')).mode & 0o777, 0o600);
 });
 
-test('legacy dir without a licence or config: nothing is invented', () => {
-  const d = mkdtemp('dd-');
-  fs.mkdirSync(path.join(d, 'pgdata'), { recursive: true }); fs.writeFileSync(path.join(d, 'pgdata', 'PG_VERSION'), '16\n');
-  const r = b.prepareDataDir(d);
-  assert.equal(r.state, 'legacy_v18'); assert.deepEqual(fs.readdirSync(d), ['upgrade-notice.json']);   // nothing else is invented — only the notice that says where the old folder is
-  const n = b.readUpgradeNotice(d); assert.equal(n.folder, r.movedTo); assert.deepEqual(n.tcdb, []);
+test('the 1.x upgrade path is gone: no carry-over, no upgrade notice, no old-company-file collector', () => {
+  for (const name of ['carryForwardSettings', 'collectOldTcdbPaths', 'writeUpgradeNotice', 'readUpgradeNotice', 'dismissUpgradeNotice', 'UPGRADE_NOTICE_FILE']) assert.equal(b[name], undefined, name);
 });
 
 test('interrupted first run / fresh with an old config: the company list and backup paths are removed from config.json (the auto-backup must not overwrite the old .tcdb); the original is kept', () => {
@@ -352,48 +344,6 @@ test('a finished 2.0 install and a config without risky fields are left exactly 
   assert.equal(b.sanitizeConfigInPlace(e), null);
 });
 
-
-// ─── the one-time upgrade notice ────────────────────────────────────────────────────────────────────────────────────
-test('upgrade notice: written for a legacy dir with the old folder and ONLY the absolute .tcdb paths the old config named; re-checked and dismissable', () => {
-  const root = mkdtemp('dd-'); const d = path.join(root, 'texacore-data');
-  fs.mkdirSync(path.join(d, 'pgdata'), { recursive: true }); fs.writeFileSync(path.join(d, 'pgdata', 'PG_VERSION'), '15\n');
-  const real = path.join(root, 'old company.tcdb'); fs.writeFileSync(real, 'x');
-  fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify({ licenseKey: 'K', currentDbPath: real, companies: [
-    { name: 'Old Co', tcdbPath: real }, { name: 'Gone Co', tcdbPath: path.join(root, 'gone.tcdb') }, { name: 'relative', tcdbPath: 'rel/x.tcdb' }, { name: 'not a tcdb', tcdbPath: path.join(root, 'x.txt') }, null,
-  ] }));
-  const r = b.prepareDataDir(d);
-  const n = b.readUpgradeNotice(d);
-  assert.equal(n.kind, 'legacy'); assert.equal(n.folder, r.movedTo); assert.equal(n.folderExists, true);
-  assert.deepEqual(n.tcdb.map((t) => [t.name, t.path, t.exists]), [['Old Co', real, true], ['Gone Co', path.join(root, 'gone.tcdb'), false]]);
-  assert.equal(fs.statSync(path.join(d, 'upgrade-notice.json')).mode & 0o777, 0o600);
-  assert.equal(b.dismissUpgradeNotice(d), true);
-  assert.equal(b.readUpgradeNotice(d), null);                       // never shown again
-  assert.equal(b.dismissUpgradeNotice(d), true);                    // idempotent
-});
-
-test('upgrade notice: a config sanitised in place that named company files also leaves a notice (folder = the data dir that holds the .pre-2.0 copy); no notice when nothing was named; none for a finished install', () => {
-  const root = mkdtemp('dd-'); const d = path.join(root, 'texacore-data'); fs.mkdirSync(d, { recursive: true });
-  const f = path.join(root, 'a.tcdb'); fs.writeFileSync(f, 'x');
-  fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify({ licenseKey: 'K', companies: [{ name: 'A', tcdbPath: f }] }));
-  b.prepareDataDir(d);
-  const n = b.readUpgradeNotice(d);
-  assert.equal(n.kind, 'config-kept'); assert.equal(n.folder, d); assert.equal(n.tcdb[0].path, f);
-  const e = mkdtemp('dd-'); fs.writeFileSync(path.join(e, 'config.json'), JSON.stringify({ licenseKey: 'K', storagePath: '/x' }));
-  b.prepareDataDir(e); assert.equal(b.readUpgradeNotice(e), null);
-  const g = mkdtemp('dd-'); fs.mkdirSync(path.join(g, 'pgdata'), { recursive: true }); fs.writeFileSync(path.join(g, 'pgdata', 'PG_VERSION'), '17\n');
-  fs.writeFileSync(path.join(g, 'bootstrap.json'), JSON.stringify({ status: 'ready' }));
-  b.prepareDataDir(g); assert.equal(b.readUpgradeNotice(g), null);
-});
-
-test('upgrade notice: a company file that lived inside the old data dir is listed at its NEW place', () => {
-  const root = mkdtemp('dd-'); const d = path.join(root, 'texacore-data');
-  fs.mkdirSync(path.join(d, 'pgdata'), { recursive: true }); fs.writeFileSync(path.join(d, 'pgdata', 'PG_VERSION'), '16\n');
-  fs.mkdirSync(path.join(d, 'backups')); fs.writeFileSync(path.join(d, 'backups', 'in.tcdb'), 'x');
-  fs.writeFileSync(path.join(d, 'config.json'), JSON.stringify({ companies: [{ name: 'In', tcdbPath: path.join(d, 'backups', 'in.tcdb') }] }));
-  const r = b.prepareDataDir(d);
-  const n = b.readUpgradeNotice(d);
-  assert.equal(n.tcdb[0].path, path.join(r.movedTo, 'backups', 'in.tcdb')); assert.equal(n.tcdb[0].exists, true);
-});
 
 // ── reference data on an EXISTING install (the ERP's global roles + capability map; loaded once after the migrations, idempotent) ──
 test('referenceDataIsStale: a finished install that never recorded the reference data (2.0.4 / RC) must load it; one that did, with the same sha256, must not', () => {

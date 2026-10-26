@@ -60,12 +60,6 @@ contextBridge.exposeInMainWorld('texacore', {
   onUpdateStatus: (cb) => ipcRenderer.on('update-status', (_, d) => cb(d)),
   getUpdateStatus: () => ipcRenderer.invoke('get-update-status'),
   updateControl: (action) => ipcRenderer.invoke('update-control', action),   // 'pause' | 'resume' | 'retry'
-  // one-time notice after an upgrade over a 1.x install
-  getUpgradeNotice: () => ipcRenderer.invoke('upgrade-notice-get'),
-  dismissUpgradeNotice: () => ipcRenderer.invoke('upgrade-notice-dismiss'),
-  openUpgradeFolder: () => ipcRenderer.invoke('upgrade-notice-open-folder'),
-  openUpgradeTcdb: (filePath, opts) => ipcRenderer.invoke('upgrade-notice-open-tcdb', filePath, opts),   // 2.0.5: opts = { confirmReplaceAll:true } after the window asked
-
   // 2.0.5 RC2 launcher
   setLanAddress: (address) => ipcRenderer.invoke('set-lan-address', address),            // '' = automatic
   listBackups: (limit) => ipcRenderer.invoke('list-backups', limit),

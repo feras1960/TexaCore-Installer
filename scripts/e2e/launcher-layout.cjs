@@ -63,7 +63,6 @@ function stubSource(state) {
       checkForUpdate: rec('checkForUpdate', { available: false }), installUpdate: rec('installUpdate', {}), openBrowser: rec('openBrowser', {}),
       onUpdateAvailable: on('update-available'), onUpdateProgress: on('update-progress'), onUpdateDownloaded: on('update-downloaded'), onUpdateNotAvailable: on('update-not-available'), onUpdateStatus: on('update-status'),
       getUpdateStatus: rec('getUpdateStatus', S.update || { phase: 'idle' }), updateControl: rec('updateControl', { ok: true, status: S.update || { phase: 'idle' } }),
-      getUpgradeNotice: rec('getUpgradeNotice', null), dismissUpgradeNotice: rec('dismissUpgradeNotice', { success: true }), openUpgradeFolder: rec('openUpgradeFolder', { success: true }), openUpgradeTcdb: rec('openUpgradeTcdb', { success: false }),
       backupStatus: rec('backupStatus', { running: false, syncing: false, liveFile: S.liveFile, plannedCompanies: 0, targets: S.liveFile ? [{ role: 'primary', path: S.liveFile, dir: '/x', exists: true, state: S.syncState || 'ok', lastSuccess: new Date(now - 20000).toISOString(), error: S.syncState === 'error' ? { reason: 'no-permission' } : null, cloudFolder: null }] : [], consecutiveFailures: S.syncState === 'error' ? 3 : 0 }),
       backupNow: rec('backupNow', { success: true }), revealBackup: rec('revealBackup', { success: true }), restoreBackup: rec('restoreBackup', {}),
       listBackups: rec('listBackups', { success: true, total: 3, items: [

@@ -1150,40 +1150,6 @@ const heartbeatSender = new HeartbeatSender();
 // Get app version + build date
 ipcMain.on('get-local-api-secret', (event) => { event.returnValue = (svcManager && svcManager.localApiSecret) || ''; });
 
-// ─── One-time upgrade notice (the launcher shows it after an upgrade over a 1.x install; state: <data dir>/upgrade-notice.json) ───
-// The renderer can only act on what the notice itself names: its folder, and the company files the old config listed — never a path of its choosing.
-const upgradeBootstrap = require('./bootstrap');
-ipcMain.handle('upgrade-notice-get', async () => {
-  const n = upgradeBootstrap.readUpgradeNotice(DATA_DIR);
-  return n ? { ...n, appVersion: app.getVersion() } : null;
-});
-ipcMain.handle('upgrade-notice-dismiss', async () => ({ success: upgradeBootstrap.dismissUpgradeNotice(DATA_DIR) }));
-ipcMain.handle('upgrade-notice-open-folder', async () => {
-  const n = upgradeBootstrap.readUpgradeNotice(DATA_DIR);
-  if (!n || !n.folder || !fs.existsSync(n.folder)) return { success: false, error: 'folder not found' };
-  // an isolated test run records the request instead of opening a Finder / Explorer window on the tester's screen
-  if (HARNESS_OK && process.env.TEXACORE_STUB_SHELL === '1') { fileLog('[Shell] would open the folder:', n.folder); return { success: true, stubbed: true, folder: n.folder }; }
-  const err = await shell.openPath(n.folder);
-  return err ? { success: false, error: err } : { success: true, folder: n.folder };
-});
-ipcMain.handle('upgrade-notice-open-tcdb', async (_, filePath, opts) => {
-  const n = upgradeBootstrap.readUpgradeNotice(DATA_DIR);
-  const listed = n && n.tcdb.find((t) => t.path === filePath);
-  if (!listed) return { success: false, error: 'this file is not one the notice lists' };
-  if (!listed.exists) return { success: false, error: 'الملف غير موجود في مكانه — ' + filePath };
-  try {
-    // 2.0.5: the window asks the user (REPLACE_ALL_CONFIRM_REQUIRED + the list) and calls again with { confirmReplaceAll:true }
-    const out = await restoreTcdbFromPath(filePath, { confirmReplaceAll: livePolicy.isConfirmed(opts && opts.confirmReplaceAll) });
-    fileLog('[OpenTCDB] (from the upgrade notice) result:', JSON.stringify({ success: out && out.success, companyName: out && out.companyName, users: out && out.users, integrity: out && out.integrity,
-      copyErrors: out && out.copyErrors, copyErrorsLog: out && out.copyErrorsLog, dumpedFromMajor: out && out.dumpedFromMajor }));
-    if (out && out.success) upgradeBootstrap.dismissUpgradeNotice(DATA_DIR);        // the data is back: the notice has done its job
-    return out;
-  } catch (e) {
-    fileLog('[OpenTCDB] ❌ (from the upgrade notice)', e.message);
-    return { success: false, error: e.message, code: e.code || null, ...(e && e.replaceAll ? e.replaceAll : {}) };
-  }
-});
-
 ipcMain.handle('get-version', () => {
   const pkg = require('../package.json');
   return {
@@ -2695,7 +2661,7 @@ async function takePreOpenBackup(snapshot) {
 }
 
 // ─── Open a .tcdb: restore it into the running database and keep syncing back to the SAME file ───────────────
-// Shared by the file-dialog route (GET /api/open-tcdb) and the launcher's upgrade notice («فتح» beside a company file named in the old config).
+// Shared by the file-dialog route (GET /api/open-tcdb).
 // Returns the JSON the route sends; throws on failure.
 // 2.0.3 (review): ONE company file is opened at a time. Two opens at once (a second click, two tabs) interleaved two truncates + loads into one database, the
 // first to finish cleared the backup manager's «restoring» flag and its startSync() wrote the mixed database into the file the second open had re-pointed to.

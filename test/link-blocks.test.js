@@ -102,8 +102,8 @@ test('the Files tab and the Licence tab carry the agreed items', () => {
   for (const id of ['badge-days', 'license-meter', 'btn-buy', 'btn-enter-key', 'panel-license', 'input-license', 'btn-activate', 'btn-trial', 'btn-free', 'support-code', 'btn-copy-key', 'info-version', 'build-date', 'input-port', 'btn-check-update', 'btn-open-log']) assert.match(licence, new RegExp(`id="${id}"`), id);
   // the port moved here and stays editable
   assert.match(licence, /id="input-port"[^>]*type="number"|type="number"[^>]*id="input-port"/);
-  // the stop question, the replace question, the portal password and the upgrade notice are dialogs above the page, never in the flow of a card
-  for (const id of ['overlay-stop', 'overlay-replace', 'overlay-password', 'overlay-upgrade']) assert.match(html, new RegExp(`class="overlay" id="${id}"`), id);
+  // the stop question, the replace question and the portal password are dialogs above the page, never in the flow of a card
+  for (const id of ['overlay-stop', 'overlay-replace', 'overlay-password']) assert.match(html, new RegExp(`class="overlay" id="${id}"`), id);
 });
 
 test('one font family and three sizes: every font-size is 12 / 14 / 16 px (through the tokens); no inline font-size anywhere', () => {

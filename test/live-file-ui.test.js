@@ -139,11 +139,19 @@ test('the confirmation: Cancel is focused first and Escape cancels; only the exp
   assert.ok(html.indexOf('id="btn-replace-cancel"') < html.indexOf('id="btn-replace-yes"'));
 });
 
-test('the upgrade notice asks before replacing and only then calls again with the explicit yes', () => {
-  const open = renderer.slice(renderer.indexOf('async function openFile(p, confirmed)'), renderer.indexOf("el('upgrade-close').addEventListener"));
-  assert.match(open, /openUpgradeTcdb\(p, confirmed \? \{ confirmReplaceAll: true \} : undefined\)/);
-  assert.match(open, /r\.code === 'REPLACE_ALL_CONFIRM_REQUIRED'/);
-  assert.match(open, /if \(await askReplaceAll\(r\)\) return openFile\(p, true\)/);
+test('the 1.x upgrade notice is gone: no window, no handler, no bridge, no state file, no leftover style', () => {
+  const root = path.join(__dirname, '..', 'src');
+  const read = (f) => fs.readFileSync(path.join(root, f), 'utf8');
+  assert.doesNotMatch(read('index.html'), /overlay-upgrade|upgrade-notice|upgrade-line|upgrade-file/);
+  assert.doesNotMatch(read('renderer.js'), /initUpgradeNotice|getUpgradeNotice|openUpgradeTcdb|dismissUpgradeNotice/);
+  assert.doesNotMatch(read('preload.js'), /upgrade-notice|UpgradeNotice|openUpgradeFolder|openUpgradeTcdb/);
+  assert.doesNotMatch(read('main.js'), /upgrade-notice|readUpgradeNotice|dismissUpgradeNotice/);
+  assert.doesNotMatch(read('bootstrap.js'), /upgrade-notice|writeUpgradeNotice|readUpgradeNotice|carryForwardSettings|collectOldTcdbPaths/);
+  assert.doesNotMatch(read('styles.css'), /\.upgrade-(notice|file|folder|line|files|status)/);
+  // the keys the file-opening flow still uses stay; the dialog's own texts are gone from every language
+  const i18n = read('i18n.js');
+  for (const k of ['failed', 'opening', 'done', 'doneWithErrors', 'legacyRefused']) assert.equal((i18n.match(new RegExp(`'upgrade\\.${k}':`, 'g')) || []).length, 4, `upgrade.${k} in 4 languages`);
+  for (const k of ['title', 'bLegacy', 'a', 'b', 'filesTitle', 'open', 'missing', 'openFolder', 'dismiss']) assert.equal((i18n.match(new RegExp(`'upgrade\\.${k}':`, 'g')) || []).length, 0, `upgrade.${k} removed`);
 });
 
 test('the live line is refreshed with the backup status and when the language changes', () => {

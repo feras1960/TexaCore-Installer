@@ -179,9 +179,6 @@ test('openTcdbFromPathUnlocked: the gate and the pre-open backup come before the
 test('every route that opens a file passes the explicit yes through - and only an explicit one', () => {
   const picked = main.slice(main.indexOf("case 'POST /api/open-picked-tcdb'"), main.indexOf("case 'GET /api/picked-file'"));
   assert.match(picked, /restoreTcdbFromPath\(item\.filePath, \{ passphrase, confirmReplaceAll: livePolicy\.isConfirmed\(body\.confirmReplaceAll\) \}\)/);
-  const notice = main.slice(main.indexOf("ipcMain.handle('upgrade-notice-open-tcdb'"), main.indexOf("ipcMain.handle('get-version'"));
-  assert.match(notice, /restoreTcdbFromPath\(filePath, \{ confirmReplaceAll: livePolicy\.isConfirmed\(opts && opts\.confirmReplaceAll\) \}\)/);
-  assert.match(notice, /\.\.\.\(e && e\.replaceAll \? e\.replaceAll : \{\}\)/, 'the window gets the list to show');
   const getOpen = main.slice(main.indexOf("req.url === '/api/open-tcdb'"), main.indexOf("req.url === '/api/ui-smoke'"));
   assert.match(getOpen, /restoreTcdbFromPath\(selectedPath, \{ confirmReplaceAll: livePolicy\.isConfirmed\(openQuery\.get\('confirmReplaceAll'\)\) \}\)/);
   assert.match(getOpen, /fileErrorStatus\(err\.code\)/);
@@ -209,7 +206,6 @@ test('the IPC restore (backup-restore) is gated the same way', () => {
   assert.match(ipc, /\.\.\.\(e && e\.replaceAll \? e\.replaceAll : \{\}\)/);
   const pre = fs.readFileSync(path.join(__dirname, '..', 'src', 'preload.js'), 'utf8');
   assert.match(pre, /restoreBackup: \(filePath, opts\) => ipcRenderer\.invoke\('backup-restore', filePath, opts\)/);
-  assert.match(pre, /openUpgradeTcdb: \(filePath, opts\) => ipcRenderer\.invoke\('upgrade-notice-open-tcdb', filePath, opts\)/);
 });
 
 test('the coded errors map to a status the page can read: confirm-required is a 409', () => {

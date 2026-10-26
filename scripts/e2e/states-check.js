@@ -3,7 +3,7 @@
 // ════════════════════════════════════════════════════════════════
 // states-check — live proof of the data-dir policy on the real build (the unit tests cover the logic; this runs the app):
 //   A. an INTERRUPTED first run (killed mid-baseline) is recognised as such — not as legacy_v18 — set aside, and rebuilt cleanly
-//   B. a 1.x (PostgreSQL 15) data dir is moved aside WHOLE (config, backups and cluster intact), never reused, a fresh install is built
+//   B. a data dir whose cluster is PostgreSQL 15 is moved aside WHOLE (config, backups and cluster intact), never started or reused, a fresh install is built; nothing carried over
 //   C. a finished install restarts without rebuilding (firstRun=false) and keeps its data
 //   D. an UNFINISHED PostgreSQL-17 dir that still carries an old config (company list, backup paths) is sanitised — the auto-backup
 //      must never overwrite the old .tcdb — and the original config is kept
@@ -79,7 +79,7 @@ async function waitFor(fn, ms, what) {
   // ── B. a 1.x data dir ──
   const uB = path.join(WORK, 'B', 'userdata');
   const dB = path.join(uB, 'texacore-data');
-  await R.check('B. a 1.x (PostgreSQL 15) data dir is moved aside whole and a fresh install is built', async () => {
+  await R.check('B. a data dir with a PostgreSQL 15 cluster is moved aside whole and a fresh install is built, nothing carried over', async () => {
     fs.mkdirSync(path.join(dB, 'pgdata'), { recursive: true });
     fs.writeFileSync(path.join(dB, 'pgdata', 'PG_VERSION'), '15\n');
     fs.writeFileSync(path.join(dB, 'pgdata', 'postgresql.conf'), '# 1.x cluster\n');
@@ -103,22 +103,15 @@ async function waitFor(fn, ms, what) {
       const sec = JSON.parse(fs.readFileSync(path.join(dB, 'secrets.json'), 'utf8'));
       if (sec.jwtSecret === 'texacore-jwt-secret-at-least-32-characters-long' || sec.legacy) throw new Error('the fresh install reuses the legacy secrets');
       if (fs.readFileSync(path.join(dB, 'pgdata', 'PG_VERSION'), 'utf8').trim() !== '17') throw new Error('fresh cluster is not PG 17');
-      // what the NEW install carries over: the licence and cloud settings — never the company list or a backup location.
-      // (The harness mints its own free licence right after the move, so the licence VALUE is proven by the unit tests and the log line;
-      // here: the bootstrap log says what was carried, a carried field the harness does not touch (subdomain) is present, nothing company-related leaked.)
-      const blog = readLog(path.join(WORK, 'B.log'));
-      const carriedLine = (blog.match(/\[Bootstrap\] carried over from the old data dir: ([^\n]*)/) || [])[1] || '';
-      for (const k of ['licenseKey', 'isTrial', 'subdomain', 'license.dat']) if (!carriedLine.includes(k)) throw new Error(`carry-over log line lacks ${k}: "${carriedLine}"`);
-      const cfg = JSON.parse(fs.readFileSync(path.join(dB, 'config.json'), 'utf8'));
-      if (cfg.subdomain !== 'legacyco') throw new Error(`subdomain not carried over: ${JSON.stringify(Object.keys(cfg))}`);
-      if (JSON.stringify(cfg).includes('Legacy Co') || JSON.stringify(cfg).includes('old.tcdb')) throw new Error('the old company list / backup path leaked into the new config');
+      // nothing is carried over from the old folder (no licence, no cloud settings, no company list, no backup location) and no upgrade notice is written
+      const cfgFile = path.join(dB, 'config.json');
+      const cfgText = fs.existsSync(cfgFile) ? fs.readFileSync(cfgFile, 'utf8') : '';
+      for (const leak of ['LEGACY-KEY-1', 'legacyco', 'Legacy Co', 'old.tcdb']) if (cfgText.includes(leak)) throw new Error(`the old folder's "${leak}" leaked into the new config`);
+      if (fs.existsSync(path.join(dB, 'license.dat')) && fs.readFileSync(path.join(dB, 'license.dat'), 'utf8') === 'legacy-licence-blob') throw new Error('the old license.dat was carried over');
+      if (fs.existsSync(path.join(dB, 'upgrade-notice.json'))) throw new Error('an upgrade notice was written');
       if (fs.readFileSync(path.join(moved, 'backups', 'old.tcdb'), 'utf8') !== 'precious') throw new Error('old backup changed while the new install ran');
       if (fs.readFileSync(path.join(moved, 'license.dat'), 'utf8') !== 'legacy-licence-blob') throw new Error('the old license.dat changed or vanished');
-      // the one-time notice: where the old data is, the company file(s) the old config named (here: one that lived inside the moved folder), not dismissed
-      const note = JSON.parse(fs.readFileSync(path.join(dB, 'upgrade-notice.json'), 'utf8'));
-      if (note.kind !== 'legacy' || note.folder !== moved || note.dismissedAt) throw new Error(`upgrade notice: ${JSON.stringify(note)}`);
-      if (note.tcdb.length !== 1 || note.tcdb[0].path !== path.join(moved, 'backups', 'old.tcdb') || !fs.existsSync(note.tcdb[0].path)) throw new Error(`upgrade notice files: ${JSON.stringify(note.tcdb)}`);
-      return `old dir kept as ${asides[0]} (cluster, config, backups intact); fresh PG 17 install with new secrets; carry-over logged (${carriedLine}); no company list; upgrade notice written (folder + 1 company file)`;
+      return `old dir kept as ${asides[0]} (cluster, config, backups, licence intact); fresh PG 17 install with new secrets; nothing carried over; no upgrade notice`;
     } finally { await stopApp(child, uB); }
   });
 
