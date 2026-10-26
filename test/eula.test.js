@@ -29,3 +29,14 @@ test('RTF escaping keeps Arabic as \\u escapes and braces/backslashes safe', () 
   assert.equal(rtfEscape('a{b}\\c'), 'a\\{b\\}\\\\c');
   assert.match(rtfEscape('لا'), /^\\u-?\d+\?\\u-?\d+\?$/);
 });
+
+test('the licence text carries legal version 2026-10-27 in English and Arabic (the website legal centre\'s version and date), with no placeholder left, in the dmg texts and the NSIS rtf source', () => {
+  const read = (f) => fs.readFileSync(path.join(B, f), 'utf8');
+  for (const f of ['eula/eula.en.txt', 'license_en.txt']) assert.match(read(f).split('\n')[2], /^Version 2026-10-27 · Effective 27 October 2026$/, f);
+  for (const f of ['eula/eula.ar.txt', 'license_ar.txt']) {
+    const line = read(f).split('\n')[2];
+    assert.ok(line.includes('2026-10-27') && line.includes('27 أكتوبر 2026'), `${f}: ${line}`);
+  }
+  for (const f of ['eula/eula.en.txt', 'eula/eula.ar.txt', 'license_en.txt', 'license_ar.txt', 'eula.rtf']) assert.ok(!/\{\{|2026-10-20/.test(read(f)), `${f}: placeholder or the previous version is still there`);
+  assert.match(read('eula.rtf'), /Version 2026-10-27/);
+});

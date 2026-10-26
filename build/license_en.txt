@@ -1,21 +1,121 @@
-TexaCore ERP — End-User Licence Agreement
+TexaCore ERP Desktop Edition — End-User Licence Agreement
 
-By installing or using TexaCore ERP you agree to these terms. If you do not agree, do not install or use the software.
+Version 2026-10-27 · Effective 27 October 2026
 
-1. Licence. TexaCore grants you a non-exclusive, non-transferable licence to install and use TexaCore ERP on the computers covered by your licence key (or by the free plan), for your own business.
+This agreement is between you and Next Revolution for Software Development, Dublin, Ireland ("Next Revolution", "we", "us"). TexaCore is the name of our product. By installing or using TexaCore ERP Desktop Edition (the "Software"), or by accepting this agreement when the installer asks you to, you agree to these terms. If you do not agree, do not install or use the Software. If you accept for a company or another organisation, you confirm that you are authorised to bind it.
 
-2. Restrictions. You may not decompile, disassemble or reverse engineer the software or any part of it, extract its code, database structure or logic, or copy, modify, redistribute or use it to build a competing product, except to the extent expressly permitted by applicable law. You may not remove or alter proprietary notices, or circumvent the licence, plan limits or security features of the software.
+1. What this agreement covers
 
-3. Ownership. The software, its database design, documentation and trademarks remain the property of TexaCore and its licensors. This agreement transfers no ownership rights to you. Your own business data remains yours.
+1.1 The Software is the TexaCore ERP program that runs on your own computer: the installer, the program, the database it includes and every update we provide. It is offered as a free edition and as paid licences. This agreement covers both.
 
-4. Your data and optional services. Your data is stored on your computer. Services that use the internet (licence activation and checks, plan updates, cloud access, cloud backup, software updates) operate only as described in the program and, where optional, only when you turn them on.
+1.2 This agreement does not cover the TexaCore cloud service. The cloud service has its own Terms of Service at https://texacore.ai/legal/terms/.
 
-5. Plans and updates. The modules and limits available to you depend on your licence and plan, which TexaCore may update; the software may download such updates when it is online.
+2. Licence
 
-6. No warranty. The software is provided "as is", without warranty of any kind, to the extent permitted by law.
+2.1 We grant you a non-exclusive, non-transferable, revocable licence to install and use the Software on the computers covered by your licence (your licence key, or the free edition), for your own business and for the businesses you manage as their accountant or administrator, within the limits of your plan.
 
-7. Limitation of liability. To the extent permitted by law, TexaCore is not liable for indirect or consequential loss, loss of profits or loss of data. Keep regular backups.
+2.2 The licence is worldwide and lasts for as long as you comply with this agreement. It gives you the right to use the Software only. You do not acquire ownership of it.
 
-8. Termination. This licence ends automatically if you breach these terms. On termination you must stop using the software and delete your copies.
+2.3 A licence key is personal to the licensee. Do not share a key with anyone outside the licensed business.
 
-TexaCore — info@texacore.com
+3. Free edition
+
+3.1 The free edition costs nothing and its licence has no expiry date.
+
+3.2 What the free edition includes, and its usage limits, are set by the plan shown in the program and at https://texacore.ai/pricing/. We may change the features or limits of future versions of the free edition. You can export your company data from the Software at any time.
+
+3.3 You may copy and share the official TexaCore installer with other people free of charge, exactly as we published it. You may do this only if you do not charge for the installer or the Software, do not modify, repackage or rebrand either of them, leave this agreement, all notices and all signatures in place, and tell each recipient that they must accept this agreement and can always download the current official version from https://texacore.ai/download/. Each recipient receives their own licence directly from us when they accept this agreement.
+
+3.4 You may not sell, rent, lease, sublicense or lend the Software, bundle it into a product or service that you charge for, or offer it to others as a hosted service. You may charge for your own services, for example installation, training or accounting work, but not for the Software itself.
+
+4. Paid licences
+
+4.1 A paid licence is identified by a licence key and a plan. The plan decides which modules, users, companies and other limits apply. Fees, payment and renewal are those stated in the order or invoice we issue for the licence.
+
+4.2 We may update plans and their limits. The Software downloads such updates whenever it is online (see section 7).
+
+5. What you may not do
+
+5.1 You may not decompile, disassemble or reverse engineer the software or any part of it, extract its code, database structure or logic, or copy, modify, redistribute or use it to build a competing product, except to the extent expressly permitted by applicable law.
+
+5.2 You may not remove or alter proprietary notices, circumvent the licence, the plan limits or the security features of the Software, or use the Software to break the law or the rights of others.
+
+6. Your data
+
+6.1 Your business data belongs to you. The Software keeps your company data in a database on your computer. We do not receive the contents of your records, except as described in section 7 (in particular the cloud backup in 7.5 and any feature you choose to use in 7.9).
+
+6.2 You are responsible for your data and your computer: keep your own regular backups, protect access to the computer and to backup files, and choose strong passwords.
+
+6.3 You can export your company data to a file at any time and take it elsewhere.
+
+7. What the Software sends over the internet
+
+7.1 The Software works offline. When the computer is online, the Software contacts our servers and a few other services, as listed in this section. The list describes the current version.
+
+7.2 Licence activation and checks. When you activate the Software, and then about every three minutes while it is running and online, it contacts our servers. In the free edition it sends the free licence number, a device identifier derived from your computer's hardware, the computer name, the operating system and processor type, and the program version. For paid and trial licences it sends a fuller status message: the same items, plus the operating system version; hardware details (processor model, number of cores, memory and disk use) and how long the computer has been running; the computer's local network addresses; the status of the program's own services; the number of active users, companies and invoices and the size of the database; and the licence status, plan and active modules. Neither message contains the contents of your records, such as customer names, invoice lines or amounts. While it runs, the Software also keeps a live connection to our servers, over which it shares the licence key, the computer name, the program version and the time it came online, so that the licence shows as online and changes to your licence apply quickly.
+
+7.3 Location. The Software does not look up its own public IP address or location. When a status message reaches our servers, we record the public IP address it came from and work out an approximate location (country and city) from that address with a lookup service (ipwho.is), which receives the public IP address. We keep the address and the location with the licence record.
+
+7.4 Plan and licence updates. About every fifteen minutes while it is online, the Software asks our servers for the current licence state and plan catalogue (modules and limits) and applies them to your installation.
+
+7.5 Cloud backup. While the Software is online and licensed, it uploads a backup copy of your company data file to TexaCore's cloud backup storage when the file has changed, and at least every twelve hours. Files larger than 100 MB are skipped. If you open or import a company file from another program (for example a Rashid .rsf file), the Software also uploads a copy of that original file once. The cloud backup storage keeps recent copies only. The size and availability of cloud backup depend on your plan. These copies contain your company data. We hold them as your processor and use them only to store them, to restore them if you ask, and to operate and secure the service. You can ask us to delete your cloud backups at any time by writing to info@texacore.ai.
+
+7.6 Update checks. The Software checks GitHub's release servers for new versions and offers to download and install them. GitHub receives the request, including your IP address and the version in use.
+
+7.7 Cloud access (optional). If you switch on cloud access, the Software registers a web address for your installation with us and opens a Cloudflare tunnel, so that you can reach your installation from outside your network. Traffic to that address passes through Cloudflare. Cloud access stays off until you switch it on.
+
+7.8 Error reports. When the Software meets an error, it may send a technical error report to our own error-tracking server: the error message, the program version and the screen where it happened. Reports are scrubbed of access tokens, email addresses and long numbers, and do not include the contents of your records.
+
+7.9 Features you choose to use. Some features need a cloud service, for example the AI assistant, email sending or Telegram notifications, where your edition includes them. When you use one of them, the Software sends what that request needs. The AI Features Notice at https://texacore.ai/legal/ai/ explains what is sent to AI providers.
+
+7.10 Our servers are hosted by Supabase on Amazon Web Services in London, United Kingdom, and delivered through Cloudflare.
+
+8. Personal data
+
+8.1 For the status messages, plan updates and error reports in section 7, Next Revolution is the controller of the personal data involved (for example the computer name and the IP address). For the cloud backup copies of your company data, we act as your processor. Our Privacy Policy at https://texacore.ai/legal/privacy/ explains this, your rights and how to contact us. Business customers can use our Data Processing Agreement at https://texacore.ai/legal/dpa/.
+
+8.2 If your company data contains personal data about other people, such as customers, suppliers or employees, you are responsible for having a lawful basis to hold it and for informing them.
+
+9. Updates
+
+9.1 We may release updates that fix defects, improve security or change features. Install security updates promptly. We may stop supporting old versions.
+
+10. Ownership and components
+
+10.1 The Software, its database design, documentation, names and trademarks remain the property of Next Revolution and its licensors. This agreement transfers no ownership rights to you. Your own business data remains yours.
+
+10.2 The Software includes third-party and open-source components, for example the PostgreSQL database and Cloudflare's tunnel connector. Those components are licensed under their own licences, which apply to them.
+
+10.3 If you send us feedback or suggestions, we may use them without obligation to you.
+
+11. No warranty and limits of liability
+
+11.1 To the extent permitted by law, the Software is provided "as is", without warranty of any kind, including fitness for a particular purpose. The Software is a business tool: you remain responsible for your accounting decisions, tax returns and statutory filings.
+
+11.2 To the extent permitted by law, we are not liable for indirect or consequential loss, loss of profit or loss of data. Keep regular backups.
+
+11.3 To the extent permitted by law, our total liability to you for all claims arising out of the Software is limited to the amount you paid us for the licence in the twelve months before the claim, and to nothing for the free edition.
+
+11.4 Nothing in this agreement limits liability that cannot be limited by law, including liability for fraud or for death or personal injury caused by negligence, or any mandatory rights you have as a consumer.
+
+12. Suspension and termination
+
+12.1 You may stop using the Software at any time and uninstall it.
+
+12.2 This licence ends automatically if you materially breach it. We may also suspend or revoke a licence, which the Software applies the next time it is online, if we reasonably believe that it is used in breach of this agreement, shared outside the licensed business or used to harm others, or if fees for a paid licence are not paid.
+
+12.3 When the licence ends you must stop using the Software and delete your copies. Your data files remain yours and you can export them. Sections that by their nature continue, such as ownership, liability and governing law, continue after the licence ends.
+
+13. Governing law, language and general terms
+
+13.1 This agreement is governed by the laws of Ireland. The courts of Dublin, Ireland have exclusive jurisdiction, except that if you are a consumer you keep the protection of the mandatory laws of your country and may bring proceedings in the courts of your country of residence.
+
+13.2 English is the governing language of this agreement. The Arabic text, and any other translation, is provided for convenience. If it differs from the English text, the English text prevails.
+
+13.3 The current version of this agreement is always available at https://texacore.ai/legal/eula/. A new version applies to updates that you install after it is published.
+
+13.4 This is the entire agreement between you and us about the Software. If a part of it is found invalid, the rest remains in force.
+
+14. Contact
+
+Next Revolution for Software Development, Dublin, Ireland. Questions, including privacy questions: info@texacore.ai.
