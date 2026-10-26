@@ -3,7 +3,7 @@ const test = require('node:test');
 const assert = require('node:assert/strict');
 const fs = require('fs');
 const path = require('path');
-const { build, CLAUSE_EN, CLAUSE_AR, rtfEscape } = require('../scripts/make-eula');
+const { build, CLAUSE_EN, CLAUSE_AR, rtfEscape, forMacArabic } = require('../scripts/make-eula');
 
 const B = path.join(__dirname, '..', 'build');
 const pkg = require('../package.json');
@@ -39,4 +39,17 @@ test('the licence text carries legal version 2026-10-27 in English and Arabic (t
   }
   for (const f of ['eula/eula.en.txt', 'eula/eula.ar.txt', 'license_en.txt', 'license_ar.txt', 'eula.rtf']) assert.ok(!/\{\{|2026-10-20/.test(read(f)), `${f}: placeholder or the previous version is still there`);
   assert.match(read('eula.rtf'), /Version 2026-10-27/);
+});
+
+test('the dmg licence screens can be built: the Arabic text has nothing the Mac Arabic charset lacks (no bidi isolates, no middle dot), the English text fits Mac Roman - the build failed on this once (dmg-license: «Cannot encode Arabic license text»)', () => {
+  const ar = fs.readFileSync(path.join(B, 'license_ar.txt'), 'utf8');
+  assert.ok(!/[\u2066-\u2069]/.test(ar) && !ar.includes('\u00b7'), 'license_ar.txt still has isolates or a middle dot');
+  assert.equal(forMacArabic('الإصدار \u20662026-10-27\u2069 \u00b7 سارية'), 'الإصدار 2026-10-27، سارية');
+  assert.ok(fs.readFileSync(path.join(B, 'eula', 'eula.ar.txt'), 'utf8').includes('\u2066'), 'the source text (the website\'s) keeps its isolates for the Windows rtf');
+  let transcode = null;
+  try { ({ transcode } = require('iconv-corefoundation')); } catch { /* not macOS: the CoreFoundation converter is the one dmg-license uses */ }
+  if (transcode) {
+    transcode(Buffer.from(ar, 'utf8'), 'UTF-8', 'x-mac-arabic');
+    transcode(Buffer.from(fs.readFileSync(path.join(B, 'license_en.txt'), 'utf8'), 'utf8'), 'UTF-8', 'x-mac-roman');
+  }
 });

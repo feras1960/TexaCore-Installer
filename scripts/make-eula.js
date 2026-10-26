@@ -21,6 +21,10 @@ const rtfEscape = (s) => Array.from(s).map((ch) => {
   return `\\u${n}?`;
 }).join('');
 
+/** The dmg licence screen stores the Arabic text in the Mac Arabic charset (x-mac-arabic): it has no Unicode bidi isolates (U+2066..U+2069, the website puts them around the version number) and no middle dot.
+ *  dmg-license refuses the whole text otherwise («Cannot encode Arabic license text»). The NSIS rtf keeps the original (Unicode). */
+function forMacArabic(text) { return text.replace(/[\u2066-\u2069]/g, '').replace(/ \u00b7 /g, '، '); }
+
 function paragraphsOf(text) { return text.replace(/\r/g, '').split(/\n{2,}/).map((p) => p.replace(/\n/g, ' ').trim()).filter(Boolean); }
 
 function build() {
@@ -29,7 +33,7 @@ function build() {
   if (!en.includes(CLAUSE_EN)) throw new Error('the English source lacks the mandated clause verbatim');
   if (!ar.includes(CLAUSE_AR)) throw new Error('the Arabic source lacks the mandated clause verbatim');
   fs.writeFileSync(path.join(BUILD, 'license_en.txt'), en);
-  fs.writeFileSync(path.join(BUILD, 'license_ar.txt'), ar);
+  fs.writeFileSync(path.join(BUILD, 'license_ar.txt'), forMacArabic(ar));
   const rtf = ['{\\rtf1\\ansi\\ansicpg1252\\uc1\\deff0{\\fonttbl{\\f0\\fnil\\fcharset0 Segoe UI;}{\\f1\\fnil\\fcharset178 Segoe UI;}}\\fs20'];
   paragraphsOf(en).forEach((p, i) => rtf.push(`\\pard\\ltrpar\\ql${i === 0 ? '\\b' : ''}\\f0 ${rtfEscape(p)}${i === 0 ? '\\b0' : ''}\\par\\par`));
   rtf.push('\\pard\\ql\\f0 ------------------------------------------------------------\\par\\par');
@@ -39,5 +43,5 @@ function build() {
   return { en: en.length, ar: ar.length };
 }
 
-module.exports = { build, CLAUSE_EN, CLAUSE_AR, rtfEscape, paragraphsOf };
+module.exports = { build, CLAUSE_EN, CLAUSE_AR, rtfEscape, paragraphsOf, forMacArabic };
 if (require.main === module) { const r = build(); console.log(`make-eula: license_en.txt (${r.en} chars), license_ar.txt (${r.ar}), eula.rtf written`); }
