@@ -810,6 +810,12 @@ async function main() {
         if (out.status !== 0) throw new Error(`${out.stdout}\n${out.stderr}`.trim().slice(-900));
         return out.stdout.trim().split('\n').slice(-1)[0];
       });
+      // 2.0.5 final #2 (owner 27-10): the login page says what is true and is readable - the approved texts are there, the old overclaims are gone, the navy text is at least white/75
+      await R.check('5.2b the login page shows the approved texts (data stays on the device, only people with an account and permission reach it, encrypted tunnel with no open ports, the AI provider receives what it needs) in Arabic and English, no overclaim, navy-panel text >= white/75, the version line readable', async () => {
+        const out = require('child_process').spawnSync('node', [path.join(__dirname, 'login-texts.cjs'), '--erp', ERP, '--ui', UI, '--shots', path.join(WORK, 'shots-login-texts')], { encoding: 'utf8', timeout: 240000 });
+        if (out.status !== 0) throw new Error(`${out.stdout}\n${out.stderr}`.trim().slice(-900));
+        return out.stdout.trim().split('\n').slice(-1)[0];
+      });
       // A PC in the office opens the ERP at the machine's LAN address: the page points at its own /_supabase proxy, gets no admin secret,
       // picks its company with the employee link (/login?c=<code> — the company picker needs the admin API, which is local-only) and logs in.
       await R.check('5.3 browser from the LAN address: the ERP loads, the employee link selects the company, the admin logs in and reaches the dashboard', async () => {
