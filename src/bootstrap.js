@@ -55,6 +55,14 @@ function writeMarker(dataDir, patch) {
   return next;
 }
 
+/** sha256 (hex) of a Buffer / string — the marker records which reference_data.sql was loaded. */
+function sha256Hex(buf) { return require('crypto').createHash('sha256').update(buf).digest('hex'); }
+
+/** An existing, finished install whose recorded reference-data sha256 is missing or differs from the packaged file's must load it (once, idempotent). */
+function referenceDataIsStale(marker, packagedSha256) {
+  return !!marker && marker.status === 'ready' && !!packagedSha256 && marker.referenceDataSha256 !== packagedSha256;
+}
+
 // ─── classification ─────────────────────────────────────────────────────────
 function pgMajorOf(pgDataDir) {
   try { return parseInt(String(fs.readFileSync(path.join(pgDataDir, 'PG_VERSION'), 'utf8')).trim().split('.')[0], 10); } catch { return null; }
@@ -475,7 +483,7 @@ function applyMigrationInventory(inv, manifest) {
 module.exports = {
   applyMigrationInventory,
   MARKER_FILE, EXPECTED_PG_MAJOR, REDACTED_FUNCTIONS, LOCAL_EXTRAS,
-  readMarker, writeMarker, markerPath,
+  readMarker, writeMarker, markerPath, sha256Hex, referenceDataIsStale,
   pgMajorOf, detect, moveAside, prepareDataDir,
   carryForwardSettings, sanitizeConfigInPlace, CARRY_CONFIG_FIELDS,
   collectOldTcdbPaths, writeUpgradeNotice, readUpgradeNotice, dismissUpgradeNotice, UPGRADE_NOTICE_FILE,

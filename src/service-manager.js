@@ -776,9 +776,12 @@ class ServiceManager {
     const seeds = [];
     if (this.baselineStore.has('reference_data.sql')) seeds.push('reference_data.sql');
     seeds.push('reference_seed.sql');
+    let referenceDataSha256 = null;
     for (const name of seeds) {
-      const r = await this.runPsqlSql(this.baselineStore.read(name), { stopOnError: true });
+      const buf = this.baselineStore.read(name);
+      const r = await this.runPsqlSql(buf, { stopOnError: true });
       if (r.code !== 0) throw new Error(`${name} failed: ${r.stderr.slice(-300)}`);
+      if (name === 'reference_data.sql') referenceDataSha256 = bootstrap.sha256Hex(buf);
     }
     await this.psqlExec(bootstrap.postBaselineSql());
 
@@ -792,7 +795,7 @@ class ServiceManager {
     step('Database ready');
     this._resetPostgresLog();                                                  // the bootstrap's error lines are not kept
     this.baselineStore.release();                                              // the decrypted baseline leaves memory
-    bootstrap.writeMarker(this.dataDir, { status: 'ready', readyAt: new Date().toISOString(), verified: v.stats });
+    bootstrap.writeMarker(this.dataDir, { status: 'ready', readyAt: new Date().toISOString(), verified: v.stats, ...(referenceDataSha256 ? { referenceDataSha256 } : {}) });
     return { baseline: summary, verified: v.stats };
   }
 
@@ -1149,6 +1152,35 @@ class ServiceManager {
     return runner.runAll();
   }
 
+  /**
+   * Reference data for an EXISTING install. buildDatabase() loads reference_data.sql (the ERP's global roles + capability map) only when the database is first built, so a 2.0.4 / RC install
+   * upgraded in place would keep the four seed roles and give every new company an empty role list. The marker remembers the sha256 of the reference_data.sql that was loaded; when the packaged one
+   * differs (or none was recorded) it is run once more, BEFORE the migrations like a fresh build does. The file is as of the baseline cut (the catalog rows the later migrations create are not in it, so
+   * their own "owned objects exist" guards stay quiet) and idempotent: every statement is ON CONFLICT DO NOTHING, the roles statement also skips a code that already exists as a global role, and the
+   * grants production recorded after the cut are inserted only where their capability is already in the catalog (an install whose migrations ran while it had no roles). Never fatal: a failure
+   * is logged and retried at the next start.
+   */
+  async ensureReferenceData() {
+    try {
+      const marker = bootstrap.readMarker(this.dataDir) || {};
+      if (marker.status !== 'ready' || !this.baselineStore.has('reference_data.sql')) return { loaded: false, reason: 'nothing-to-load' };
+      const buf = this.baselineStore.read('reference_data.sql');
+      const sha = bootstrap.sha256Hex(buf);
+      if (!bootstrap.referenceDataIsStale(marker, sha)) return { loaded: false, reason: 'up-to-date' };
+      const r = await this.runPsqlSql(buf, { stopOnError: true });
+      if (r.code !== 0) throw new Error(String(r.stderr || '').slice(-300));
+      bootstrap.writeMarker(this.dataDir, { referenceDataSha256: sha, referenceDataLoadedAt: new Date().toISOString() });
+      console.log('[ServiceManager] reference data (global roles + capabilities) loaded into the existing database');
+      return { loaded: true };
+    } catch (e) {
+      console.warn('[ServiceManager] reference data could not be loaded (non-fatal, retried at the next start):', e.message);
+      try { fs.appendFileSync(path.join(this.logDir, 'migrations.log'), `[${new Date().toISOString()}] reference data: ${String(e.message).slice(0, 400)}\n`, { mode: 0o600 }); } catch { /* ignore */ }
+      return { loaded: false, error: e.message };
+    } finally {
+      try { this.baselineStore.release(); } catch { /* ignore */ }
+    }
+  }
+
   // ─── Get Migration Status ────────────────────────────────────
   async getMigrationStatus() {
     if (!this.migrationsStore.available()) {
@@ -1204,6 +1236,10 @@ class ServiceManager {
         }
         await this.runGoTrueMigrations();
       }
+
+      // 3b. An install built BEFORE the ERP's reference data (the global roles and their capabilities) existed never loaded it: load it once, BEFORE the migrations - exactly the order a fresh build
+      //     uses - so the migrations that derive grants from the roles (20270226a mirrors inventory.delivery.issue to the draft capability) find them (idempotent, never fatal).
+      if (!fresh) await this.ensureReferenceData();
 
       // 4. Incremental migrations after the baseline (2.0.2: the 13 that matter locally of the 14 production received after the cut; the manifest in the encrypted migrations container, tied to the baseline's sha256).
       //    A failing migration stops the chain and is logged (logs/migrations.log) — it never stops the app from starting.

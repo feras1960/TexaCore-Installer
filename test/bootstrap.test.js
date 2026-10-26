@@ -394,3 +394,37 @@ test('upgrade notice: a company file that lived inside the old data dir is liste
   const n = b.readUpgradeNotice(d);
   assert.equal(n.tcdb[0].path, path.join(r.movedTo, 'backups', 'in.tcdb')); assert.equal(n.tcdb[0].exists, true);
 });
+
+// ── reference data on an EXISTING install (the ERP's global roles + capability map; loaded once after the migrations, idempotent) ──
+test('referenceDataIsStale: a finished install that never recorded the reference data (2.0.4 / RC) must load it; one that did, with the same sha256, must not', () => {
+  const sha = b.sha256Hex(Buffer.from('-- reference data\n'));
+  assert.equal(sha, sha256Of('-- reference data\n'));
+  assert.equal(b.referenceDataIsStale({ status: 'ready' }, sha), true);                                         // never recorded
+  assert.equal(b.referenceDataIsStale({ status: 'ready', referenceDataSha256: 'a'.repeat(64) }, sha), true);    // an older file
+  assert.equal(b.referenceDataIsStale({ status: 'ready', referenceDataSha256: sha }, sha), false);              // up to date
+});
+
+test('referenceDataIsStale: never for an unfinished install, a missing marker, or when the package carries no reference data', () => {
+  const sha = b.sha256Hex(Buffer.from('x'));
+  assert.equal(b.referenceDataIsStale({ status: 'verify_failed' }, sha), false);
+  assert.equal(b.referenceDataIsStale(null, sha), false);
+  assert.equal(b.referenceDataIsStale({ status: 'ready' }, null), false);
+});
+
+test('the marker keeps the reference-data sha256 across writeMarker patches (the first build writes it, the upgrade step only reads it)', () => {
+  const d = mkdtemp('mk-');
+  b.writeMarker(d, { status: 'ready', referenceDataSha256: 'f'.repeat(64) });
+  b.writeMarker(d, { verified: { ok: true } });
+  assert.equal(b.readMarker(d).referenceDataSha256, 'f'.repeat(64));
+});
+
+test('service-manager: buildDatabase records the reference-data sha256 in the ready marker, and an existing install loads it once BEFORE the migrations (never on a fresh build)', () => {
+  const src = fs.readFileSync(path.join(__dirname, '..', 'src', 'service-manager.js'), 'utf8');
+  assert.match(src, /referenceDataSha256 = bootstrap\.sha256Hex\(buf\)/);
+  assert.match(src, /status: 'ready',[^\n]*\.\.\.\(referenceDataSha256 \? \{ referenceDataSha256 \} : \{\}\)/);
+  const runIdx = src.indexOf('migrationResult = await this.runMigrations()');
+  const ensureIdx = src.indexOf('if (!fresh) await this.ensureReferenceData()');
+  assert.ok(ensureIdx > 0 && runIdx > ensureIdx, 'ensureReferenceData must run BEFORE runMigrations (the order a fresh build uses), for existing installs only');
+});
+
+function sha256Of(s) { return require('crypto').createHash('sha256').update(s).digest('hex'); }

@@ -167,6 +167,31 @@ async function createCompany(secrets, tag) {
   return r.json;
 }
 const appliedRows = async () => (await pg('SELECT id, name, applied_at, checksum FROM public._texacore_migrations ORDER BY id')).rows;
+/** The ERP's global roles reach an install built BEFORE the reference data existed (loaded once BEFORE the migrations, like a fresh build; idempotent): every shipped role code exactly once (the installer's own
+ *  four are not duplicated), the capability map, and the marker records the packaged file's sha256. Run on an UPGRADED install whose app is running. */
+async function rolesAfterUpgrade(userData) {
+  const ref = JSON.parse(fs.readFileSync(path.join(ROOT, 'baseline', 'BASELINE_PIN.json'), 'utf8')).files['reference_data.sql'];
+  if (!ref) return 'this build carries no reference data (skipped)';
+  const marker = JSON.parse(fs.readFileSync(path.join(userData, 'texacore-data', 'bootstrap.json'), 'utf8'));
+  if (marker.referenceDataSha256 !== ref.sha256) throw new Error(`the marker's reference-data sha256 (${marker.referenceDataSha256}) is not the packaged file's (${ref.sha256})`);
+  const g = (await pg(`SELECT count(*)::int n, count(DISTINCT code)::int d FROM public.roles WHERE tenant_id IS NULL`)).rows[0];
+  if (g.n < 27 || g.n !== g.d) throw new Error(`global roles ${g.n}, distinct codes ${g.d} (expected >= 27 and no duplicate)`);
+  const four = (await pg(`SELECT code, count(*)::int n FROM public.roles WHERE tenant_id IS NULL AND code IN ('tenant_owner','tenant_admin','company_owner','platform_admin') GROUP BY code ORDER BY code`)).rows;
+  if (four.length !== 4 || four.some((x) => x.n !== 1)) throw new Error(`the installer's own global roles: ${JSON.stringify(four)}`);
+  const caps = (await pg(`SELECT count(*)::int n FROM public.role_capabilities WHERE tenant_id IS NULL`)).rows[0].n;
+  if (caps < 852) throw new Error(`global role capabilities ${caps} (expected >= 852)`);
+  const acc = (await pg(`SELECT count(*)::int n FROM public.role_capabilities WHERE tenant_id IS NULL AND role_code = 'accountant'`)).rows[0].n;
+  if (!acc) throw new Error('the accountant role has no capabilities');
+  // the upgraded install must hold EXACTLY the fresh install's global grants (migration-derived ones included: 20270226a mirrors inventory.delivery.issue to the draft capability for every role that holds it)
+  if (freshRoleCaps) {
+    const now = (await pg(`SELECT capability || '|' || role_code AS k FROM public.role_capabilities WHERE tenant_id IS NULL ORDER BY 1`)).rows.map((r) => r.k);
+    const a = new Set(now); const f = new Set(freshRoleCaps);
+    const d = [...now.filter((k) => !f.has(k)).map((k) => `only upgraded: ${k}`), ...freshRoleCaps.filter((k) => !a.has(k)).map((k) => `only fresh: ${k}`)];
+    if (d.length) throw new Error(`global role capabilities differ from the fresh install's (${d.length}): ${d.slice(0, 6).join(' | ')}`);
+  }
+  return `${g.n} global roles (no code twice, the four seed roles once each), ${caps} capability rows${freshRoleCaps ? ' = the fresh install\'s set' : ''}, accountant holds ${acc}; marker sha256 = the packaged file's`;
+}
+let freshRoleCaps = null;   // the fresh install's global role capabilities (capability|role_code), filled by A1
 const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 'texacore-data', 'logs', 'migrations.log'), 'utf8'); } catch { return ''; } };
 
 (async () => {
@@ -221,7 +246,12 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
       const lg = fs.readFileSync(a.logFile, 'utf8');
       if (/❌ \(\d+\/\d+\)/.test(lg)) throw new Error('the app log shows a failed migration');
       ev.fresh = { ms: rows.map((r) => `${r.name.slice(8, 9)}`).join(',') };
-      return `${got.length} applied: ${NAMES.map((n) => n.replace(/^20270210/, '').split('_')[0]).join(' ')}; migrations.log: ${ok} ✅ lines`;
+      // the reference data (the ERP's global roles + capability map) was loaded BEFORE the migrations, so 20270226a mirrored inventory.delivery.issue to the draft capability for the roles that hold it
+      freshRoleCaps = (await pg(`SELECT capability || '|' || role_code AS k FROM public.role_capabilities WHERE tenant_id IS NULL ORDER BY 1`)).rows.map((r) => r.k);
+      const refRoles = (await pg(`SELECT count(*)::int n, count(DISTINCT code)::int d FROM public.roles WHERE tenant_id IS NULL`)).rows[0];
+      if (refRoles.n < 27 || refRoles.n !== refRoles.d) throw new Error(`fresh install: global roles ${refRoles.n}, distinct ${refRoles.d} (expected >= 27, no duplicate)`);
+      if (!freshRoleCaps.includes('inventory.delivery.draft.save|warehouse_keeper')) throw new Error('fresh install: the warehouse_keeper role has no inventory.delivery.draft.save (20270226a found no roles to mirror)');
+      return `${got.length} applied (${refRoles.n} global roles, ${freshRoleCaps.length} global capability rows): ${NAMES.map((n) => n.replace(/^20270210/, '').split('_')[0]).join(' ')}; migrations.log: ${ok} ✅ lines`;
     });
 
     await R.check('A2 local specifics: no pg_cron (the migration\'s own guard skipped the sweep job), the cloud read-only policy is OFF, the cloud trial policy (production-only data, not shipped) wrote nothing, no company / tenant / user appeared, the free plan carries fabric', async () => {
@@ -386,6 +416,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         postFp = await fingerprint(); catPost = await catalog(); invPost = await invFns();
         return `${got.length} applied on start; counts ${JSON.stringify(counts1)} unchanged; OLD-1 intact and readable by its admin, who still gets his plan answer (${plan.json.plan_code}, ${plan.json.modules.length} modules); new card ${r1.json[0].code}; migrations.log ${ok} ✅`;
       });
+      await R.check('B6 the ERP\'s global roles (reference data) reach the UPGRADED install: loaded once before the migrations, no duplicate of the seed roles, capabilities present', () => rolesAfterUpgrade(B));
     } finally { if (upg) await stopApp(upg.child, B); }
 
     let second = null;
@@ -489,6 +520,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         if (okLines !== NAMES.length) throw new Error(`${okLines} ✅ lines in total (expected ${NAMES.length}: the second start must add none)`);
         return `${now.length} rows, same ids and timestamps; "All migrations already applied", still ${okLines} ✅`;
       });
+      await R.check('C5 the ERP\'s global roles (reference data) are on the install upgraded from the previous build too, once each', () => rolesAfterUpgrade(C));
     } finally { if (c2) await stopApp(c2.child, C); }
     await R.check('C4 the install upgraded from the previous build (set of ' + nPrev + ') and the fresh install have the SAME functions, triggers, policies and table grants (upgrade path == fresh path)', async () => {
       if (!cPostFp || !freshFp) throw new Error('no fingerprint to compare');
