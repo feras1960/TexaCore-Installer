@@ -28,3 +28,9 @@ OR IN CONNECTION WITH THE USE OR PERFORMANCE OF THIS SOFTWARE.
 
 The macOS build bundles an unmodified, Developer-ID-signed `cloudflared` binary from Cloudflare, Inc. (Apache License 2.0,
 https://github.com/cloudflare/cloudflared). Version and checksum: `bin/macos-arm64/cloudflared/README.txt`.
+
+## Cairo (launcher font)
+
+The launcher window's text face is **Cairo**, bundled as woff2 files in `src/fonts/` (Arabic, Latin and Latin-ext subsets, weights 400 / 500 / 600 / 700), copied from the
+`@fontsource/cairo` package by `scripts/localize-launcher-fonts.js`. Copyright 2009 The Cairo Project Authors (https://github.com/Gue3bara/Cairo). Licensed under the
+SIL Open Font License, Version 1.1 (http://scripts.sil.org/OFL); the font files are not sold on their own and are not renamed.

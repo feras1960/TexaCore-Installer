@@ -28,7 +28,7 @@
   --fs-s: 12px;
   --fs-m: 14px;
   --fs-l: 16px;
-  --font: 'Cairo', 'IBM Plex Sans Arabic', -apple-system, 'Segoe UI', system-ui, sans-serif;
+  --font: 'Cairo', -apple-system, BlinkMacSystemFont, 'Segoe UI', Tahoma, 'Noto Sans Arabic', system-ui, sans-serif;
   --mono: 'IBM Plex Mono', ui-monospace, 'SF Mono', Menlo, Consolas, monospace;
   --radius: 14px;
   --radius-sm: 9px;

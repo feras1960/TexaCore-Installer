@@ -23,7 +23,7 @@ test('baseline/MIGRATIONS_PIN.json exists, is valid and tied to the PINNED basel
   assert.equal(pin.baselineSha256, pinSha);
 });
 
-test('2.0.5 RC2 ships the 57 migrations production received after the 2026-10-13T13:21Z cut that matter locally, in PRODUCTION\'s apply order: the 19 of 2.0.4 first (unchanged), then 20270220x/y (applied 13-15 Oct, no function in common with the 19), then 17-10 to 23-10 as BOARD records them (the 16:40 batch of 20-10 is 19a, b, c, 23a-h; 26d before 26c; RC2 adds the 23-10 applies 238a, 237b, 237d, 237e in the order production applied them - the data-only seed for the two deleted companies and 20270239a are NOT shipped); 20270210l is production-only data and 20270217b is a catalogue-data migration - neither is shipped', () => {
+test('2.0.5 final ships the 59 migrations production received after the 2026-10-13T13:21Z cut that matter locally, in PRODUCTION\'s apply order: the 19 of 2.0.4 first (unchanged), then 20270220x/y (applied 13-15 Oct, no function in common with the 19), then 17-10 to 23-10 as BOARD records them (the 16:40 batch of 20-10 is 19a, b, c, 23a-h; 26d before 26c; RC2 adds the 23-10 applies 238a, 237b, 237d, 237e in the order production applied them - the data-only seed for the two deleted companies is NOT shipped; the final adds the 26-10 applies 239a and 240b); 20270210l is production-only data and 20270217b is a catalogue-data migration - neither is shipped', () => {
   assert.deepEqual(pin.migrations.slice(0, 19).map((x) => x.name.replace(/^2027021[01]([a-z]).*/, '$1')), ['i', 'j', 'k', 'q', 'm', 'n', 'o', 'p', 's', 't', 'r', 'u', 'v', 'x', 'a', 'y', 'b', 'c', 'd']);
   assert.deepEqual(pin.migrations.slice(19).map((x) => x.name), [
     "20270220x_ecom_smoke_fixes",
@@ -63,9 +63,11 @@ test('2.0.5 RC2 ships the 57 migrations production received after the 2026-10-13
     "20270238a_safeupdate_where_true",
     "20270237b_journal_entry_number_allocator",
     "20270237d_system_journal_numbers",
-    "20270237e_revoke_create_container_journal_entry"
+    "20270237e_revoke_create_container_journal_entry",
+    "20270239a_no_posting_to_group_or_summary_accounts",
+    "20270240b_tenant_suspend_cuts_sessions"
 ]);
-  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 57 }, (_, i) => i + 1));
+  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 59 }, (_, i) => i + 1));
   assert.ok(!pin.migrations.some((x) => /20270210l|20270217b/.test(x.name)));
   // the first 19 are exactly what 2.0.4 shipped (same names, same sha256): the upgrade from 2.0.4 applies ONLY the 34 after them
   assert.equal(require('crypto').createHash('sha256').update(JSON.stringify(pin.migrations.slice(0, 19).map((x) => [x.name, x.sha256]))).digest('hex'), '85744a0afb4dc0c7000a047e212257d8ae47158cd6736f431f4175b0a7ae137c', 'the first 19 entries (name + sha256) are byte-for-byte what 2.0.4 pinned');
@@ -149,7 +151,7 @@ test('the measured inventory delta (baseline/migrations.inventory.json, private)
   assert.deepEqual(r.problems, []);
   assert.ok(r.inventory.catalogDelta && r.inventory.functions);
   assert.ok(Object.keys(r.inventory.functions).length > 50);
-  assert.equal(r.inventory.catalogDelta.tables, 13, 'the runner\'s own bookkeeping table + the 12 tables the 57 migrations add (RC2: + journal_number_counters of 20270237b)');
+  assert.equal(r.inventory.catalogDelta.tables, 13, 'the runner\'s own bookkeeping table + the 12 tables the 59 migrations add (RC2: + journal_number_counters of 20270237b)');
   for (const sig of Object.keys(r.inventory.functions)) assert.match(sig, /^(public|licensing)\.[a-z_0-9]+\(.*\)$/, sig);   // 2.0.5: a licensing-schema trigger function is replaced too (the inventory schemas: public, licensing, newpost, tomgenerators)
 });
 

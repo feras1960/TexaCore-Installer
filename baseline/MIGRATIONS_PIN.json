@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "7782584c097ab4858d25df3c066b119d939da76e",
+  "erpCommit": "697727b699a82d06b9275c73002bcf9e327f269d",
   "migrations": [
     {
       "order": 1,
@@ -402,11 +402,25 @@
       "file": "20270237e_revoke_create_container_journal_entry.sql",
       "sha256": "20508f47cc99b37dcbb96cb97bd1e84c1120e94e92b23a822dfaa49f8ca82806",
       "bytes": 6983
+    },
+    {
+      "order": 58,
+      "name": "20270239a_no_posting_to_group_or_summary_accounts",
+      "file": "20270239a_no_posting_to_group_or_summary_accounts.sql",
+      "sha256": "78b452e3039fdb68e3c1c7fbe902e1f39ad4354ff5ba0ff4023395e95da908e3",
+      "bytes": 34701
+    },
+    {
+      "order": 59,
+      "name": "20270240b_tenant_suspend_cuts_sessions",
+      "file": "20270240b_tenant_suspend_cuts_sessions.sql",
+      "sha256": "54a01c61ac7d7cc3759c1fcbedd23990f5745574d52e4065f230310df7f010c2",
+      "bytes": 14915
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "035582b0c0a9dc27bd36503965e7b664d1eb0cb6e37dcd010033a7453dce82e9",
-    "bytes": 35154
+    "sha256": "bfae38ede297b3dd14ce8248e3ce3c1c1a3a457e300291081d253d7706dfc183",
+    "bytes": 35586
   }
 }

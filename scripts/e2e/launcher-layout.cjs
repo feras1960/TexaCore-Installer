@@ -119,12 +119,14 @@ const STATES = {
         page.on('console', (m) => { if (m.type() === 'error' && !/fonts\.g|net::ERR/.test(m.text())) errors.push(m.text()); });
         const stubbed = html.replace('<script src="icons.js">', `<script>${stubSource(s)}</script>\n  <script src="icons.js">`)
           .replace('<head>', `<head>\n  <base href="file://${SRC}/">`)
-          .replace(/<link[^>]*fonts\.g[^>]*>/g, '');
+          .replace(/<link[^>]*fonts\.g[^>]*>/g, '');       // (none any more: the font is bundled)
         const tmp = path.join(SHOTS, `.page-${name}-${lang}.html`);
         fs.writeFileSync(tmp, stubbed);
         await page.goto('file://' + tmp);
         await page.waitForFunction(() => document.documentElement.lang && document.getElementById('status-erp') && !/\.\.\./.test(document.getElementById('status-erp').textContent), null, { timeout: 8000 }).catch(() => {});
         await page.waitForTimeout(500);
+        const fontsLoaded = await page.evaluate(() => document.fonts.ready.then(() => [...document.fonts].filter((f) => f.status === 'loaded').map((f) => `${f.family.replace(/"/g, '')}-${f.weight}`)));
+        check(`${name}/${lang} the bundled Cairo files load (offline font, no network)`, fontsLoaded.some((f) => /^Cairo-/.test(f)), fontsLoaded.join(','));
         if (def.tab) await page.evaluate((t) => selectTab(t), def.tab);
         if (def.setup) await def.setup(page);
         if (s.update) await page.evaluate((u) => window.__emit('update-status', u), s.update);

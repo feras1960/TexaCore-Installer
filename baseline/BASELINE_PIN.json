@@ -2,8 +2,8 @@
   "schema": 1,
   "pgMajor": 17,
   "cutTimestamp": "2026-10-13T13:21:12.253Z",
-  "erpCommit": "04d382799ae938695c4250ee619c05273e60b7a8",
-  "erpBranch": "main",
+  "erpCommit": "05d566fd251cb91db869c8a5edafd734c36cbd7c",
+  "erpBranch": "claude/release-2.0.5-final",
   "files": {
     "production_baseline.sql": {
       "source": "supabase/baseline/production_baseline.sql",
@@ -28,6 +28,14 @@
       "bytes": 111367,
       "derived": true,
       "lastChangedCommit": "06aae1be5e66c6beeafe995d438d7ddb36978f57"
+    },
+    "reference_data.sql": {
+      "source": "supabase/baseline/reference_data.sql",
+      "sourceSha256": "ff6549d1b11f6632ea3b50babdbd9a80f1b772fc98c59565f5665a7ef9954734",
+      "sha256": "ff6549d1b11f6632ea3b50babdbd9a80f1b772fc98c59565f5665a7ef9954734",
+      "bytes": 234737,
+      "derived": false,
+      "lastChangedCommit": "05d566fd251cb91db869c8a5edafd734c36cbd7c"
     }
   }
 }

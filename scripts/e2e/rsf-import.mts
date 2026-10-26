@@ -126,9 +126,26 @@ log({ phase: 'verified', ...summary });
 if (!r1.success) fail(`importData reported failure: ${JSON.stringify(r1.errors?.slice(0, 3))}`);
 if (cs.base_currency !== base) fail(`base currency ${cs.base_currency}, file says ${base}`);
 if (entries !== parsed.entries) fail(`journal entries: imported ${entries} of ${parsed.entries}`);
-if (r1.counts?.accounts !== leafExpected || r1.counts?.externalChartAccounts !== leafExpected) fail(`accounts matched ${r1.counts?.accounts}/${leafExpected} (externalChartAccounts ${r1.counts?.externalChartAccounts})`);
+// 2.0.5 final: a Rashid leaf whose name (without the article «ال») is the name of an account the company's TEMPLATE already has is REUSED, not created: Sample.rsf's «185 صندوق دولار» is the
+// Syrian template's own USD cash box «1112 صندوق الدولار» (20270237a / 20270237c). `counts.accounts` counts created accounts, so it is 77 of 78 there, and the external-chart row of a reused
+// account keeps account_id NULL (the file has no movement on it; the real Rashid file, UAH base, matches 285/285). The harness accepts exactly that and names the accounts.
+let reusedTemplate: string[] = [];
+if (r1.counts?.externalChartAccounts !== leafExpected) fail(`external chart leaves ${r1.counts?.externalChartAccounts}/${leafExpected}`);
+if (r1.counts?.accounts !== leafExpected) {
+  const pool2 = new pg.Pool({ host: '127.0.0.1', port: PG_PORT, user: 'postgres', password: env('PG_PASSWORD'), database: 'postgres', max: 1 });
+  const unmapped = (await pool2.query(`SELECT e.external_code, e.external_name, a.account_code, a.name_ar FROM public.account_external_charts e
+                                         LEFT JOIN public.chart_of_accounts a ON a.company_id = e.company_id AND COALESCE(btrim(a.external_code), '') = '' AND NOT COALESCE(a.is_group, false)
+                                                                              AND replace(a.name_ar, 'ال', '') = replace(e.external_name, 'ال', '')
+                                        WHERE e.company_id = $1 AND NOT e.is_group AND e.account_id IS NULL`, [cid])).rows;
+  const usedLines = unmapped.length ? (await pool2.query(`SELECT count(*)::int n FROM public.journal_entry_lines l JOIN public.journal_entries e ON e.id = l.entry_id JOIN public.chart_of_accounts a ON a.id = l.account_id
+                                                            WHERE e.company_id = $1 AND a.account_code = ANY($2::text[])`, [cid, unmapped.map((u: any) => u.account_code).filter(Boolean)])).rows[0].n : 0;
+  await pool2.end();
+  if (unmapped.length !== leafExpected - (r1.counts?.accounts ?? 0) || unmapped.some((u: any) => !u.account_code)) fail(`accounts matched ${r1.counts?.accounts}/${leafExpected} (externalChartAccounts ${r1.counts?.externalChartAccounts}); unmatched leaves: ${JSON.stringify(unmapped)}`);
+  reusedTemplate = unmapped.map((u: any) => `${u.external_code} ${u.external_name} -> template ${u.account_code}`);
+  log({ phase: 'accounts-reused-from-template', reused: reusedTemplate, journalLinesOnThem: usedLines });
+}
 // header totals are rounded per entry, lines per account (the known one-cent carry): allow 2 cents over ~191 million
 if (Math.abs(Number(bal.d) - srcD) > 0.02 || Math.abs(Number(bal.c) - srcC) > 0.02) fail(`imported ledger totals ${bal.d}/${bal.c} differ from the file's ${srcD}/${srcC}`);
 if (cs.status !== 'active') fail(`company status ${cs.status} after completion`);
 if (!limitsOk) fail(`plan limits after the import are not enforced as expected: ${limitsNote}`);
-console.log(`Rashid import OK: ${entries}/${parsed.entries} entries, ${r1.counts.accounts}/${leafExpected} accounts matched, base ${cs.base_currency}, ledger debit ${bal.d} credit ${bal.c} (= the file's ${srcD}/${srcC}), ${r1.counts.customers ?? ''} customers ${r1.counts.suppliers ?? ''} suppliers, ${sec}s; ${limitsNote}`);
+console.log(`Rashid import OK: ${entries}/${parsed.entries} entries, ${r1.counts.accounts}/${leafExpected} accounts matched${reusedTemplate.length ? ` (+${reusedTemplate.length} reused from the template: ${reusedTemplate.join('; ')})` : ''}, base ${cs.base_currency}, ledger debit ${bal.d} credit ${bal.c} (= the file's ${srcD}/${srcC}), ${r1.counts.customers ?? ''} customers ${r1.counts.suppliers ?? ''} suppliers, ${sec}s; ${limitsNote}`);
