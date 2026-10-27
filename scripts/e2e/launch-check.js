@@ -23,6 +23,7 @@ const { Client } = require('pg');
 const { ROOT, PORTS, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions, expectedInventory } = require('./lib');
 const bootstrap = require('../../src/bootstrap');
 const secretsMod = require('../../src/secrets');
+const { multiCompanyChecks } = require('./multi-company-checks');
 
 function arg(name, def = '') { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : def; }
 const WORK = path.resolve(arg('workdir', ''));
@@ -1997,6 +1998,9 @@ async function main() {
         } finally { fs.chmodSync(dir, 0o755); fs.chmodSync(f, 0o644); }
       });
     }
+
+    // ── 9. final build (owner 27-10): an owner with three companies - company links, the Users screen's roles, the desktop's attachment / public-link guards ──
+    await multiCompanyChecks(R, { request, ADMIN, API, UI, H, anonKey: secrets.anonKey, ERP, WORK, pg });
   } catch (e) {
     R.rows.push({ name: 'harness', ok: false, evidence: e.stack || e.message, ms: 0 });
     console.log(`  FAIL  harness — ${e.message}`);

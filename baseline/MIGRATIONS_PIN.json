@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "44425079fde4bf4f92933e51067ad5f6e9b8b7cd",
+  "erpCommit": "cf600927cd9c7454e9363f2062d12e0344f32468",
   "migrations": [
     {
       "order": 1,
@@ -444,11 +444,39 @@
       "file": "20270240f_dashboard_activity_entry_name.sql",
       "sha256": "8597807f0bb0ea332fcae3dba5579242f2932a7c41ae243d9119dece5ddc36f4",
       "bytes": 9805
+    },
+    {
+      "order": 64,
+      "name": "20270240g_dashboard_ar_aging",
+      "file": "20270240g_dashboard_ar_aging.sql",
+      "sha256": "0980581c88af7191d7625b414bd0ee9d75ebd1a86ce871a0c64a1973352d620d",
+      "bytes": 6338
+    },
+    {
+      "order": 65,
+      "name": "20270240h_direct_sale_serials",
+      "file": "20270240h_direct_sale_serials.sql",
+      "sha256": "3b848d4093eaa5a8ab0a5affe11bf1d73bc2e0dd6358013529282c46f5891d17",
+      "bytes": 35087
+    },
+    {
+      "order": 66,
+      "name": "20270240i_direct_sale_return_basis",
+      "file": "20270240i_direct_sale_return_basis.sql",
+      "sha256": "d8c185879fd1f44ef55c965a45ddb210db8d10ee269297ab470f40958a4194a7",
+      "bytes": 9805
+    },
+    {
+      "order": 67,
+      "name": "20270240j_users_screen_roles",
+      "file": "20270240j_users_screen_roles.sql",
+      "sha256": "723870ac28f8eda1f2a3bfa144d978f2941afb57a6c65522b57e68829d98615a",
+      "bytes": 4662
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "b79ef43d380e1e6c8a1852fab3c3bba4ef2d774ca5f8d2e5090d55aa6ac0ed1b",
-    "bytes": 35947
+    "sha256": "e95681502009a00bdaaf18582bfe905d45c5a9ddcdae6facab216ed86693bd93",
+    "bytes": 36284
   }
 }
