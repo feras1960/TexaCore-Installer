@@ -11,7 +11,7 @@ const path = require('path');
 const { spawnSync } = require('child_process');
 const { Client } = require('pg');
 const { pgOptions } = require('./lib');
-const { catalogParity } = require('./catalog-parity');
+const { catalogParity, materialCapabilityGrants } = require('./catalog-parity');
 
 const OWNER = { email: 'multi@e2e.test', password: 'E2ePass#2026' };
 
@@ -181,6 +181,109 @@ async function multiCompanyChecks(R, ctx) {
       return res;
     });
   } else console.log('  SKIP  9.6-9.8 page checks (no --erp given)');
+
+  // ── 20270240l (E2E BUG-11): who may create / edit / delete a material and change its prices - three REAL users, every refusal a REAL value change checked in the database ──
+  await R.check('9.9 material capabilities over REST with three real users (sales_rep, warehouse_keeper, sales_manager) and the owner: sales_rep cannot create or change selling_price / avg_cost_per_unit; warehouse_keeper creates and edits a card without prices but cannot delete it or change a price; sales_manager changes prices only; nobody writes avg_cost_per_unit / last_cost_per_unit; the global grants equal production\'s', async () => {
+    const co = S.companies[0].id;
+    const mg = await materialCapabilityGrants(pg);
+    if (mg.length) throw new Error(`material capability grants differ from production's: ${mg.join(' | ')}`);
+    const ownerTok = (await signIn()).access_token;
+    const rest = async (tok, method, p, body, prefer = 'return=representation') => request(method, `${API}/rest/v1/${p}`, { headers: { apikey: anonKey, Authorization: `Bearer ${tok}`, Prefer: prefer }, body });
+    const row = async (id) => (await pg('SELECT code, name_ar, selling_price::numeric AS sp, avg_cost_per_unit::numeric AS ac, last_cost_per_unit::numeric AS lc FROM public.fabric_materials WHERE id = $1', [id])).rows[0];
+    const refused = (r) => r.status >= 400 || (r.status < 300 && Array.isArray(r.json) && r.json.length === 0);
+    const base = { tenant_id: S.tenantId, company_id: co };
+    // the cards the owner (company_owner: create + price + edit) prepares
+    const mk = async (code, extra = {}) => { const r = await rest(ownerTok, 'POST', 'fabric_materials', { ...base, code, name_ar: `مادة ${code}`, ...extra }); if (r.status !== 201) throw new Error(`owner creates ${code} → ${r.status} ${r.text.slice(0, 200)}`); return r.json[0].id; };
+    const m0 = await mk('GUARD-M0', { selling_price: 100 });
+    const m1 = await mk('GUARD-M1');
+    const out = [];
+    // three employees through the installer's own invite route (a one-time password each); the free plan's single user is raised for the test
+    const roles = await request('GET', `${UI}/api/employee-roles?companyId=${co}`, { headers: H });
+    if (roles.status !== 200 || !roles.json.success) throw new Error(`employee-roles → ${roles.status} ${roles.text.slice(0, 160)}`);
+    const roleId = (code) => { const r = roles.json.roles.find((x) => x.code === code); if (!r) throw new Error(`the owner is not offered the role ${code}: ${roles.json.roles.map((x) => x.code).join(',')}`); return r.id; };
+    const users = {};
+    await withRoomForCompanies(S.tenantId, async () => {
+      for (const code of ['sales_rep', 'warehouse_keeper', 'sales_manager']) {
+        const email = `${code.replace('_', '-')}-guard@e2e.test`;
+        const inv = await request('POST', `${UI}/api/invite-employee`, { headers: H, body: { companyId: co, roleId: roleId(code), email, fullName: `Guard ${code}` } });
+        if (inv.status !== 200 || !inv.json.success || !inv.json.oneTimePassword) throw new Error(`invite ${code} → ${inv.status} ${inv.text.slice(0, 200)}`);
+        const login = await request('POST', `${API}/auth/v1/token?grant_type=password`, { headers: { apikey: anonKey }, body: { email, password: inv.json.oneTimePassword } });
+        if (login.status !== 200 || !login.json.access_token) throw new Error(`${code} cannot sign in with his one-time password → ${login.status} ${login.text.slice(0, 160)}`);
+        users[code] = login.json.access_token;
+      }
+    });
+
+    // every user: nobody writes the cost (a real change 0 -> 11 / 12)
+    for (const [who, tok] of [['company_owner', ownerTok], ...Object.entries(users)]) {
+      const a = await rest(tok, 'PATCH', `fabric_materials?id=eq.${m0}`, { avg_cost_per_unit: 11 });
+      const b = await rest(tok, 'PATCH', `fabric_materials?id=eq.${m0}`, { last_cost_per_unit: 12 });
+      const c = await rest(tok, 'POST', 'fabric_materials', { ...base, code: `GUARD-COST-${who}`, name_ar: 'مادة بتكلفة', avg_cost_per_unit: 13 });
+      if (!refused(a) || !refused(b) || !refused(c)) throw new Error(`${who} wrote a material cost: avg ${a.status}, last ${b.status}, create-with-cost ${c.status}`);
+      const r = await row(m0);
+      if (+r.ac !== 0 || +r.lc !== 0) throw new Error(`${who}: the cost changed in the database (${r.ac} / ${r.lc})`);
+    }
+    out.push('nobody writes avg_cost_per_unit / last_cost_per_unit (4 users x 3 attempts, database unchanged)');
+
+    // sales_rep: nothing
+    const sr = users.sales_rep;
+    const c1 = await rest(sr, 'POST', 'fabric_materials', { ...base, code: 'GUARD-SR', name_ar: 'مادة مندوب' });
+    const p1 = await rest(sr, 'PATCH', `fabric_materials?id=eq.${m0}`, { selling_price: 175 });
+    if (!refused(c1)) throw new Error(`sales_rep created a material → ${c1.status} ${c1.text.slice(0, 160)}`);
+    if (!refused(p1) || +(await row(m0)).sp !== 100) throw new Error(`sales_rep changed selling_price 100 -> 175 (${p1.status}); database ${(await row(m0)).sp}`);
+    if ((await pg(`SELECT count(*)::int n FROM public.fabric_materials WHERE code = 'GUARD-SR'`)).rows[0].n) throw new Error('the sales_rep card exists');
+    out.push(`sales_rep: create refused (${c1.status}), selling_price 100->175 refused (${p1.status})`);
+
+    // warehouse_keeper: create + edit a card WITHOUT prices; no price, no delete
+    const wk = users.warehouse_keeper;
+    const c2 = await rest(wk, 'POST', 'fabric_materials', { ...base, code: 'GUARD-WK', name_ar: 'مادة أمين المستودع' });
+    if (c2.status !== 201) throw new Error(`warehouse_keeper cannot create a card without prices → ${c2.status} ${c2.text.slice(0, 200)}`);
+    const wkId = c2.json[0].id;
+    const e2 = await rest(wk, 'PATCH', `fabric_materials?id=eq.${wkId}`, { name_ar: 'مادة أمين المستودع - معدّلة' });
+    if (e2.status >= 300 || (await row(wkId)).name_ar !== 'مادة أمين المستودع - معدّلة') throw new Error(`warehouse_keeper cannot edit the card's name → ${e2.status} ${e2.text.slice(0, 200)}`);
+    const c3 = await rest(wk, 'POST', 'fabric_materials', { ...base, code: 'GUARD-WK-P', name_ar: 'بسعر', selling_price: 55 });
+    const p2 = await rest(wk, 'PATCH', `fabric_materials?id=eq.${m0}`, { selling_price: 175 });
+    const d2 = await rest(wk, 'DELETE', `fabric_materials?id=eq.${wkId}`);
+    if (!refused(c3)) throw new Error(`warehouse_keeper created a card WITH a price → ${c3.status}`);
+    if (!refused(p2) || +(await row(m0)).sp !== 100) throw new Error(`warehouse_keeper changed selling_price (${p2.status}); database ${(await row(m0)).sp}`);
+    if (!refused(d2) || !(await row(wkId))) throw new Error(`warehouse_keeper deleted a card (${d2.status})`);
+    out.push(`warehouse_keeper: create ok, rename ok, create-with-price refused (${c3.status}), price change refused (${p2.status}), delete refused (${d2.status})`);
+
+    // sales_manager: prices only
+    const sm = users.sales_manager;
+    const p3 = await rest(sm, 'PATCH', `fabric_materials?id=eq.${m0}`, { selling_price: 160 });
+    if (p3.status >= 300 || +(await row(m0)).sp !== 160) throw new Error(`sales_manager cannot change a price 100 -> 160 → ${p3.status} ${p3.text.slice(0, 200)}; database ${(await row(m0)).sp}`);
+    const e3 = await rest(sm, 'PATCH', `fabric_materials?id=eq.${m0}`, { name_ar: 'اسم من مدير المبيعات' });
+    const c4 = await rest(sm, 'POST', 'fabric_materials', { ...base, code: 'GUARD-SM', name_ar: 'مادة مدير مبيعات' });
+    const d3 = await rest(sm, 'DELETE', `fabric_materials?id=eq.${m1}`);
+    if (!refused(e3) || (await row(m0)).name_ar !== 'مادة GUARD-M0') throw new Error(`sales_manager edited the card (${e3.status}); name ${(await row(m0)).name_ar}`);
+    if (!refused(c4)) throw new Error(`sales_manager created a card → ${c4.status}`);
+    if (!refused(d3) || !(await row(m1))) throw new Error(`sales_manager deleted a card (${d3.status})`);
+    out.push(`sales_manager: price 100->160 ok, rename refused (${e3.status}), create refused (${c4.status}), delete refused (${d3.status})`);
+
+    // the owner: price + edit + delete of an unused card
+    const p4 = await rest(ownerTok, 'PATCH', `fabric_materials?id=eq.${m0}`, { selling_price: 170, name_ar: 'مادة GUARD-M0 - مالك' });
+    const d4 = await rest(ownerTok, 'DELETE', `fabric_materials?id=eq.${m1}`);
+    if (p4.status >= 300 || +(await row(m0)).sp !== 170) throw new Error(`the owner cannot change price + name → ${p4.status} ${p4.text.slice(0, 160)}`);
+    if (d4.status >= 300 || (await row(m1))) throw new Error(`the owner cannot delete an unused card → ${d4.status} ${d4.text.slice(0, 160)}`);
+    out.push('company_owner: price + rename + delete ok');
+    return out.join('; ');
+  });
+
+  // ── 20270240k (E2E BUG-14): account 115 «بضاعة في الطريق» is a GROUP with its general leaf in a fresh company's extended chart ──
+  await R.check('9.10 a fresh company\'s chart: account 115 «goods in transit» is a group with exactly one is_system general leaf under it, and the company\'s default goods-in-transit account is that leaf (20270240k)', async () => {
+    const co = S.companies[0].id;
+    const accs = (await pg(`SELECT id, account_code, is_group, is_system, parent_id FROM public.chart_of_accounts WHERE company_id = $1 AND (account_code = '115' OR account_code LIKE '115_') ORDER BY account_code`, [co])).rows;
+    const g = accs.find((a) => a.account_code === '115');
+    if (!g) throw new Error(`no account 115 in the company's chart (${accs.length} accounts 115x)`);
+    if (g.is_group !== true) throw new Error('account 115 is a leaf (20270240k makes it a group)');
+    const leaves = accs.filter((a) => a.parent_id === g.id && a.is_group !== true && a.is_system === true);
+    if (leaves.length !== 1) throw new Error(`account 115 has ${leaves.length} is_system general leaves (expected exactly 1): ${accs.map((a) => a.account_code).join(',')}`);
+    const def = (await pg(`SELECT default_git_account_id FROM public.company_accounting_settings WHERE company_id = $1`, [co])).rows[0];
+    if (!def || def.default_git_account_id !== leaves[0].id) throw new Error(`default_git_account_id is ${def && def.default_git_account_id}, expected the general leaf ${leaves[0].account_code}`);
+    const fn = (await pg(`SELECT to_regprocedure('public.fn_git_general_leaf(uuid)') IS NOT NULL AS ok`)).rows[0].ok;
+    if (!fn) throw new Error('fn_git_general_leaf is missing');
+    return `115 is a group, general leaf ${leaves[0].account_code} (is_system), default_git_account_id = that leaf`;
+  });
 }
 
 module.exports = { multiCompanyChecks, OWNER };

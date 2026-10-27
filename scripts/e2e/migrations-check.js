@@ -38,7 +38,7 @@ const { Client } = require('pg');
 const { PORTS, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions } = require('./lib');
 const MM = require('../lib/migrations-manifest');
 const { checkManifest } = MM;
-const { catalogParity } = require('./catalog-parity');
+const { catalogParity, materialCapabilityGrants } = require('./catalog-parity');
 const { readPackedMigrations } = require('../lib/verify-packed');
 
 function arg(name, def = '') { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : def; }
@@ -77,7 +77,8 @@ const multipart = (file, filename, fields0 = {}) => {
 };
 // production's post-image of the functions of 20270210v (coordinator, from production after the apply of 2026-10-15)
 const V_MD5 = {
-  'fn_guard_material_card()': 'ff6c7cfcde0eb7fcfb780c6e5b62137b', 'fn_material_tracking_sync()': 'db9d6ce5a94060f3d226916ec28b4969', 'fn_material_base_unit_guard()': 'f8e16d1cd348b37965396d14aa240fe0',
+  'fn_guard_material_card()': '2fe6c0a6da6a31ca45e5c810ad8038cc',   // 20270210v's body ff6c7cfc… was replaced by 20270240l (production's post-image, 27-10)
+   'fn_material_tracking_sync()': 'db9d6ce5a94060f3d226916ec28b4969', 'fn_material_base_unit_guard()': 'f8e16d1cd348b37965396d14aa240fe0',
   'fn_material_mode_derive(text,boolean,boolean,boolean)': '521081d97f20ee86078bc13b9cd3b78f', 'fn_material_stock_lock_reasons(uuid,boolean,boolean)': 'af15bdf8b84ddda0040b21de0eda3a59',
   'fn_material_tracking_mode(uuid)': 'e8ad0124e16ef96dbd5f00ae7ed1be7b',
 };
@@ -191,6 +192,8 @@ async function rolesAfterUpgrade(userData) {
     if (d.length) throw new Error(`global role capabilities differ from the fresh install's (${d.length}): ${d.slice(0, 6).join(' | ')}`);
   }
   // G3: the global catalogs of production (print entity types / templates, countries, modules, statuses ...) are on the upgraded install too - the reference-data file changed, so the marker's sha256 made the install load it
+  const mg = await materialCapabilityGrants(pg);
+  if (mg.length) throw new Error(`material capability grants differ from production's: ${mg.join(' | ')}`);
   const par = await catalogParity(pg);
   if (par.differences.length) throw new Error(`global catalogs differ from production's (${par.differences.length}/${par.tables}): ${par.differences.slice(0, 4).join(' | ')}`);
   return `${g.n} global roles (no code twice, the four seed roles once each), ${caps} capability rows${freshRoleCaps ? ' = the fresh install\'s set' : ''}, accountant holds ${acc}; marker sha256 = the packaged file's; ${par.tables} global catalogs = production's counts (print_entity_types ${par.counts.print_entity_types}, print_templates ${par.counts.print_templates})`;
@@ -255,6 +258,8 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
       const refRoles = (await pg(`SELECT count(*)::int n, count(DISTINCT code)::int d FROM public.roles WHERE tenant_id IS NULL`)).rows[0];
       if (refRoles.n < 27 || refRoles.n !== refRoles.d) throw new Error(`fresh install: global roles ${refRoles.n}, distinct ${refRoles.d} (expected >= 27, no duplicate)`);
       if (!freshRoleCaps.includes('inventory.delivery.draft.save|warehouse_keeper')) throw new Error('fresh install: the warehouse_keeper role has no inventory.delivery.draft.save (20270226a found no roles to mirror)');
+      const mgFresh = await materialCapabilityGrants(pg);
+      if (mgFresh.length) throw new Error(`fresh install: material capability grants differ from production's: ${mgFresh.join(' | ')}`);
       const parFresh = await catalogParity(pg);
       if (parFresh.differences.length) throw new Error(`fresh install: global catalogs differ from production's (${parFresh.differences.length}/${parFresh.tables}): ${parFresh.differences.slice(0, 5).join(' | ')}`);
       return `${got.length} applied (${refRoles.n} global roles, ${freshRoleCaps.length} global capability rows, ${parFresh.tables} global catalogs = production's counts): ${NAMES.map((n) => n.replace(/^20270210/, '').split('_')[0]).join(' ')}; migrations.log: ${ok} ✅ lines`;
@@ -398,7 +403,10 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         const got = rows.map((r) => r.name);
         if (JSON.stringify(got) !== JSON.stringify(NAMES)) throw new Error(`applied ${got.length}: ${got.join(', ')}`);
         const counts1 = (await pg(`SELECT (SELECT count(*)::int FROM public.companies) c, (SELECT count(*)::int FROM public.tenants) t, (SELECT count(*)::int FROM auth.users) u, (SELECT count(*)::int FROM public.chart_of_accounts) a, (SELECT count(*)::int FROM public.fabric_materials) m`)).rows[0];
-        if (JSON.stringify(counts1) !== JSON.stringify(counts0)) throw new Error(`data changed: ${JSON.stringify(counts0)} -> ${JSON.stringify(counts1)}`);
+        // 20270240k: every EXTENDED chart whose account 115 is a leaf gets it turned into a group with one general leaf under it (+1 account per such company: this install has one)
+        const leafDelta = counts1.a - counts0.a;
+        if (leafDelta !== 0 && leafDelta !== 1) throw new Error(`the chart of accounts changed by ${leafDelta} (only the 20270240k general leaf, +1, is expected)`);
+        if (JSON.stringify({ ...counts1, a: counts0.a }) !== JSON.stringify(counts0)) throw new Error(`data changed: ${JSON.stringify(counts0)} -> ${JSON.stringify(counts1)}`);
         const card = (await pg(`SELECT id, code, created_at FROM public.fabric_materials WHERE id = $1`, [cardOld.id])).rows[0];
         if (!card || card.code !== 'OLD-1') throw new Error('the old card changed');
         const marker = JSON.parse(fs.readFileSync(path.join(B, 'texacore-data', 'bootstrap.json'), 'utf8'));
@@ -496,7 +504,10 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         const now = rows.map((r) => `${r.id}:${r.applied_at.toISOString()}`);
         if (JSON.stringify(now.slice(0, nPrev)) !== JSON.stringify(rows0)) throw new Error('the rows the old build wrote changed (ids / timestamps)');
         const counts1 = await countsOf();
-        if (JSON.stringify(counts1) !== JSON.stringify(counts0)) throw new Error(`data changed: ${JSON.stringify(counts0)} -> ${JSON.stringify(counts1)}`);
+        // 20270240k: every EXTENDED chart whose account 115 is a leaf gets it turned into a group with one general leaf under it (+1 account per such company: this install has one)
+        const leafDelta = counts1.a - counts0.a;
+        if (leafDelta !== 0 && leafDelta !== 1) throw new Error(`the chart of accounts changed by ${leafDelta} (only the 20270240k general leaf, +1, is expected)`);
+        if (JSON.stringify({ ...counts1, a: counts0.a }) !== JSON.stringify(counts0)) throw new Error(`data changed: ${JSON.stringify(counts0)} -> ${JSON.stringify(counts1)}`);
         const log = mlog(C);
         const ok = (log.match(/✅ \(\d+\/\d+\)/g) || []).length;
         if (ok !== NAMES.length || /❌|🛑/.test(log)) throw new Error(`migrations.log: ${ok} ✅ lines (expected ${NAMES.length} = ${nPrev} by the old build + ${NAMES.length - nPrev} by this one), errors ${/❌|🛑/.test(log)}`);
@@ -612,7 +623,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
     const local = fnMap(post);
     const bad = Object.entries(V_MD5).filter(([sig, md5]) => !local.has(sig) || local.get(sig).md5 !== md5).map(([sig]) => `${sig}: ${local.has(sig) ? local.get(sig).md5.slice(0, 8) : 'missing'}`);
     if (bad.length) throw new Error(`${bad.join('; ')}`);
-    return `${Object.keys(V_MD5).length}/${Object.keys(V_MD5).length} md5 equal (fn_guard_material_card ff6c7cfc…, fn_material_tracking_sync db9d6ce5…, …)`;
+    return `${Object.keys(V_MD5).length}/${Object.keys(V_MD5).length} md5 equal (fn_guard_material_card 2fe6c0a6… = 20270240l, fn_material_tracking_sync db9d6ce5…, …)`;
   });
 
   // ═════════ the inventory delta of the migrations (what manifest.inventoryAfter carries) ═════════

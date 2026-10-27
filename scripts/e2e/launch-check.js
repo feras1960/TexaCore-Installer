@@ -396,10 +396,13 @@ async function main() {
       const leaks = []; const publicReads = []; let denied = 0; let empty = 0;
       for (const t of tables) {
         for (const base of [API + '/rest/v1', `${UI}/_supabase/rest/v1`]) {
-          const r = await request('GET', `${base}/${t.relname}?select=*&limit=1`, { headers: anon });
+          const r = await request('GET', `${base}/${t.relname}?select=*&limit=200`, { headers: anon });
           if (r.status === 200 && Array.isArray(r.json) && r.json.length) {
-            if (base === API + '/rest/v1') (t.tenant_scoped ? leaks : publicReads).push(t.relname);
-            else if (t.tenant_scoped) leaks.push(`${t.relname} (via UI proxy)`);
+            // a tenant-scoped table may hold GLOBAL rows (tenant_id and company_id NULL: the platform's default statuses, templates ...) that production's own policies show to everybody; a row that
+            // belongs to a tenant or a company is a leak, whatever the table
+            const global = r.json.every((row) => (row.tenant_id === undefined || row.tenant_id === null) && (row.company_id === undefined || row.company_id === null));
+            if (base === API + '/rest/v1') ((t.tenant_scoped && !global) ? leaks : publicReads).push(t.relname);
+            else if (t.tenant_scoped && !global) leaks.push(`${t.relname} (via UI proxy)`);
           } else if (r.status >= 400) denied += 1; else empty += 1;
         }
       }

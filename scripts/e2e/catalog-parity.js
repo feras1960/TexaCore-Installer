@@ -20,4 +20,21 @@ async function catalogParity(pg, only = null) {
   }
   return { counts, differences: diff, tables: names.length, measuredAt: EXPECTED.measuredAt };
 }
-module.exports = { catalogParity, EXPECTED };
+// 20270240l (E2E BUG-11): the three material capabilities and the global roles that hold them, as production has them (read-only, 27-10).
+const MATERIAL_GRANTS = {
+  'inventory.material.create': ['branch_manager', 'company_admin', 'company_owner', 'picker', 'tenant_admin', 'tenant_owner', 'warehouse_keeper'],
+  'inventory.material.delete': ['branch_manager', 'company_admin', 'company_owner', 'tenant_admin', 'tenant_owner'],
+  'inventory.price.edit': ['branch_manager', 'company_admin', 'company_owner', 'purchaser', 'sales_manager', 'tenant_admin', 'tenant_owner'],
+};
+/** Differences between the desktop's global grants of the three material capabilities and production's. */
+async function materialCapabilityGrants(pg) {
+  const diff = [];
+  for (const [cap, roles] of Object.entries(MATERIAL_GRANTS)) {
+    const cat = (await pg(`SELECT server_enforced FROM public.capability_catalog WHERE code = $1`, [cap])).rows[0];
+    if (!cat) { diff.push(`${cap}: not in capability_catalog`); continue; }
+    const got = (await pg(`SELECT role_code FROM public.role_capabilities WHERE capability = $1 AND tenant_id IS NULL ORDER BY 1`, [cap])).rows.map((r) => r.role_code);
+    if (JSON.stringify(got) !== JSON.stringify([...roles].sort())) diff.push(`${cap}: desktop [${got.join(',')}], production [${[...roles].sort().join(',')}]`);
+  }
+  return diff;
+}
+module.exports = { catalogParity, materialCapabilityGrants, MATERIAL_GRANTS, EXPECTED };
