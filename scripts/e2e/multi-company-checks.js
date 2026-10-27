@@ -284,6 +284,67 @@ async function multiCompanyChecks(R, ctx) {
     if (!fn) throw new Error('fn_git_general_leaf is missing');
     return `115 is a group, general leaf ${leaves[0].account_code} (is_system), default_git_account_id = that leaf`;
   });
+
+  // ── 20270240n (E2E BUG-13): a sale's stock never leaves at 0 - loose stock at the warehouse's weighted average, a roll at its own cost per metre, the journal's cost of sales follows ──
+  await R.check('9.11 direct sales through the real create_and_post_direct_sale: loose stock leaves at the warehouse\'s weighted average (not 0, not the last cost) and the journal\'s cost of sales is qty x that cost; a roll leaves at its OWN cost per metre and the stock average is re-based so the stock value stays equal to the ledger (20270240n)', async () => {
+    const co = S.companies[0].id;
+    const cur = (await pg('SELECT public.fx_company_currency($1) AS currency', [co])).rows[0].currency;
+    const wh = (await pg('SELECT id FROM public.warehouses WHERE company_id = $1 ORDER BY created_at LIMIT 1', [co])).rows[0];
+    if (!wh) throw new Error('the company has no warehouse');
+    const t = await signIn();
+    const call = (header, lines, rolls) => request('POST', `${API}/rest/v1/rpc/create_and_post_direct_sale`, { headers: { apikey: anonKey, Authorization: `Bearer ${t.access_token}` },
+      body: { p_header: header, p_lines: lines, p_rolls: rolls, p_idempotency_key: require('crypto').randomUUID() } });
+    const customer = async (tag) => {
+      const id = require('crypto').randomUUID();
+      await pg(`INSERT INTO public.customers (id, tenant_id, company_id, code, name_ar, receivable_account_id) VALUES ($1::uuid,$2,$3,$4,'عميل كلفة',
+                 (SELECT id FROM public.chart_of_accounts WHERE company_id = $3 AND is_receivable AND is_detail AND NOT COALESCE(is_summary_account,false) ORDER BY account_code LIMIT 1))`, [id, S.tenantId, co, `COST-${tag}-${id.slice(0, 6)}`]);
+      return id;
+    };
+    const header = (cust) => ({ company_id: co, tenant_id: S.tenantId, customer_id: cust, warehouse_id: wh.id, stock_warehouse_id: wh.id, currency: cur, payment_terms_days: 0 });
+    const near = (a, b, what) => { if (Math.abs(Number(a) - Number(b)) > 0.01) throw new Error(`${what}: ${a}, expected ${b}`); };
+    const cogs = async (invoice) => {
+      const je = (await pg('SELECT journal_entry_id FROM public.sales_transactions WHERE id = $1', [invoice])).rows[0].journal_entry_id;
+      if (!je) throw new Error('the sale posted no journal entry');
+      const rows = (await pg(`SELECT a.account_code, l.debit FROM public.journal_entry_lines l JOIN public.chart_of_accounts a ON a.id = l.account_id
+                               WHERE l.entry_id = $1 AND l.debit > 0 AND l.description LIKE 'تكلفة مبيعات%'`, [je])).rows;
+      if (rows.length !== 1) throw new Error(`the journal has ${rows.length} cost-of-sales lines`);
+      return Number(rows[0].debit);
+    };
+    const out = [];
+
+    // loose stock: 100 pieces, weighted average 70, LAST cost 55 (so «the last cost» and «the average» differ)
+    const matL = require('crypto').randomUUID();
+    await pg(`INSERT INTO public.fabric_materials (id, tenant_id, company_id, code, name_ar, unit, material_type, avg_cost_per_unit, track_serial, is_roll_tracked) VALUES ($1::uuid,$2,$3,$4,'مادة كلفة سائبة','piece','standard',70,false,false)`, [matL, S.tenantId, co, `COST-L-${matL.slice(0, 6)}`]);
+    await pg(`INSERT INTO public.inventory_stock (tenant_id, company_id, material_id, warehouse_id, quantity_on_hand, current_quantity, average_cost, last_cost) VALUES ($1,$2,$3,$4,100,100,70,55)`, [S.tenantId, co, matL, wh.id]);
+    const avgBefore = Number((await pg('SELECT average_cost FROM public.inventory_stock WHERE material_id = $1 AND warehouse_id = $2', [matL, wh.id])).rows[0].average_cost);
+    const r1 = await call(header(await customer('L')), [{ material_id: matL, quantity: 3, unit: 'piece', unit_price: 100, tax_rate: 0, warehouse_id: wh.id }], []);
+    if (r1.status !== 200 || !r1.json || !r1.json.invoice_id) throw new Error(`loose direct sale → ${r1.status} ${r1.text.slice(0, 240)}`);
+    const mv1 = (await pg(`SELECT movement_type, quantity, unit_cost, total_cost FROM public.inventory_movements WHERE reference_type = 'sale_invoice' AND reference_id = $1 AND movement_type IN ('sale','sales_delivery')`, [r1.json.invoice_id])).rows;
+    if (mv1.length !== 1) throw new Error(`the loose sale wrote ${mv1.length} issue movements`);
+    if (!(Number(mv1[0].unit_cost) > 0)) throw new Error('the loose stock left at cost 0');
+    near(mv1[0].unit_cost, avgBefore, 'loose issue unit cost vs the warehouse average before the sale');
+    near(mv1[0].total_cost, 3 * avgBefore, 'loose issue total cost');
+    near(await cogs(r1.json.invoice_id), 3 * avgBefore, 'journal cost of sales (loose)');
+    const st1 = (await pg('SELECT quantity_on_hand, average_cost FROM public.inventory_stock WHERE material_id = $1 AND warehouse_id = $2', [matL, wh.id])).rows[0];
+    near(st1.quantity_on_hand, 97, 'stock after the loose sale'); near(st1.average_cost, avgBefore, 'the average after a stock-out at the average');
+    out.push(`loose: 3 pcs left at ${Number(mv1[0].unit_cost)} (= the warehouse average ${avgBefore}, last cost was 55), movement ${Number(mv1[0].total_cost)}, journal cost of sales ${3 * avgBefore}`);
+
+    // a roll with its own cost: 10 m at 40 / m out of 100 m at 70 -> the average of what stays is (7000 - 400) / 90
+    const matR = require('crypto').randomUUID(); const roll = require('crypto').randomUUID();
+    await pg(`INSERT INTO public.fabric_materials (id, tenant_id, company_id, code, name_ar, unit, material_type, avg_cost_per_unit, track_serial, is_roll_tracked) VALUES ($1::uuid,$2,$3,$4,'قماش كلفة','meter','fabric',70,false,true)`, [matR, S.tenantId, co, `COST-R-${matR.slice(0, 6)}`]);
+    await pg(`INSERT INTO public.inventory_stock (tenant_id, company_id, material_id, warehouse_id, quantity_on_hand, current_quantity, average_cost, last_cost) VALUES ($1,$2,$3,$4,100,100,70,70)`, [S.tenantId, co, matR, wh.id]);
+    await pg(`INSERT INTO public.fabric_rolls (id, tenant_id, company_id, material_id, roll_number, initial_length, current_length, cost_per_meter, warehouse_id, status) VALUES ($1::uuid,$2,$3,$4,$5,10,10,40,$6,'available')`, [roll, S.tenantId, co, matR, `ROLL-${roll.slice(0, 6)}`, wh.id]);
+    const r2 = await call(header(await customer('R')), [{ material_id: matR, quantity: 10, unit: 'meter', unit_price: 100, tax_rate: 0, roll_id: roll, warehouse_id: wh.id }], [{ id: roll }]);
+    if (r2.status !== 200 || !r2.json || !r2.json.invoice_id) throw new Error(`roll direct sale → ${r2.status} ${r2.text.slice(0, 240)}`);
+    const mv2 = (await pg(`SELECT roll_id, quantity, unit_cost, total_cost FROM public.inventory_movements WHERE reference_type = 'sale_invoice' AND reference_id = $1 AND movement_type IN ('sale','sales_delivery')`, [r2.json.invoice_id])).rows.filter((m) => m.roll_id === roll);
+    if (mv2.length !== 1) throw new Error(`the roll sale wrote ${mv2.length} movements for the roll`);
+    near(mv2[0].unit_cost, 40, 'the roll\'s unit cost (its own cost per metre, not the average 70)'); near(mv2[0].total_cost, 400, 'the roll movement total');
+    near(await cogs(r2.json.invoice_id), 400, 'journal cost of sales (roll)');
+    const st2 = (await pg('SELECT quantity_on_hand, average_cost FROM public.inventory_stock WHERE material_id = $1 AND warehouse_id = $2', [matR, wh.id])).rows[0];
+    near(st2.quantity_on_hand, 90, 'stock after the roll sale'); near(Number(st2.average_cost) * 90, 6600, 'the stock value after the roll left at its own cost (value = ledger)');
+    out.push(`roll: 10 m left at its own 40 / m (average was 70), movement 400, journal cost of sales 400; the average of the 90 m that stay is ${Number(st2.average_cost)} (value 6600)`);
+    return out.join('; ');
+  });
 }
 
 module.exports = { multiCompanyChecks, OWNER };
