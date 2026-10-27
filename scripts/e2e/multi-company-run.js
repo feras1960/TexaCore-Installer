@@ -6,7 +6,9 @@ const fs = require('fs');
 const path = require('path');
 const { Client } = require('pg');
 const { PORTS, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions } = require('./lib');
+const os = require('os');
 const { multiCompanyChecks } = require('./multi-company-checks');
+const lanIp = (() => { const a = require('../../src/lan-address').pickLanAddress(os.networkInterfaces()); return a && a !== '127.0.0.1' ? a : ''; })();
 
 const arg = (n, d = '') => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const WORK = path.resolve(arg('workdir', ''));
@@ -28,7 +30,7 @@ if (!arg('workdir') || !ERP) { console.error('--workdir <dir> and --erp <ERP che
     setPgPassword(secrets.dbPassword);
     const pg = async (sql, params = []) => { const c = new Client(pgOptions()); await c.connect(); try { return await c.query(sql, params); } finally { await c.end(); } };
     await multiCompanyChecks(R, { request, ADMIN: `http://127.0.0.1:${PORTS.admin}`, API: `http://127.0.0.1:${PORTS.api}`, UI: `http://127.0.0.1:${PORTS.ui}`, H: { 'x-texacore-local-secret': secrets.localApiSecret },
-      anonKey: secrets.anonKey, ERP, WORK, pg });
+      anonKey: secrets.anonKey, ERP, WORK, pg, lanIp });
   } catch (e) { R.rows.push({ name: 'harness', ok: false, evidence: e.stack || e.message, ms: 0 }); console.log(`  FAIL  harness - ${e.message}`); }
   finally { await stopApp(child, userData); }
   console.log(`\nmulti-company-run: ${R.summary()}`);

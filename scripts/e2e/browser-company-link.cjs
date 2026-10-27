@@ -5,7 +5,7 @@
 const fs = require('fs');
 const path = require('path');
 const arg = (n, d = '') => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
-const ERP = arg('erp'); const UI = arg('ui'); const CODE = arg('code'); const EXPECT = arg('expect'); const EMAIL = arg('email'); const PASSWORD = arg('password'); const SHOTS = arg('shots');
+const ERP = arg('erp'); const UI = arg('ui'); const CODE = arg('code'); const EXPECT = arg('expect'); const NAME = arg('name', ''); const EMAIL = arg('email'); const PASSWORD = arg('password'); const SHOTS = arg('shots');
 const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
 
 (async () => {
@@ -27,7 +27,8 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
     const st = await page.evaluate(() => {
       const j = (k) => { try { return JSON.parse(localStorage.getItem(k) || 'null'); } catch { return null; } };
       const tok = j('sb-local-auth-token');
-      return { active: j('texacore_active_company'), cached: j('texacore_cached_ids'), uid: tok && tok.user && tok.user.id, metaCompany: tok && tok.user && tok.user.user_metadata && tok.user.user_metadata.company_id,
+      const bar = [...document.querySelectorAll('header *, nav *')].map((e) => (e.children.length ? '' : (e.textContent || '').trim())).filter(Boolean).slice(0, 400);
+      return { bar, active: j('texacore_active_company'), cached: j('texacore_cached_ids'), uid: tok && tok.user && tok.user.id, metaCompany: tok && tok.user && tok.user.user_metadata && tok.user.user_metadata.company_id,
         access: tok && tok.access_token, anon: window.__TEXACORE_CONFIG__ && window.__TEXACORE_CONFIG__.supabaseKey };
     });
     if (!st.access || !st.uid) throw new Error('no session in localStorage after login');
@@ -36,9 +37,12 @@ const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
       return { status: r.status, body: await r.json() };
     }, { url: UI, tok: st.access, anon: st.anon, uid: st.uid });
     const server = prof.status === 200 && prof.body.length ? prof.body[0].company_id : null;
-    const got = { page: st.active && st.active.id, cached: st.cached && st.cached.company_id, session: st.metaCompany, server };
-    const bad = Object.entries(got).filter(([k, v]) => (k === 'cached' ? v && v !== EXPECT : v !== EXPECT)).map(([k, v]) => `${k}=${v || 'none'}`);
+    // the page's active company: the local login keeps it in texacore_active_company, a login from the office network (no local company list) in texacore_cached_ids
+    const cachedId = st.cached && (st.cached.company_id || st.cached.companyId);
+    const got = { page: (st.active && st.active.id) || cachedId, session: st.metaCompany, server };
+    const bad = Object.entries(got).filter(([, v]) => v !== EXPECT).map(([k, v]) => `${k}=${v || 'none'}`);
     if (bad.length) throw new Error(`the link ?c=${CODE} should open ${EXPECT} but ${bad.join(', ')} (page ${got.page}, session ${got.session}, server ${got.server})`);
-    console.log(`?c=${CODE} → ${st.active.name || ''} ${EXPECT.slice(0, 8)}… (page, session and user_profiles agree; now at ${new URL(page.url()).pathname})`);
+    if (NAME && !st.bar.includes(NAME)) throw new Error(`the link ?c=${CODE} opened ${EXPECT} but the top bar does not show «${NAME}» (${[...new Set(st.bar.filter((x) => /^Multi /.test(x)))].join(', ') || 'no company name'})`);
+    console.log(`?c=${CODE} → ${NAME || (st.active && st.active.name) || ''} ${EXPECT.slice(0, 8)}… (page, session and user_profiles agree${NAME ? ', top bar shows it' : ''}; now at ${new URL(page.url()).pathname})`);
   } finally { await browser.close(); }
 })().catch((e) => { console.error(e.message); process.exit(1); });

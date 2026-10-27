@@ -1,0 +1,179 @@
+{
+ "source": "production, read-only (BEGIN READ ONLY ... ROLLBACK)",
+ "measuredAt": "2026-10-27T11:36Z",
+ "definition": "global rows: tenant_id AND company_id NULL (both columns), else the one that exists, else the whole table",
+ "tables": {
+  "capability_catalog": {
+   "prod": 150,
+   "desktop": 150,
+   "scope": "whole"
+  },
+  "capability_deny_presets": {
+   "prod": 7,
+   "desktop": 7,
+   "scope": "whole"
+  },
+  "roles": {
+   "prod": 27,
+   "desktop": 28,
+   "scope": "tenant",
+   "note": "+ platform_admin (installer seed role, not in production's global set)"
+  },
+  "role_capabilities": {
+   "prod": 860,
+   "desktop": 860,
+   "scope": "tenant"
+  },
+  "business_industries": {
+   "prod": 5,
+   "desktop": 5,
+   "scope": "whole"
+  },
+  "countries": {
+   "prod": 48,
+   "desktop": 48,
+   "scope": "whole"
+  },
+  "geo_regions": {
+   "prod": 39,
+   "desktop": 39,
+   "scope": "whole"
+  },
+  "system_languages": {
+   "prod": 9,
+   "desktop": 9,
+   "scope": "whole"
+  },
+  "ui_tabs": {
+   "prod": 27,
+   "desktop": 27,
+   "scope": "whole"
+  },
+  "modules": {
+   "prod": 47,
+   "desktop": 47,
+   "scope": "whole"
+  },
+  "system_modules": {
+   "prod": 47,
+   "desktop": 47,
+   "scope": "whole"
+  },
+  "module_features": {
+   "prod": 183,
+   "desktop": 183,
+   "scope": "whole"
+  },
+  "saas_products": {
+   "prod": 6,
+   "desktop": 6,
+   "scope": "whole"
+  },
+  "fx_rules": {
+   "prod": 17,
+   "desktop": 17,
+   "scope": "whole"
+  },
+  "print_entity_types": {
+   "prod": 43,
+   "desktop": 43,
+   "scope": "whole"
+  },
+  "print_template_known_variables": {
+   "prod": 576,
+   "desktop": 576,
+   "scope": "whole"
+  },
+  "print_template_lint_exceptions": {
+   "prod": 4,
+   "desktop": 4,
+   "scope": "whole"
+  },
+  "mfg_field_override_whitelist": {
+   "prod": 19,
+   "desktop": 19,
+   "scope": "whole"
+  },
+  "print_templates": {
+   "prod": 72,
+   "desktop": 72,
+   "scope": "tenant+company"
+  },
+  "fx_platform_state": {
+   "prod": 24,
+   "desktop": 1,
+   "scope": "whole",
+   "note": "only the fc_mirror flag is exported; the other keys are per-company backfill markers"
+  },
+  "license_limits": {
+   "prod": 4,
+   "desktop": 4,
+   "scope": "whole"
+  },
+  "task_generator_settings": {
+   "prod": 6,
+   "desktop": 6,
+   "scope": "whole"
+  },
+  "status_groups": {
+   "prod": 7,
+   "desktop": 7,
+   "scope": "tenant+company"
+  },
+  "custom_statuses": {
+   "prod": 23,
+   "desktop": 23,
+   "scope": "tenant+company"
+  },
+  "status_transitions": {
+   "prod": 49,
+   "desktop": 49,
+   "scope": "tenant"
+  },
+  "chart_templates": {
+   "prod": 2,
+   "desktop": 2,
+   "scope": "tenant"
+  },
+  "safety_instructions": {
+   "prod": 8,
+   "desktop": 8,
+   "scope": "tenant+company"
+  },
+  "legal_forms": {
+   "prod": 12,
+   "desktop": 12,
+   "scope": "company"
+  },
+  "vendor_categories": {
+   "prod": 14,
+   "desktop": 14,
+   "scope": "tenant"
+  },
+  "currencies": {
+   "prod": 70,
+   "desktop": 70,
+   "scope": "tenant"
+  },
+  "account_types": {
+   "prod": 12,
+   "desktop": 12,
+   "scope": "whole"
+  },
+  "business_type_catalog": {
+   "prod": 15,
+   "desktop": 15,
+   "scope": "whole"
+  },
+  "country_configurations": {
+   "prod": 16,
+   "desktop": 16,
+   "scope": "whole"
+  },
+  "subscription_plans": {
+   "prod": 4,
+   "desktop": 4,
+   "scope": "whole"
+  }
+ }
+}

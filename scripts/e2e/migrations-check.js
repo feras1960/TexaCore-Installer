@@ -38,6 +38,7 @@ const { Client } = require('pg');
 const { PORTS, Results, portFree, request, startApp, stopApp, setPgPassword, pgOptions } = require('./lib');
 const MM = require('../lib/migrations-manifest');
 const { checkManifest } = MM;
+const { catalogParity } = require('./catalog-parity');
 const { readPackedMigrations } = require('../lib/verify-packed');
 
 function arg(name, def = '') { const i = process.argv.indexOf(`--${name}`); return i >= 0 ? process.argv[i + 1] : def; }
@@ -189,7 +190,10 @@ async function rolesAfterUpgrade(userData) {
     const d = [...now.filter((k) => !f.has(k)).map((k) => `only upgraded: ${k}`), ...freshRoleCaps.filter((k) => !a.has(k)).map((k) => `only fresh: ${k}`)];
     if (d.length) throw new Error(`global role capabilities differ from the fresh install's (${d.length}): ${d.slice(0, 6).join(' | ')}`);
   }
-  return `${g.n} global roles (no code twice, the four seed roles once each), ${caps} capability rows${freshRoleCaps ? ' = the fresh install\'s set' : ''}, accountant holds ${acc}; marker sha256 = the packaged file's`;
+  // G3: the global catalogs of production (print entity types / templates, countries, modules, statuses ...) are on the upgraded install too - the reference-data file changed, so the marker's sha256 made the install load it
+  const par = await catalogParity(pg);
+  if (par.differences.length) throw new Error(`global catalogs differ from production's (${par.differences.length}/${par.tables}): ${par.differences.slice(0, 4).join(' | ')}`);
+  return `${g.n} global roles (no code twice, the four seed roles once each), ${caps} capability rows${freshRoleCaps ? ' = the fresh install\'s set' : ''}, accountant holds ${acc}; marker sha256 = the packaged file's; ${par.tables} global catalogs = production's counts (print_entity_types ${par.counts.print_entity_types}, print_templates ${par.counts.print_templates})`;
 }
 let freshRoleCaps = null;   // the fresh install's global role capabilities (capability|role_code), filled by A1
 const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 'texacore-data', 'logs', 'migrations.log'), 'utf8'); } catch { return ''; } };
@@ -251,7 +255,9 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
       const refRoles = (await pg(`SELECT count(*)::int n, count(DISTINCT code)::int d FROM public.roles WHERE tenant_id IS NULL`)).rows[0];
       if (refRoles.n < 27 || refRoles.n !== refRoles.d) throw new Error(`fresh install: global roles ${refRoles.n}, distinct ${refRoles.d} (expected >= 27, no duplicate)`);
       if (!freshRoleCaps.includes('inventory.delivery.draft.save|warehouse_keeper')) throw new Error('fresh install: the warehouse_keeper role has no inventory.delivery.draft.save (20270226a found no roles to mirror)');
-      return `${got.length} applied (${refRoles.n} global roles, ${freshRoleCaps.length} global capability rows): ${NAMES.map((n) => n.replace(/^20270210/, '').split('_')[0]).join(' ')}; migrations.log: ${ok} ✅ lines`;
+      const parFresh = await catalogParity(pg);
+      if (parFresh.differences.length) throw new Error(`fresh install: global catalogs differ from production's (${parFresh.differences.length}/${parFresh.tables}): ${parFresh.differences.slice(0, 5).join(' | ')}`);
+      return `${got.length} applied (${refRoles.n} global roles, ${freshRoleCaps.length} global capability rows, ${parFresh.tables} global catalogs = production's counts): ${NAMES.map((n) => n.replace(/^20270210/, '').split('_')[0]).join(' ')}; migrations.log: ${ok} ✅ lines`;
     });
 
     await R.check('A2 local specifics: no pg_cron (the migration\'s own guard skipped the sweep job), the cloud read-only policy is OFF, the cloud trial policy (production-only data, not shipped) wrote nothing, no company / tenant / user appeared, the free plan carries fabric', async () => {

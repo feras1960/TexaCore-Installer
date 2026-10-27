@@ -2000,7 +2000,7 @@ async function main() {
     }
 
     // ── 9. final build (owner 27-10): an owner with three companies - company links, the Users screen's roles, the desktop's attachment / public-link guards ──
-    await multiCompanyChecks(R, { request, ADMIN, API, UI, H, anonKey: secrets.anonKey, ERP, WORK, pg });
+    await multiCompanyChecks(R, { request, ADMIN, API, UI, H, anonKey: secrets.anonKey, ERP, WORK, pg, lanIp });
   } catch (e) {
     R.rows.push({ name: 'harness', ok: false, evidence: e.stack || e.message, ms: 0 });
     console.log(`  FAIL  harness — ${e.message}`);
