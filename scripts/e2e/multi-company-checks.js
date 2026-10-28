@@ -345,6 +345,40 @@ async function multiCompanyChecks(R, ctx) {
     out.push(`roll: 10 m left at its own 40 / m (average was 70), movement 400, journal cost of sales 400; the average of the 90 m that stay is ${Number(st2.average_cost)} (value 6600)`);
     return out.join('; ');
   });
+
+  // ── 20270242b (BUG-15): a receipt voucher whose party line is linked to an invoice PAYS that invoice (through its own allocation table, no receipt row, no second entry) ──
+  await R.check('9.12 a receipt voucher (cash debit / customer credit linked to a posted sales invoice, posted through save_journal_entry_draft as the owner) pays the invoice: paid 400 of 1000, balance 600, one active allocation, no payment_receipts row, one journal entry (20270242b)', async () => {
+    const co = S.companies[0].id; const crypto = require('crypto');
+    const sale = crypto.randomUUID(); const customer = crypto.randomUUID(); const party = crypto.randomUUID();
+    const ccy = (await pg('SELECT public.fx_company_currency($1) AS c', [co])).rows[0].c;
+    const cash = (await pg(`SELECT id FROM public.chart_of_accounts WHERE company_id = $1 AND account_code = '1111'`, [co])).rows[0];
+    if (!cash) throw new Error('the company chart has no cash account 1111');
+    const c = new Client(pgOptions()); await c.connect();
+    try {
+      await c.query('BEGIN'); await c.query('SET LOCAL session_replication_role = replica');
+      await c.query(`INSERT INTO public.customers (id, tenant_id, company_id, code, name_ar) VALUES ($1,$2,$3,$4,'زبون سند')`, [customer, S.tenantId, co, `VA-C-${customer.slice(0, 8)}`]);
+      await c.query(`INSERT INTO public.chart_of_accounts (id, tenant_id, company_id, account_code, name_ar, is_group, is_detail, account_type_id, is_party_account, party_type, party_id, currency)
+                     VALUES ($1,$2,$3,$4,'حساب طرف',false,true,(SELECT id FROM public.account_types WHERE code = 'ASSET'),true,'customer',$5,$6)`, [party, S.tenantId, co, 'VA' + party.replace(/\D/g, '').slice(0, 8), customer, ccy]);
+      await c.query(`INSERT INTO public.sales_transactions (id, tenant_id, company_id, stage, is_posted, invoice_no, currency, exchange_rate, subtotal, total_amount, paid_amount, balance, customer_id, customer_name)
+                     VALUES ($1,$2,$3,'posted',true,$4,$5,1,1000,1000,0,1000,$6,'زبون سند')`, [sale, S.tenantId, co, `SI-VA-${sale.slice(0, 6)}`, ccy, customer]);
+      await c.query('SET LOCAL session_replication_role = origin'); await c.query('COMMIT');
+    } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { await c.end(); }
+    const before = (await pg('SELECT count(*)::int AS n FROM public.journal_entries WHERE company_id = $1', [co])).rows[0].n;
+    const t = await signIn();
+    const r = await request('POST', `${API}/rest/v1/rpc/save_journal_entry_draft`, { headers: { apikey: anonKey, Authorization: `Bearer ${t.access_token}` }, body: { p_payload: {
+      company_id: co, entry_date: new Date().toISOString().slice(0, 10), entry_type: 'receipt', description: 'BUG-15 receipt voucher', currency: ccy, exchange_rate: 1, post: true, request_key: `va-${crypto.randomUUID()}`, fund_account_id: cash.id,
+      lines: [{ account_id: cash.id, debit: 400, credit: 0, currency: ccy, exchange_rate: 1, is_fund_line: true }, { account_id: party, debit: 0, credit: 400, currency: ccy, exchange_rate: 1, reference_type: 'invoice', reference_id: sale }] } } });
+    if (r.status !== 200 || !r.json || r.json.success !== true) throw new Error(`receipt voucher → ${r.status} ${r.text.slice(0, 240)}`);
+    const inv = (await pg('SELECT paid_amount::float8 AS paid, balance::float8 AS balance FROM public.sales_transactions WHERE id = $1', [sale])).rows[0];
+    if (inv.paid !== 400 || inv.balance !== 600) throw new Error(`the invoice is paid ${inv.paid} / balance ${inv.balance} (expected 400 / 600)`);
+    const alloc = (await pg(`SELECT status, amount::float8 AS amount, amount_doc::float8 AS doc FROM public.voucher_invoice_allocations WHERE sales_transaction_id = $1`, [sale])).rows;
+    if (JSON.stringify(alloc) !== JSON.stringify([{ status: 'active', amount: 400, doc: 400 }])) throw new Error(`allocations ${JSON.stringify(alloc)}`);
+    const receipts = (await pg('SELECT count(*)::int AS n FROM public.payment_receipts WHERE sales_transaction_id = $1', [sale])).rows[0].n;
+    if (receipts !== 0) throw new Error(`${receipts} payment_receipts row(s): the money would be counted twice`);
+    const after = (await pg('SELECT count(*)::int AS n FROM public.journal_entries WHERE company_id = $1', [co])).rows[0].n;
+    if (after !== before + 1) throw new Error(`journal entries ${before} -> ${after} (expected exactly one new entry)`);
+    return `invoice paid 400 of 1000 (balance 600), one active allocation 400, no receipt row, one journal entry`;
+  });
 }
 
 module.exports = { multiCompanyChecks, OWNER };

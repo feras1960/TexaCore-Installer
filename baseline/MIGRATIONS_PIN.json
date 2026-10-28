@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "70a861c4d0aa7c516aa31f0a6e3bccf09fcdec70",
+  "erpCommit": "39c3c50607a5111fa0071ac792a69180cb0ace96",
   "migrations": [
     {
       "order": 1,
@@ -493,11 +493,74 @@
       "file": "20270240n_sale_cost_sources.sql",
       "sha256": "8572f9d905e6d5a6d0d2a30077d0988abe80f0ba6ab2d087923248d8e5afb37b",
       "bytes": 48694
+    },
+    {
+      "order": 71,
+      "name": "20270241a_dashboard_correctness",
+      "file": "20270241a_dashboard_correctness.sql",
+      "sha256": "666abc1d9aba1d83132bebcfc30ad1bd67cfb7350dd6af805256d5f154f127c0",
+      "bytes": 25745
+    },
+    {
+      "order": 72,
+      "name": "20270241b_dashboard_decision_widgets",
+      "file": "20270241b_dashboard_decision_widgets.sql",
+      "sha256": "e3048498854e54b1335f14f8f7bb55c30c39a30916bac1a9b120a627fd7e5279",
+      "bytes": 36794
+    },
+    {
+      "order": 73,
+      "name": "20270241c_dashboard_user_layouts",
+      "file": "20270241c_dashboard_user_layouts.sql",
+      "sha256": "f0923be7529fc4647c05666ed1e83319eb42b5a9dfa1208f4e6bb8c2d7fc9112",
+      "bytes": 12315
+    },
+    {
+      "order": 74,
+      "name": "20270241d_accounting_dashboard_roles",
+      "file": "20270241d_accounting_dashboard_roles.sql",
+      "sha256": "9ad7ead773713c48e9f9bf6e98168395165b508e13e572e7a52a98a6e52844ee",
+      "bytes": 10083
+    },
+    {
+      "order": 75,
+      "name": "20270242a_doc_line_total",
+      "file": "20270242a_doc_line_total.sql",
+      "sha256": "f854c98816779484401997c6abff7ef2dac11d89bb34d042c90580249858e806",
+      "bytes": 99501
+    },
+    {
+      "order": 76,
+      "name": "20270242b_voucher_invoice_allocation",
+      "file": "20270242b_voucher_invoice_allocation.sql",
+      "sha256": "f5408b194092e729d9f52a79ced3f61085fdb1f26df06ccd0a72d5696c7e0544",
+      "bytes": 33604
+    },
+    {
+      "order": 77,
+      "name": "20270242c_zero_total_invoice",
+      "file": "20270242c_zero_total_invoice.sql",
+      "sha256": "5ea28312c429ec497b5ccbc845d78c32c1b51a14145358d7a39ad9ea5d623679",
+      "bytes": 47772
+    },
+    {
+      "order": 78,
+      "name": "20270242d_confirmation_chain",
+      "file": "20270242d_confirmation_chain.sql",
+      "sha256": "bc077309810a2bc94a43490d7ff44ba33c94b64879f6095cb684fbb051fe74d6",
+      "bytes": 31770
+    },
+    {
+      "order": 79,
+      "name": "20270242e_posted_sale_invoice_number",
+      "file": "20270242e_posted_sale_invoice_number.sql",
+      "sha256": "ff5be2706a4eaa083798b6ec00b6fca7e7ad49cb919aec2edb643d22341b334d",
+      "bytes": 61854
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "d4cd343c0a80576bfd83163a0961b58cdc034351dd397cc0915a7beb46f778e1",
-    "bytes": 37258
+    "sha256": "86efd62b98c023f7fa290da0adb25d1fc94fbe90261ce397a5ce58da0f3daac6",
+    "bytes": 40700
   }
 }
