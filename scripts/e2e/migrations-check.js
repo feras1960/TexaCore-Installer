@@ -519,7 +519,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
       await R.check('C1 UPGRADE from the previous build that already has its set: it provisions an install and applies ITS migrations itself (a strict prefix of this build\'s list); a company and one material card with a typed code', async () => {
         const rows = await appliedRows(); nPrev = rows.length;
         const got = rows.map((r) => r.name);
-        if (!nPrev || nPrev >= NAMES.length) throw new Error(`the old build applied ${nPrev}, this build ships ${NAMES.length}`);
+        if (!nPrev || nPrev > NAMES.length) throw new Error(`the old build applied ${nPrev}, this build ships ${NAMES.length}`);   // equal = the previous build of the SAME migration set (build #6 -> #7): the upgrade then applies none
         if (JSON.stringify(got) !== JSON.stringify(NAMES.slice(0, nPrev))) throw new Error(`the old build's set is not a prefix of this build's list: ${got.join(',')}`);
         oc = await createCompany(o.secrets, 'c');
         preC = await snapshotOldOwner(o.secrets, 'owner-c@mig.test', oc.tenantId);
