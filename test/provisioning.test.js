@@ -2,7 +2,7 @@
 const test = require('node:test');
 const assert = require('node:assert/strict');
 const http = require('http');
-const { createLocalCompany, healTenantOwners, normaliseInput } = require('../src/provisioning');
+const { createLocalCompany, healTenantOwners, backfillUserTenantMetadata, normaliseInput } = require('../src/provisioning');
 
 // ── fakes: a GoTrue + PostgREST on loopback and a recording pg client ─────────────────────────────
 async function harness({ emailTaken = false, gotrueCreate = 'ok', companyRpc = 'ok', gotrueDelete = 200, existingUsers = [{ id: 'someone-elses', email: 'other@x.test' }] } = {}) {
@@ -175,4 +175,49 @@ test('healTenantOwners: restores owner_email and the tenant-admin flag, touching
   assert.deepEqual(r, { tenants: 2, profiles: 3 });
   assert.match(seen[0], /owner_email IS NULL OR btrim\(t\.owner_email\) = ''/);
   assert.match(seen[1], /is_tenant_admin IS DISTINCT FROM true/);
+});
+
+test('the installer-created owner carries the tenant in BOTH user_metadata and app_metadata (the ERP screens read user_metadata.tenant_id)', async () => {
+  const h = await harness();
+  try {
+    const r = await createLocalCompany(h.deps, input());
+    assert.equal(r.success, true);
+    const tenantId = h.queries.find((q) => /INSERT INTO public\.tenants/.test(q.text)).params[0];
+    const create = h.http_.find((c) => c.method === 'POST' && c.path === '/admin/users');
+    assert.ok(tenantId, 'a tenant id was generated');
+    assert.equal(create.body.user_metadata.tenant_id, tenantId);
+    assert.equal(create.body.app_metadata.tenant_id, tenantId);
+    assert.equal(create.body.user_metadata.role, 'admin');                          // nothing else about the owner changed
+    assert.ok(create.body.user_metadata.full_name);
+  } finally { h.close(); }
+});
+
+test('backfillUserTenantMetadata: copies app_metadata.tenant_id into user_metadata only where it is missing, touches no other column, logs the count', async () => {
+  const seen = []; const logs = [];
+  const pgQuery = async (text, params) => { seen.push({ text, params }); return { rowCount: 2, rows: [{ id: 'a' }, { id: 'b' }] }; };
+  const r = await backfillUserTenantMetadata({ pgQuery, log: (m) => logs.push(m) });
+  assert.deepEqual(r, { users: 2 });
+  assert.equal(seen.length, 1);
+  const sql = seen[0].text.replace(/\s+/g, ' ');
+  assert.match(sql, /^ ?UPDATE auth\.users SET raw_user_meta_data = COALESCE\(raw_user_meta_data, '\{\}'::jsonb\) \|\| jsonb_build_object\('tenant_id', raw_app_meta_data->>'tenant_id'\) /);
+  assert.match(sql, /WHERE NULLIF\(raw_app_meta_data->>'tenant_id', ''\) IS NOT NULL AND NOT \(COALESCE\(raw_user_meta_data, '\{\}'::jsonb\) \? 'tenant_id'\)/);
+  assert.equal((sql.match(/\bSET\b/g) || []).length, 1);
+  assert.doesNotMatch(sql.replace(/raw_user_meta_data/g, ''), /updated_at|encrypted_password|email|raw_app_meta_data\s*=/);   // only raw_user_meta_data is assigned
+  assert.match(logs.join('\n'), /\b2 user\(s\)/);
+});
+
+test('backfillUserTenantMetadata: nothing to do is a clean zero (safe on every start)', async () => {
+  const logs = [];
+  const r = await backfillUserTenantMetadata({ pgQuery: async () => ({ rowCount: 0, rows: [] }), log: (m) => logs.push(m) });
+  assert.deepEqual(r, { users: 0 });
+  assert.match(logs.join('\n'), /\b0 user\(s\)/);
+});
+
+test('the boot sequence runs the backfill right after healTenantOwners, as non-fatal', () => {
+  const src = require('fs').readFileSync(require('path').join(__dirname, '..', 'src', 'service-manager.js'), 'utf8');
+  const heal = src.indexOf('.healTenantOwners(');
+  const back = src.indexOf('.backfillUserTenantMetadata(');
+  assert.ok(heal > 0 && back > heal, 'backfill comes after healTenantOwners');
+  assert.ok(back < src.indexOf('startFrontendServer(uiPort)'), 'and before the front end starts');
+  assert.match(src.slice(back, back + 600), /catch \(e\) \{ console\.warn\('\[ServiceManager\] backfillUserTenantMetadata failed \(non-fatal\)/);
 });

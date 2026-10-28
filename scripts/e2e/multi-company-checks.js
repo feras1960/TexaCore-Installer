@@ -6,6 +6,7 @@
 //   9.3 (b) the Users screen's role list is not empty for the owner: fn_users_screen_roles() answers his tenant's roles plus the global roles, none of them platform-level
 //   9.4 (c) on the desktop an attachment upload answers DESKTOP_STORAGE_UNAVAILABLE with the reason (the shipped bundle, run in the real page), and the share hub issues no public
 //       token (the shipped bundle carries the desktop gate and its reason in every language; no public token exists in the database)
+//   9.13 R6-1 (build #7): the installer-created owner has tenant_id in user_metadata AND app_metadata (database row and session token), and saves a material card from the real materials page
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -378,6 +379,31 @@ async function multiCompanyChecks(R, ctx) {
     const after = (await pg('SELECT count(*)::int AS n FROM public.journal_entries WHERE company_id = $1', [co])).rows[0].n;
     if (after !== before + 1) throw new Error(`journal entries ${before} -> ${after} (expected exactly one new entry)`);
     return `invoice paid 400 of 1000 (balance 600), one active allocation 400, no receipt row, one journal entry`;
+  });
+  // ── R6-1 (build #7): the OWNER the installer creates carries the tenant in user_metadata too (the ERP's screens read user_metadata.tenant_id; on build #6 a material could not be saved: «تعذّر تحديد المستأجر») ──
+  await R.check('9.13 R6-1: the installer-created owner has tenant_id in raw_user_meta_data AND raw_app_meta_data, his session token carries both, no local user lacks it, and a material card is saved from the real page as that owner', async () => {
+    if (!S.tenantId) throw new Error('9.1 did not leave a tenant');
+    const decode = (jwt) => JSON.parse(Buffer.from(jwt.split('.')[1], 'base64url').toString('utf8'));
+    const row = (await pg(`SELECT id, raw_user_meta_data->>'tenant_id' AS u, raw_app_meta_data->>'tenant_id' AS a, raw_user_meta_data->>'role' AS role, raw_user_meta_data->>'full_name' AS name FROM auth.users WHERE lower(email) = lower($1)`, [OWNER.email])).rows[0];
+    if (!row) throw new Error('the owner is not in auth.users');
+    if (row.u !== S.tenantId) throw new Error(`auth.users.raw_user_meta_data.tenant_id is ${row.u === null ? 'MISSING' : row.u} (the tenant is ${S.tenantId})`);
+    if (row.a !== S.tenantId) throw new Error(`raw_app_meta_data.tenant_id is ${row.a} (the tenant is ${S.tenantId})`);
+    if (row.role !== 'admin' || !row.name) throw new Error(`the owner's other user_metadata changed: role ${row.role}, name ${row.name}`);
+    const gap = (await pg(`SELECT count(*)::int AS n FROM auth.users WHERE NULLIF(raw_app_meta_data->>'tenant_id', '') IS NOT NULL AND NOT (COALESCE(raw_user_meta_data, '{}'::jsonb) ? 'tenant_id')`)).rows[0].n;
+    if (gap) throw new Error(`${gap} local user(s) have a tenant in app_metadata but not in user_metadata`);
+    const claims = decode((await signIn()).access_token);
+    if ((claims.user_metadata || {}).tenant_id !== S.tenantId || (claims.app_metadata || {}).tenant_id !== S.tenantId) throw new Error(`the session token's claims: user_metadata.tenant_id ${(claims.user_metadata || {}).tenant_id}, app_metadata.tenant_id ${(claims.app_metadata || {}).tenant_id}`);
+    let ui = 'the page step was skipped (no --erp: Playwright lives in the ERP checkout)';
+    if (ERP) {
+      const name = `مادة فحص المالك ${Date.now() % 100000}`;
+      const out = finalChecks('materialSave', ['--material', name]);
+      const saved = (await pg('SELECT id, tenant_id, company_id FROM public.fabric_materials WHERE name_ar = $1', [name])).rows;
+      if (saved.length !== 1) throw new Error(`the page reported success but ${saved.length} card(s) named «${name}» exist (${out.slice(0, 200)})`);
+      if (saved[0].tenant_id !== S.tenantId) throw new Error(`the card was saved under tenant ${saved[0].tenant_id}, not the owner's ${S.tenantId}`);
+      if (!S.companies.some((c) => c.id === saved[0].company_id)) throw new Error('the card was saved under a company that is not the owner\'s');
+      ui = `card «${name}» saved from the materials page by the owner (tenant ${saved[0].tenant_id.slice(0, 8)}…); ${out.slice(0, 180)}`;
+    }
+    return `owner user_metadata.tenant_id = app_metadata.tenant_id = ${S.tenantId.slice(0, 8)}… (role admin, name kept); no user lacks it; the session token carries it in user_metadata and app_metadata; ${ui}`;
   });
 }
 

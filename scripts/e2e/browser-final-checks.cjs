@@ -4,6 +4,8 @@
 //   print        G3: the share centre of a sales invoice and of a sales quote render >= 1 page and every fn_document_qr_link answers 200 (it answered 400 «unknown entity_type» when the print catalogs were missing);
 //                #1030(ii): opening them requests NO fn_issue_document_token (no public token on the desktop)
 //   statement    G3: the customer statement preview renders >= 1 page (it said «0 pages» without the global print templates, rehearsal finding 3)
+//   materialSave R6-1 (build #7): the installer-created OWNER saves a new material card from the real page: «إضافة مادة» -> name + group -> «حفظ»; no «تعذّر تحديد المستأجر» (it threw on build #6 because the owner's
+//                user_metadata had no tenant_id), a write request reached the server and the page told the owner nothing failed (the row itself is asserted by multi-company-checks 9.13 over SQL)
 //   rail         #1030(i): at 1280x800 and 1440x900, rail expanded and collapsed, the «⋯» row buttons of a list are what a click at their centre hits (not the company rail)
 //   node scripts/e2e/browser-final-checks.cjs --erp <ERP> --ui <origin> --code <8 hex> --email … --password … --invoice SEED-INV-1 --quote SEED-Q-1 --customer SEED-C1 --shots <dir> [--only usersToast,print,statement,rail]
 const fs = require('fs');
@@ -11,6 +13,7 @@ const path = require('path');
 const arg = (n, d = '') => { const i = process.argv.indexOf(`--${n}`); return i >= 0 ? process.argv[i + 1] : d; };
 const ERP = arg('erp'); const UI = arg('ui'); const CODE = arg('code'); const EMAIL = arg('email'); const PASSWORD = arg('password'); const SHOTS = arg('shots');
 const INVOICE = arg('invoice', 'SEED-INV-1'); const QUOTE = arg('quote', 'SEED-Q-1'); const CUSTOMER = arg('customer', 'SEED-C1'); const STAFF = arg('staff', 'staff-final@e2e.test');
+const MATERIAL = arg('material', 'مادة فحص المالك R6-1');
 const ONLY = arg('only', 'usersToast,print,statement,rail').split(',');
 const { chromium } = require(path.join(ERP, 'node_modules', 'playwright'));
 const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
@@ -81,6 +84,32 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       out.statement = await waitPages('customer statement preview');
       await page.screenshot({ path: path.join(SHOTS, 'final-statement.png') });
       await page.keyboard.press('Escape'); await page.waitForTimeout(500);
+    }
+
+    if (ONLY.includes('materialSave')) {
+      const writes = [];
+      page.on('response', (r) => { const rq = r.request(); if (rq.method() !== 'GET' && /\/rest\/v1\//.test(r.url())) writes.push(`${rq.method()} ${r.url().replace(/^https?:\/\/[^/]+/, '').split('?')[0]} ${r.status()}`); });
+      await goto('/warehouse/materials');
+      await page.getByRole('button', { name: 'إضافة مادة', exact: true }).first().click(); await page.waitForTimeout(2500);
+      const dlg = page.locator('[role="dialog"]').last();
+      await dlg.locator('input[placeholder="مثال: أسمنت بورتلاندي"]').fill(MATERIAL);
+      await dlg.getByText('اختر المجموعة...', { exact: false }).first().click(); await page.waitForTimeout(1200);
+      await page.getByRole('option').first().click(); await page.waitForTimeout(1500);
+      const before = writes.length;
+      await dlg.getByRole('button', { name: 'حفظ', exact: true }).click();
+      let toast = '';
+      for (let i = 0; i < 25 && !toast; i++) {
+        await sleep(700);
+        toast = (await page.evaluate(() => [...document.querySelectorAll('[role="status"], [role="alert"], [data-sonner-toast]')].map((e) => (e.textContent || '').trim()).join(' | '))) || '';
+      }
+      await page.screenshot({ path: path.join(SHOTS, 'final-material-save.png') });
+      if (/تعذّر تحديد المستأجر|Tenant could not be resolved/.test(toast)) throw new Error(`R6-1: the owner cannot save a material - ${toast.slice(0, 220)}`);
+      if (/لم تُحفظ|did not save|not saved|failed/i.test(toast)) throw new Error(`the page says the material was not saved: ${toast.slice(0, 220)}`);
+      await sleep(1500);
+      const sent = writes.slice(before);
+      if (!sent.length) throw new Error(`no write request reached the server after «حفظ» (toast: ${toast.slice(0, 160) || 'none'})`);
+      if (sent.some((w) => !/ 2\d\d$/.test(w))) throw new Error(`a write was refused: ${sent.join(' | ')}`);
+      out.materialSave = { toast: toast.slice(0, 100), writes: sent };
     }
 
     if (ONLY.includes('rail')) {

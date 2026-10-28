@@ -239,7 +239,8 @@ async function createLocalCompany(deps, rawInput) {
       headers: { apikey: deps.serviceKey, Authorization: `Bearer ${deps.serviceKey}` },
       body: {
         email: v.email, password: v.password, email_confirm: true,
-        user_metadata: { full_name: v.adminName, role: 'admin' },
+        // tenant_id in BOTH blocks, as the cloud's invite path writes it: the ERP's screens read user_metadata.tenant_id (27 places) and the first session's token is minted from this record
+        user_metadata: { full_name: v.adminName, role: 'admin', tenant_id: tenantId },
         app_metadata: { provider: 'email', providers: ['email'], tenant_id: tenantId },
       },
     });
@@ -390,6 +391,25 @@ async function healTenantOwners({ pgQuery, log = () => {} }) {
   out.profiles = p.rowCount;
   if (out.profiles) log(`[Provision] healTenantOwners: is_tenant_admin set on ${out.profiles} profile(s)`);
   return out;
+}
+
+/**
+ * Run at every start (after healTenantOwners). An owner an earlier build created has the tenant only in app_metadata; the ERP's screens read user_metadata.tenant_id
+ * («تعذّر تحديد المستأجر» on saving a material). Copies it across for every local auth user whose app_metadata has a tenant_id and whose user_metadata does not - nothing else
+ * on the row changes (no other key, no updated_at). A session minted before this run keeps its old claims until its token is refreshed or the user signs in again (GoTrue builds the
+ * claims from the user record at that moment). Idempotent: a second run finds nothing to do. Returns { users }.
+ * deps: { pgQuery(text, params) }
+ */
+async function backfillUserTenantMetadata({ pgQuery, log = () => {} }) {
+  const r = await pgQuery(`
+    UPDATE auth.users
+       SET raw_user_meta_data = COALESCE(raw_user_meta_data, '{}'::jsonb) || jsonb_build_object('tenant_id', raw_app_meta_data->>'tenant_id')
+     WHERE NULLIF(raw_app_meta_data->>'tenant_id', '') IS NOT NULL
+       AND NOT (COALESCE(raw_user_meta_data, '{}'::jsonb) ? 'tenant_id')
+    RETURNING id`);
+  const users = r.rowCount || 0;
+  log(`[Provision] backfillUserTenantMetadata: tenant_id copied into user_metadata of ${users} user(s)`);
+  return { users };
 }
 
 /**
@@ -841,7 +861,7 @@ async function inviteLocalUserAsCaller(deps, rawInput) {
 }
 
 module.exports = {
-  createLocalCompany, healTenantOwners, ensureVendorSupport, normaliseInput, httpJson, ProvisioningError, MIN_PASSWORD_LENGTH,
+  createLocalCompany, healTenantOwners, backfillUserTenantMetadata, ensureVendorSupport, normaliseInput, httpJson, ProvisioningError, MIN_PASSWORD_LENGTH,
   inviteLocalEmployee, listGrantableRoles, normaliseEmployeeInput, generateOneTimePassword,
   inviteLocalUserAsCaller, authenticateCaller, normaliseCallerInviteInput, inviteRpcFailure, cleanupInvited,
 };

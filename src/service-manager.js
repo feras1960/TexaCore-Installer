@@ -1274,6 +1274,12 @@ class ServiceManager {
         if (healed.tenants || healed.profiles) console.log(`[ServiceManager] healTenantOwners: ${healed.tenants} tenant(s), ${healed.profiles} profile(s) repaired`);
       } catch (e) { console.warn('[ServiceManager] healTenantOwners failed (non-fatal):', e.message); }
 
+      // 7.7b. The owner an earlier build created carries the tenant only in app_metadata; the ERP reads user_metadata.tenant_id. Copy it across (idempotent, touches nothing else).
+      try {
+        const r = await require('./provisioning').backfillUserTenantMetadata({ pgQuery: (t, p) => this.pgQuery(t, p), log: (m) => console.log(m) });
+        if (r.users) console.log(`[ServiceManager] backfillUserTenantMetadata: tenant_id copied into user_metadata of ${r.users} user(s)`);
+      } catch (e) { console.warn('[ServiceManager] backfillUserTenantMetadata failed (non-fatal):', e.message); }
+
       // 8. Start Frontend Web Server
       const uiPort = options.port || PORTS.ui;
       await this.startFrontendServer(uiPort);

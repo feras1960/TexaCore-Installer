@@ -168,6 +168,38 @@ async function createCompany(secrets, tag) {
   if (!r.json || !r.json.success) throw new Error(`create-local-company → ${r.text.slice(0, 300)}`);
   return r.json;
 }
+const jwtClaims = (jwt) => JSON.parse(Buffer.from(String(jwt).split('.')[1], 'base64url').toString('utf8'));
+const ownerMeta = async (email) => (await pg(`SELECT id, raw_user_meta_data->>'tenant_id' AS u, raw_app_meta_data->>'tenant_id' AS a FROM auth.users WHERE lower(email) = lower($1)`, [email])).rows[0];
+const tenantMetaGap = async () => (await pg(`SELECT count(*)::int AS n FROM auth.users WHERE NULLIF(raw_app_meta_data->>'tenant_id', '') IS NOT NULL AND NOT (COALESCE(raw_user_meta_data, '{}'::jsonb) ? 'tenant_id')`)).rows[0].n;
+/** What the PREVIOUS build left behind for the owner it provisioned (R6-1, build #7): the tenant only in app_metadata, plus the session it minted (kept to see what an upgrade does to an old session). */
+async function snapshotOldOwner(secrets, email, tenantId) {
+  const m = await ownerMeta(email); const gap = await tenantMetaGap();
+  const login = await request('POST', `${API}/auth/v1/token?grant_type=password`, { headers: { apikey: secrets.anonKey }, body: { email, password: 'MigPass#2026' } });
+  if (login.status !== 200) throw new Error(`the previous build's owner cannot sign in: ${login.status} ${login.text.slice(0, 120)}`);
+  return { gap, userMeta: m.u, appMeta: m.a, tenantId, access: login.json.access_token, refresh: login.json.refresh_token, secrets };
+}
+/** After the new build started on that data: the backfill copied the tenant into user_metadata (and logged the count), touched nothing else, a fresh sign-in and a refreshed session carry it, the OLD token still does not. */
+async function backfillAfterUpgrade(pre, email, logFile, second = false) {
+  const m = await ownerMeta(email);
+  if (m.u !== pre.tenantId || m.a !== pre.tenantId) throw new Error(`owner tenant_id: user_metadata ${m.u}, app_metadata ${m.a} (expected both ${pre.tenantId})`);
+  const gap = await tenantMetaGap();
+  if (gap) throw new Error(`${gap} user(s) still lack user_metadata.tenant_id after the upgrade`);
+  const log = fs.readFileSync(logFile, 'utf8');
+  const counts = [...log.matchAll(/backfillUserTenantMetadata: tenant_id copied into user_metadata of (\d+) user\(s\)/g)].map((x) => +x[1]);
+  if (!counts.length) throw new Error('the new build\'s log has no backfillUserTenantMetadata line');
+  if (second) { if (counts[counts.length - 1] !== 0) throw new Error(`the second start still copied ${counts[counts.length - 1]} user(s) (must be idempotent: 0)`); return `second start: backfill found 0 users (idempotent), owner still has it`; }
+  if (pre.gap > 0 && counts[0] !== pre.gap) throw new Error(`the backfill logged ${counts[0]} user(s), the previous build had left ${pre.gap}`);
+  const fresh = await request('POST', `${API}/auth/v1/token?grant_type=password`, { headers: { apikey: pre.secrets.anonKey }, body: { email, password: 'MigPass#2026' } });
+  if (fresh.status !== 200) throw new Error(`fresh sign-in → ${fresh.status}`);
+  const fc = jwtClaims(fresh.json.access_token);
+  if ((fc.user_metadata || {}).tenant_id !== pre.tenantId) throw new Error(`a NEW sign-in's token has user_metadata.tenant_id ${(fc.user_metadata || {}).tenant_id}`);
+  const rf = await request('POST', `${API}/auth/v1/token?grant_type=refresh_token`, { headers: { apikey: pre.secrets.anonKey }, body: { refresh_token: pre.refresh } });
+  if (rf.status !== 200) throw new Error(`refreshing the old session → ${rf.status} ${rf.text.slice(0, 120)}`);
+  const rc = jwtClaims(rf.json.access_token);
+  if ((rc.user_metadata || {}).tenant_id !== pre.tenantId) throw new Error(`the REFRESHED old session's token has user_metadata.tenant_id ${(rc.user_metadata || {}).tenant_id}`);
+  const stale = (jwtClaims(pre.access).user_metadata || {}).tenant_id || null;
+  return `previous build left ${pre.gap} user(s) without it (owner's user_metadata.tenant_id ${pre.userMeta === null ? 'missing' : pre.userMeta}); backfill logged ${counts[0]}; owner now has it in both blocks, none missing; a new sign-in AND a refreshed old session carry user_metadata.tenant_id; the token minted BEFORE the upgrade ${stale ? 'already carried it' : 'still lacks it until refresh (as expected)'}`;
+}
 const appliedRows = async () => (await pg('SELECT id, name, applied_at, checksum FROM public._texacore_migrations ORDER BY id')).rows;
 /** The ERP's global roles reach an install built BEFORE the reference data existed (loaded once BEFORE the migrations, like a fresh build; idempotent): every shipped role code exactly once (the installer's own
  *  four are not duplicated), the capability map, and the marker records the packaged file's sha256. Run on an UPGRADED install whose app is running. */
@@ -363,13 +395,14 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
   let preFp = null; let postFp = null; let upg = null; let catPre = null; let catPost = null; let invPre = null; let invPost = null;
   if (OLD_APP) {
     const B = path.join(WORK, 'upgrade');
-    let o = null; let oc = null; let cardOld = null; let counts0 = null; let legacy = null; let oldTcdb = null;
+    let o = null; let oc = null; let cardOld = null; let counts0 = null; let legacy = null; let oldTcdb = null; let preB = null;
     try {
       o = await boot(B, OLD_APP, 'old');
       await R.check('B1 UPGRADE, step 1: the previous build provisions an install (no migration table), a company and one material card with a typed code', async () => {
         const t = (await pg(`SELECT to_regclass('public._texacore_migrations') IS NOT NULL AS has`)).rows[0].has;
         if (t) throw new Error('the previous build already has a migration table');
         oc = await createCompany(o.secrets, 'b');
+        preB = await snapshotOldOwner(o.secrets, 'owner-b@mig.test', oc.tenantId);
         cardOld = (await pg(`INSERT INTO public.fabric_materials (tenant_id, company_id, code, name_ar) VALUES ($1,$2,'OLD-1','بطاقة قديمة') RETURNING id, code, created_at`, [oc.tenantId, oc.companyId])).rows[0];
         // legacy cards the way the previous build wrote them (no tracking_mode column yet): a fabric with stock, a plain card, a serial-flagged card
         const whOld = (await pg('SELECT id FROM public.warehouses WHERE tenant_id = $1 ORDER BY created_at LIMIT 1', [oc.tenantId])).rows[0].id;
@@ -431,6 +464,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         return `${got.length} applied on start; counts ${JSON.stringify(counts1)} unchanged; OLD-1 intact and readable by its admin, who still gets his plan answer (${plan.json.plan_code}, ${plan.json.modules.length} modules); new card ${r1.json[0].code}; migrations.log ${ok} ✅`;
       });
       await R.check('B6 the ERP\'s global roles (reference data) reach the UPGRADED install: loaded once before the migrations, no duplicate of the seed roles, capabilities present', () => rolesAfterUpgrade(B));
+      await R.check('B7 R6-1: the owner the PREVIOUS build created (tenant only in app_metadata) gets user_metadata.tenant_id from the boot backfill (counted in the log, nothing else touched); a new sign-in and a refreshed old session carry it', () => backfillAfterUpgrade(preB, 'owner-b@mig.test', upg.logFile));
     } finally { if (upg) await stopApp(upg.child, B); }
 
     let second = null;
@@ -478,7 +512,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
   let cPostFp = null;
   if (OLD_MIG_APP) {
     const C = path.join(WORK, 'upgrade-mig');
-    let o = null; let oc = null; let cardOld = null; let counts0 = null; let rows0 = null; let nPrev = 0; let n1 = null;
+    let o = null; let oc = null; let cardOld = null; let counts0 = null; let rows0 = null; let nPrev = 0; let n1 = null; let preC = null;
     const countsOf = async () => (await pg(`SELECT (SELECT count(*)::int FROM public.companies) c, (SELECT count(*)::int FROM public.tenants) t, (SELECT count(*)::int FROM auth.users) u, (SELECT count(*)::int FROM public.chart_of_accounts) a, (SELECT count(*)::int FROM public.fabric_materials) m`)).rows[0];
     try {
       o = await boot(C, OLD_MIG_APP, 'oldmig');
@@ -488,6 +522,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         if (!nPrev || nPrev >= NAMES.length) throw new Error(`the old build applied ${nPrev}, this build ships ${NAMES.length}`);
         if (JSON.stringify(got) !== JSON.stringify(NAMES.slice(0, nPrev))) throw new Error(`the old build's set is not a prefix of this build's list: ${got.join(',')}`);
         oc = await createCompany(o.secrets, 'c');
+        preC = await snapshotOldOwner(o.secrets, 'owner-c@mig.test', oc.tenantId);
         cardOld = (await pg(`INSERT INTO public.fabric_materials (tenant_id, company_id, code, name_ar) VALUES ($1,$2,'OLD-1','بطاقة قديمة') RETURNING id`, [oc.tenantId, oc.companyId])).rows[0];
         counts0 = await countsOf(); rows0 = (await appliedRows()).map((r) => `${r.id}:${r.applied_at.toISOString()}`);
         const v = JSON.parse(fs.readFileSync(path.join(C, 'texacore-data', 'bootstrap.json'), 'utf8'));
@@ -524,6 +559,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         cPostFp = await fingerprint();
         return `${NAMES.length - nPrev} applied on start (${NAMES.slice(nPrev).map((n) => n.replace(/^2027021/, '').split('_')[0]).join(' ')}), the ${nPrev} older rows untouched; counts ${JSON.stringify(counts1)} unchanged; OLD-1 readable by its admin, who still gets his plan answer (${plan.json.plan_code}); new card ${r1.json[0].code}; migrations.log ${ok} ✅`;
       });
+      await R.check('C6 R6-1: the owner the PREVIOUS build created gets user_metadata.tenant_id from the boot backfill (counted in the log); a new sign-in and a refreshed old session carry it', () => backfillAfterUpgrade(preC, 'owner-c@mig.test', cu.logFile));
     } finally { if (cu) await stopApp(cu.child, C); }
     let c2 = null;
     try {
@@ -538,6 +574,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         return `${now.length} rows, same ids and timestamps; "All migrations already applied", still ${okLines} ✅`;
       });
       await R.check('C5 the ERP\'s global roles (reference data) are on the install upgraded from the previous build too, once each', () => rolesAfterUpgrade(C));
+      await R.check('C7 R6-1: a SECOND start of the new build backfills nothing (0 users) and the owner keeps user_metadata.tenant_id', () => backfillAfterUpgrade(preC, 'owner-c@mig.test', c2.logFile, true));
     } finally { if (c2) await stopApp(c2.child, C); }
     await R.check('C4 the install upgraded from the previous build (set of ' + nPrev + ') and the fresh install have the SAME functions, triggers, policies and table grants (upgrade path == fresh path)', async () => {
       if (!cPostFp || !freshFp) throw new Error('no fingerprint to compare');
