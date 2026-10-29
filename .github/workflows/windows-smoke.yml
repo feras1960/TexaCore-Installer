@@ -90,7 +90,7 @@ jobs:
             --exe "${{ steps.install.outputs.exe }}" --app-dir "${{ steps.install.outputs.app_dir }}" `
             --out $env:OUT --version $env:VERSION --net-blocked "${{ steps.netguard.outputs.net_blocked }}"
 
-      - name: Phase 3 - the data folder under an Arabic folder name (informational: reports a WARN finding, never fails the run)
+      - name: 'Phase 3 - the data folder under an Arabic folder name (informational, reports a WARN finding)'
         id: unicode
         if: always() && steps.install.outcome == 'success'
         timeout-minutes: 8
