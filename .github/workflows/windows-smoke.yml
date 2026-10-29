@@ -1,0 +1,114 @@
+name: Windows smoke (published installer)
+
+# Proves that the PUBLISHED TexaCore ERP desktop installer works on a real Windows machine (a free GitHub-hosted runner).
+# It downloads the release asset, checks its SHA-256, installs it silently, launches the installed exe and walks the first run:
+# PostgreSQL + the schema migrations, the free-plan company, the document cycle (material, customer, posted sales invoice, receipt voucher -> paid),
+# export / restore, a real browser login, a graceful quit, a relaunch and proof that everything persisted. Then a second launch the way a user does
+# it (no test switches, default ports, %APPDATA% data, «Start Free» clicked in the real window), and an uninstall.
+#
+# Public repository: no secrets and no SQL files live here; every per-install secret is masked and scrubbed from the uploaded logs.
+# The app's outbound network is blocked by the firewall (and the block is proven first), so nothing is ever registered in the cloud.
+# It never touches a release, a tag or main. Trigger: a push to the branch below, or run it by hand.
+
+on:
+  push:
+    branches: [ci/windows-smoke-206]
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+concurrency:
+  group: windows-smoke
+  cancel-in-progress: true
+
+env:
+  VERSION: '2.0.6'
+  INSTALLER_URL: https://github.com/feras1960/TexaCore-Installer/releases/download/v2.0.6/TexaCore-ERP-Setup-2.0.6.exe
+  INSTALLER_SHA256: fadbba065644345bc8610ee5d451c62cd6b45bceac3f7fefdc2467e9bc214ed6
+  MIGRATIONS: '111'
+  OUT: ${{ github.workspace }}\smoke-out
+
+jobs:
+  smoke:
+    runs-on: windows-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        shell: pwsh
+    steps:
+      - name: Check out the test scripts only
+        uses: actions/checkout@v4
+        with:
+          sparse-checkout: |
+            /scripts/e2e/
+            /src/lan-address.js
+          sparse-checkout-cone-mode: false
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+
+      - name: Download the published installer and verify its SHA-256
+        run: ./scripts/e2e/windows-smoke-install.ps1 -Step prepare -Out $env:OUT -Url $env:INSTALLER_URL -Sha256 $env:INSTALLER_SHA256 -Version $env:VERSION
+
+      - name: Install silently (NSIS /S)
+        id: install
+        run: ./scripts/e2e/windows-smoke-install.ps1 -Step install -Out $env:OUT -Version $env:VERSION
+
+      - name: Block the installed app's outbound network (and prove the block)
+        id: netguard
+        if: always() && steps.install.outcome == 'success'
+        run: ./scripts/e2e/windows-smoke-install.ps1 -Step netguard -Out $env:OUT -Version $env:VERSION
+
+      - name: Install the browser driver (no browser download - the runner's own Chrome is used)
+        if: always() && steps.install.outcome == 'success'
+        run: |
+          New-Item -ItemType Directory -Force -Path tools | Out-Null
+          npm install --prefix tools playwright@1.49.1 --no-audit --no-fund --ignore-scripts
+
+      - name: Phase 1 - the installed app in the launch-check harness (first run, health, document cycle, export / restore, browser, quit, relaunch, persistence)
+        id: harness
+        if: always() && steps.install.outcome == 'success'
+        timeout-minutes: 14
+        run: |
+          node scripts/e2e/windows-smoke.js harness `
+            --exe "${{ steps.install.outputs.exe }}" --app-dir "${{ steps.install.outputs.app_dir }}" `
+            --work "$env:RUNNER_TEMP\TexaCore smoke\work" --out $env:OUT --playwright-dir "$PWD\tools" `
+            --version $env:VERSION --migrations $env:MIGRATIONS
+
+      - name: Phase 2 - the installed app launched the way a user does (real window, Start Free clicked, default ports)
+        id: real
+        if: always() && steps.install.outcome == 'success'
+        timeout-minutes: 10
+        run: |
+          node scripts/e2e/windows-smoke.js real `
+            --exe "${{ steps.install.outputs.exe }}" --app-dir "${{ steps.install.outputs.app_dir }}" `
+            --out $env:OUT --version $env:VERSION --net-blocked "${{ steps.netguard.outputs.net_blocked }}"
+
+      - name: Collect the logs (redacted)
+        if: always()
+        run: |
+          node scripts/e2e/windows-smoke.js collect --out $env:OUT `
+            --user-data "$env:RUNNER_TEMP\TexaCore smoke\work\user data" --user-data "$env:APPDATA\TexaCore ERP" --user-data "$env:APPDATA\texacore-installer"
+
+      - name: Uninstall silently
+        if: always() && steps.install.outcome == 'success'
+        run: ./scripts/e2e/windows-smoke-install.ps1 -Step uninstall -Out $env:OUT -Version $env:VERSION
+
+      - name: Summary (PASS / FAIL per step)
+        if: always()
+        run: |
+          node scripts/e2e/windows-smoke.js summarize --out $env:OUT
+          $code = $LASTEXITCODE
+          if (Test-Path "$env:OUT\summary.md") { Get-Content "$env:OUT\summary.md" -Raw | Add-Content -Path $env:GITHUB_STEP_SUMMARY -Encoding utf8 }
+          exit $code
+
+      - name: Upload logs, screenshots and the JSON summary
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: windows-smoke-2.0.6
+          path: smoke-out
+          if-no-files-found: warn
+          retention-days: 30
