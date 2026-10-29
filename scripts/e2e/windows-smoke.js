@@ -181,6 +181,27 @@ async function analyzeTcdb(appDir, file, dataDir) {
   return { bytes: sql.length, crlf, lf, copyBlocks, blocksWithData, crlfBlocks };
 }
 
+/** Results are written after EVERY check (a cancelled / timed-out step still leaves its evidence) and a watchdog stops the phase at its time budget. */
+function guardPhase(name, R, extra, minutes, cleanup) {
+  const orig = R.check.bind(R);
+  R.check = async (n, fn) => { await orig(n, fn); try { writeResults(name, R, typeof extra === 'function' ? extra() : extra); } catch { /* best effort */ } };
+  const timer = setTimeout(() => {
+    R.rows.push({ name: `${name} time budget`, ok: false, evidence: `the phase used its ${minutes}-minute budget and was stopped; the results above are what it had finished`, ms: 0 });
+    try { writeResults(name, R, typeof extra === 'function' ? extra() : extra); } catch { /* */ }
+    try { cleanup(); } catch { /* */ }
+    console.log(`  FAIL  ${name} — time budget of ${minutes} minutes used`);
+    process.exit(1);
+  }, minutes * 60 * 1000);
+  return () => clearTimeout(timer);
+}
+/** Kill whatever an earlier phase left running from this install (and say so). */
+function sweepLeftovers(R, installRoot, label) {
+  const left = installProcs(installRoot, []);
+  if (!left.length) return;
+  warn(R, `${label}: processes left behind by the previous phase`, `${[...new Set(left.map((p) => p.name))].join(', ')} (${left.length}) were still running from this install and were killed before this phase started`);
+  for (const p of left) killTree(p.pid);
+}
+
 function writeResults(name, R, extra = {}) {
   fs.mkdirSync(OUT, { recursive: true });
   const rows = R.rows.map((r) => ({ name: r.name, ok: r.ok, skipped: !!r.skipped, warn: !!r.warn, evidence: String(r.evidence || '').slice(0, 900), ms: r.ms }));
@@ -203,6 +224,11 @@ async function harness() {
   const P = { pg: BASE, postgrest: BASE + 1, gotrue: BASE + 2, api: BASE + 3, ui: BASE + 4, admin: BASE + 5 };
   const UI = `http://127.0.0.1:${P.ui}`; const API = `http://127.0.0.1:${P.api}`; const ADMIN = `http://127.0.0.1:${P.admin}`;
   const R = new Results();
+  const S = {};      // state across checks
+  let handle = null;
+  guardPhase('harness', R, () => ({ userData: path.join(WORK, arg('user-data-name', 'userdata')), firstMs: S.firstMs, processes: S.procNames, platform: `${process.platform} ${os.release()}` }), Number(arg('budget-min', '15')),
+    () => { if (handle && handle.child) killTree(handle.child.pid); for (const p of installProcs(INSTALL_ROOT, [path.join(WORK, 'userdata')])) killTree(p.pid); });
+  sweepLeftovers(R, INSTALL_ROOT, 'harness');
   fs.rmSync(WORK, { recursive: true, force: true }); fs.mkdirSync(WORK, { recursive: true });
   const userData = path.join(WORK, arg('user-data-name', 'userdata')); const dataDir = path.join(userData, 'texacore-data');
   const hbFile = path.join(userData, 'logs', 'heartbeat.log');
@@ -213,7 +239,7 @@ async function harness() {
   const pg = async (sql, params = []) => { const c = new Client({ host: '127.0.0.1', port: P.pg, database: 'postgres', user: 'postgres', password: pgPassword }); await c.connect(); try { return await c.query(sql, params); } finally { await c.end(); } };
   const H = () => ({ 'x-texacore-local-secret': secrets.localApiSecret });
   const admin = (m, p, b) => request(m, `${ADMIN}${p}`, { headers: H(), body: b });
-  let launchNo = 0; let handle = null;
+  let launchNo = 0;
 
   const start = async (label) => {
     launchNo += 1;
@@ -229,7 +255,6 @@ async function harness() {
     return { ...ready, wallMs: Date.now() - t0, label };
   };
 
-  const S = {};      // state across checks
   try {
     // ── 1. first run ──
     let first = null;
@@ -525,11 +550,11 @@ async function harness() {
     await R.check('H30 restore that export through the app (psql on Windows): success, and the company, the invoices (paid) and the entries are all still there', async () => {
       const count = async () => (await pg(`SELECT (SELECT count(*) FROM public.companies)::int c, (SELECT count(*) FROM public.journal_entries)::int je, (SELECT count(*) FROM public.sales_transactions)::int st, (SELECT count(*) FROM auth.users)::int u`)).rows[0];
       const c0 = await count(); const m = multipart(fs.readFileSync(S.exportFile), path.basename(S.exportFile));
-      const r = await rawPost(`${UI}/api/restore-tcdb`, { ...H(), 'Content-Type': m.ct }, m.body);
+      const tR = Date.now(); const r = await rawPost(`${UI}/api/restore-tcdb`, { ...H(), 'Content-Type': m.ct }, m.body); S.restoreSecs = Math.round((Date.now() - tR) / 1000);
       const log = readFrom(handle.logFile, 0);
       const errs = (/(\d+) restore COPY errors/.exec(log) || [])[1]; const firstErr = (/psql:[^\n]*?: ERROR:\s*([^\n]*)/.exec(log) || [])[1];
       const c1 = await count(); S.c0 = c0;
-      const said = `the app answered ${r.status} ${r.json && r.json.success ? '«success»' : r.text.slice(0, 120)}`;
+      const said = `the app answered ${r.status} ${r.json && r.json.success ? '«success»' : r.text.slice(0, 120)} after ${S.restoreSecs} s`;
       let safety = 0; try { safety = fs.readdirSync(path.join(dataDir, 'backups', 'pre-open')).filter((f) => f.endsWith('.tcdb')).length; } catch { /* none */ }
       if (errs || JSON.stringify(c0) !== JSON.stringify(c1)) S.restoreFailed = true;
       if (errs) throw new Error(`${said}, but the restore logged ${errs} COPY errors (first: «${String(firstErr).trim()}»); rows ${JSON.stringify(c0)} → ${JSON.stringify(c1)}${S.dump ? `; the dump has ${S.dump.crlf} CRLF line endings, ${S.dump.crlfBlocks} COPY blocks with CRLF data` : ''}; the app's pre-restore safety copies in backups/pre-open: ${safety}`);
@@ -538,7 +563,7 @@ async function harness() {
       await signIn();
       const inv = must(await rest('GET', `sales_transactions?id=eq.${S.invoice}&select=stage,paid_amount,invoice_no`), 'invoice after restore')[0];
       if (!inv || inv.stage !== 'paid' || Number(inv.paid_amount) !== 300 || inv.invoice_no !== S.invoiceNo) throw new Error(`invoice after the restore ${JSON.stringify(inv)}`);
-      return `restored; rows ${JSON.stringify(c1)} unchanged; ${inv.invoice_no} still paid 300`;
+      return `restored in ${S.restoreSecs} s; rows ${JSON.stringify(c1)} unchanged; ${inv.invoice_no} still paid 300`;
     });
 
     let quit2 = null;
@@ -551,11 +576,11 @@ async function harness() {
       const gz = await bm._compress(lf); const file = bm._buildTcdbFile(bm._encrypt(gz, 'smoke-passphrase-1'), lf.length, gz.length);
       const m = multipart(file, 'lf-normalised.tcdb', { passphrase: 'smoke-passphrase-1' });
       const before = fs.readFileSync(handle.logFile, 'utf8').length;
-      const r = await rawPost(`${UI}/api/restore-tcdb`, { ...H(), 'Content-Type': m.ct }, m.body);
+      const tR = Date.now(); const r = await rawPost(`${UI}/api/restore-tcdb`, { ...H(), 'Content-Type': m.ct }, m.body); const secs = Math.round((Date.now() - tR) / 1000);
       const log = fs.readFileSync(handle.logFile, 'utf8').slice(before); const errs = (/(\d+) restore COPY errors/.exec(log) || [])[1];
       const c1 = (await pg(`SELECT (SELECT count(*) FROM public.companies)::int c, (SELECT count(*) FROM public.journal_entries)::int je, (SELECT count(*) FROM public.sales_transactions)::int st, (SELECT count(*) FROM auth.users)::int u`)).rows[0];
       if (r.status !== 200 || !r.json || !r.json.success || errs || JSON.stringify(c1) !== JSON.stringify(S.c0)) throw new Error(`the LF copy did not restore cleanly: ${r.status} ${errs ? errs + ' COPY errors' : ''} rows ${JSON.stringify(c1)} (expected ${JSON.stringify(S.c0)})`);
-      return `restored with 0 COPY errors; rows back to ${JSON.stringify(c1)} - the only difference is the line endings (${S.dump.crlf} CRLF -> LF): the restore script is built with LF terminators, the Windows dump has CRLF`;
+      return `restored in ${secs} s with 0 COPY errors; rows back to ${JSON.stringify(c1)} - the only difference is the line endings (${S.dump.crlf} CRLF -> LF): the restore script is built with LF terminators, the Windows dump has CRLF`;
     });
     await R.check('H31 final graceful quit: exits by itself, nothing left running', async () => {
       quit2 = await gracefulQuit(handle); if (!quit2.graceful) throw new Error(`the app did not exit by itself (${quit2.how})`);
@@ -589,12 +614,14 @@ async function real() {
   const WANT_VERSION = arg('version', '2.0.6'); const INSTALL_ROOT = path.resolve(APP_DIR, '..', '..');
   const req = appRequire(APP_DIR); cdp.WebSocket = req('ws');
   const INSPECT = 9229; const DEBUG = 9222; const UI = 'http://127.0.0.1:8080'; const ADMIN = 'http://127.0.0.1:1960'; const API = 'http://127.0.0.1:54321';
-  const R = new Results(); const S = {};
+  const R = new Results(); const S = {}; let handle = null; let userData = '';
+  guardPhase('real', R, () => ({ userData: findUserData(), netBlocked: NET_BLOCKED, realMs: S.realMs }), Number(arg('budget-min', '6.5')),
+    () => { if (handle && handle.child) killTree(handle.child.pid); for (const p of installProcs(INSTALL_ROOT, [findUserData() || 'texacore-data'])) killTree(p.pid); });
+  sweepLeftovers(R, INSTALL_ROOT, 'real');
   console.log(`windows-smoke real: exe=${EXE} outbound network ${NET_BLOCKED ? 'BLOCKED by the firewall (verified)' : 'NOT blocked'}`);
   for (const p of [8080, 1960, 54322, 3000, 9999, 54321]) if (await portOpen(p)) { console.error(`default port ${p} is already in use on this machine`); process.exit(2); }
   const logFile = path.join(OUT, 'real-app.log'); fs.mkdirSync(OUT, { recursive: true });
   const env = { ...process.env }; for (const k of Object.keys(env)) if (k.startsWith('TEXACORE_')) delete env[k];
-  let handle = null; let userData = '';
   try {
     await R.check('R1 launch the installed exe the way a user does (no harness switches): the process stays up and the app window opens', async () => {
       const child = launch({ exe: EXE, env, extraArgs: [`--inspect=127.0.0.1:${INSPECT}`, `--remote-debugging-port=${DEBUG}`], logFile });
@@ -691,8 +718,10 @@ async function unicode() {
   const R = new Results();
   const arabic = '\u0628\u064a\u0627\u0646\u0627\u062a \u0641\u062d\u0635';     // «بيانات فحص»
   const work = path.join(ROOT_DIR, arabic); const userData = path.join(work, 'userdata'); const hbFile = path.join(userData, 'logs', 'heartbeat.log');
-  fs.rmSync(work, { recursive: true, force: true }); fs.mkdirSync(work, { recursive: true });
   let child = null;
+  guardPhase('unicode', R, { userData }, Number(arg('budget-min', '4')), () => { if (child) killTree(child.pid); for (const p of installProcs(INSTALL_ROOT, [work])) killTree(p.pid); });
+  sweepLeftovers(R, INSTALL_ROOT, 'unicode');
+  fs.rmSync(work, { recursive: true, force: true }); fs.mkdirSync(work, { recursive: true });
   try {
     const logFile = path.join(OUT, 'unicode-app.log'); fs.mkdirSync(OUT, { recursive: true });
     const env = { ...process.env, TEXACORE_HEADLESS: '1', TEXACORE_PORT_BASE: String(BASE), TEXACORE_USER_DATA: userData, TEXACORE_TCDB_DIR: path.join(work, 'restore'), TEXACORE_STUB_TUNNEL: '1', TEXACORE_STUB_MDM: '1', TEXACORE_E2E_AUTOSTART: '1', TEXACORE_E2E_LICENSE: 'free' };

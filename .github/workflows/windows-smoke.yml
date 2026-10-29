@@ -74,29 +74,29 @@ jobs:
       - name: Phase 1 - the installed app in the launch-check harness (first run, health, document cycle, export / restore, browser, quit, relaunch, persistence)
         id: harness
         if: always() && steps.install.outcome == 'success'
-        timeout-minutes: 14
+        timeout-minutes: 17
         run: |
           node scripts/e2e/windows-smoke.js harness `
             --exe "${{ steps.install.outputs.exe }}" --app-dir "${{ steps.install.outputs.app_dir }}" `
             --work "C:\tcsmoke\work" --out $env:OUT --playwright-dir "$PWD\tools" `
-            --version $env:VERSION --migrations $env:MIGRATIONS
+            --version $env:VERSION --migrations $env:MIGRATIONS --budget-min 15.5
 
       - name: Phase 2 - the installed app launched the way a user does (real window, Start Free clicked, default ports)
         id: real
         if: always() && steps.install.outcome == 'success'
-        timeout-minutes: 10
+        timeout-minutes: 8
         run: |
           node scripts/e2e/windows-smoke.js real `
             --exe "${{ steps.install.outputs.exe }}" --app-dir "${{ steps.install.outputs.app_dir }}" `
-            --out $env:OUT --version $env:VERSION --net-blocked "${{ steps.netguard.outputs.net_blocked }}"
+            --out $env:OUT --version $env:VERSION --net-blocked "${{ steps.netguard.outputs.net_blocked }}" --budget-min 6.5
 
       - name: 'Phase 3 - the data folder under an Arabic folder name (informational, reports a WARN finding)'
         id: unicode
         if: always() && steps.install.outcome == 'success'
-        timeout-minutes: 8
+        timeout-minutes: 6
         run: |
           node scripts/e2e/windows-smoke.js unicode `
-            --exe "${{ steps.install.outputs.exe }}" --app-dir "${{ steps.install.outputs.app_dir }}" --out $env:OUT --root 'C:\'
+            --exe "${{ steps.install.outputs.exe }}" --app-dir "${{ steps.install.outputs.app_dir }}" --out $env:OUT --root 'C:\' --budget-min 4
 
       - name: Collect the logs (redacted)
         if: always()
