@@ -1,11 +1,11 @@
 {
  "source": "production, read-only (BEGIN READ ONLY ... ROLLBACK)",
- "measuredAt": "2026-10-28T08:57Z",
+ "measuredAt": "2026-10-29T00:10Z",
  "definition": "global rows: tenant_id AND company_id NULL (both columns), else the one that exists, else the whole table",
  "tables": {
   "capability_catalog": {
-   "prod": 153,
-   "desktop": 153,
+   "prod": 156,
+   "desktop": 156,
    "scope": "whole"
   },
   "capability_deny_presets": {
@@ -20,8 +20,8 @@
    "note": "+ platform_admin (installer seed role, not in production's global set)"
   },
   "role_capabilities": {
-   "prod": 887,
-   "desktop": 887,
+   "prod": 897,
+   "desktop": 897,
    "scope": "tenant"
   },
   "business_industries": {

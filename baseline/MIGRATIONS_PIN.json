@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "39c3c50607a5111fa0071ac792a69180cb0ace96",
+  "erpCommit": "7d1e0488771bcdf4ca64c262fdb6a19394a1c652",
   "migrations": [
     {
       "order": 1,
@@ -556,11 +556,221 @@
       "file": "20270242e_posted_sale_invoice_number.sql",
       "sha256": "ff5be2706a4eaa083798b6ec00b6fca7e7ad49cb919aec2edb643d22341b334d",
       "bytes": 61854
+    },
+    {
+      "order": 80,
+      "name": "20270242f_tracked_sales_returns",
+      "file": "20270242f_tracked_sales_returns.sql",
+      "sha256": "52fa607e8b9a8940ca7957f10e6f32f308dfce4170406e2d2945778ab7d40820",
+      "bytes": 221683
+    },
+    {
+      "order": 81,
+      "name": "20270242g_tracked_purchase_returns",
+      "file": "20270242g_tracked_purchase_returns.sql",
+      "sha256": "152ef8938b2b84bd6f6266fcce05e9cf2948b3d770c00d4f028bba501429a5da",
+      "bytes": 85657
+    },
+    {
+      "order": 82,
+      "name": "20270242h_return_drafts_visible",
+      "file": "20270242h_return_drafts_visible.sql",
+      "sha256": "113eab525fd3e13e08522f148f044e51bc4b5b3f00aaa84b6b36f257fafeff94",
+      "bytes": 13507
+    },
+    {
+      "order": 83,
+      "name": "20270242i_console_material_currency",
+      "file": "20270242i_console_material_currency.sql",
+      "sha256": "801aaf3526ef5822918fec29d85039b6e7871b51baf6f00e6d173898b4a2dc5d",
+      "bytes": 6206
+    },
+    {
+      "order": 84,
+      "name": "20270242j_accounting_dashboard_flags",
+      "file": "20270242j_accounting_dashboard_flags.sql",
+      "sha256": "076214ddd8d7777eb7fb322f4dcf648ac235baa2379dd5c4b4f6430c0367642d",
+      "bytes": 9848
+    },
+    {
+      "order": 85,
+      "name": "20270242k_direct_purchase_net_cost",
+      "file": "20270242k_direct_purchase_net_cost.sql",
+      "sha256": "cf72b5749939a216742d27eec8644699c84b819d1ac0696101e02bbc85758f96",
+      "bytes": 12597
+    },
+    {
+      "order": 86,
+      "name": "20270242l_round2_return_counts_and_drafts",
+      "file": "20270242l_round2_return_counts_and_drafts.sql",
+      "sha256": "e4e086239468e1ca7141455d41bb4b1b4d34cf47fa5cd5325efc8b752acd46ec",
+      "bytes": 22879
+    },
+    {
+      "order": 87,
+      "name": "20270242m_purchase_receipt_first_and_return_variance",
+      "file": "20270242m_purchase_receipt_first_and_return_variance.sql",
+      "sha256": "3d5e90b25c5c49f2b08fdd20f7f7b7ea000a0a2d04359a420107dd85df285398",
+      "bytes": 87964
+    },
+    {
+      "order": 88,
+      "name": "20270242n_direct_purchase_tracked_refused",
+      "file": "20270242n_direct_purchase_tracked_refused.sql",
+      "sha256": "c69100c69de1b58dc6ab3a7ac86b09c24652de4734d31df5b0fe10379340ece2",
+      "bytes": 13480
+    },
+    {
+      "order": 89,
+      "name": "20270242o_goods_receipt_net_cost",
+      "file": "20270242o_goods_receipt_net_cost.sql",
+      "sha256": "9b32c2856468bc0a81413cf331f160b76bfac3a8458dfc9c9b64ec196f6725f6",
+      "bytes": 7506
+    },
+    {
+      "order": 90,
+      "name": "20270242p_purchase_receipt_complete_and_grir_guard",
+      "file": "20270242p_purchase_receipt_complete_and_grir_guard.sql",
+      "sha256": "a772230713d728607b4ffbceb39ba0aa155db3be38931167bed830e0b2707f7c",
+      "bytes": 68326
+    },
+    {
+      "order": 91,
+      "name": "20270242q_receipt_complete_stamp",
+      "file": "20270242q_receipt_complete_stamp.sql",
+      "sha256": "40a8871e8aa32765baaa39279677eacd4659e4f8e22047b4eb9cc1844a40e1dc",
+      "bytes": 24701
+    },
+    {
+      "order": 92,
+      "name": "20270242r_container_landed_cost",
+      "file": "20270242r_container_landed_cost.sql",
+      "sha256": "3133d1c1db3519b0b7e054470f90fa5809ad9cdd5f59d4338db8037461c3d78f",
+      "bytes": 44288
+    },
+    {
+      "order": 93,
+      "name": "20270242s_purchase_is_pos_locked",
+      "file": "20270242s_purchase_is_pos_locked.sql",
+      "sha256": "9cb97898925ce1ec5bfc636b118945f55fc9cd02a13e2eed58224d8f8382f525",
+      "bytes": 3289
+    },
+    {
+      "order": 94,
+      "name": "20270242t_purchase_confirmed_lines_guard",
+      "file": "20270242t_purchase_confirmed_lines_guard.sql",
+      "sha256": "1ae0a8f72baabb41017f5d400920b1c1482474bbedb12615d4d99f1faa706976",
+      "bytes": 15406
+    },
+    {
+      "order": 95,
+      "name": "20270242u_container_shortage",
+      "file": "20270242u_container_shortage.sql",
+      "sha256": "fe6ad5829b0895473eee85fbf75ba0aeb26e93745a9d12bf9cf7f6af36a00dbf",
+      "bytes": 142408
+    },
+    {
+      "order": 96,
+      "name": "20270242v_dashboard_inventory_value",
+      "file": "20270242v_dashboard_inventory_value.sql",
+      "sha256": "bba24333d517441f1f56b6d23017dba67af81c69e1d2615d0b4f883484f433a9",
+      "bytes": 10805
+    },
+    {
+      "order": 97,
+      "name": "20270242w_voucher_table_authority",
+      "file": "20270242w_voucher_table_authority.sql",
+      "sha256": "8eade2f86816758facdad33237498607de53d1190ac3bca0b7a00ce5d77939cb",
+      "bytes": 9737
+    },
+    {
+      "order": 98,
+      "name": "20270242x_quote_to_order_reconfirm",
+      "file": "20270242x_quote_to_order_reconfirm.sql",
+      "sha256": "586cc3288250fe1283fa4a9947bb4fc5388eec6c7f465a90ff89032c53be676d",
+      "bytes": 17104
+    },
+    {
+      "order": 99,
+      "name": "20270242y_product_lines",
+      "file": "20270242y_product_lines.sql",
+      "sha256": "041c2a9cdd0a2f3041cae96f85dc9108cf72236fe8d288fa2f34c94eb2040320",
+      "bytes": 141815
+    },
+    {
+      "order": 100,
+      "name": "20270242z_opening_stock",
+      "file": "20270242z_opening_stock.sql",
+      "sha256": "ae06b745bebf597937caae49cbe20d3e4f6faa1e814c5926a2004675a97a66db",
+      "bytes": 42859
+    },
+    {
+      "order": 101,
+      "name": "20270243a_quantity_stock_transfer",
+      "file": "20270243a_quantity_stock_transfer.sql",
+      "sha256": "a99fad27a5323a2ac72ebbeaeaba42f8de8279e193a4bb8952e4e6866ad3db12",
+      "bytes": 30498
+    },
+    {
+      "order": 102,
+      "name": "20270243b_voucher_increase_and_console_type",
+      "file": "20270243b_voucher_increase_and_console_type.sql",
+      "sha256": "2da9076dd12616acc935ec946f7098677274b57f9517384e2e8d815f9bafee60",
+      "bytes": 84903
+    },
+    {
+      "order": 103,
+      "name": "20270243c_cost_centre_tenant_and_employee_number",
+      "file": "20270243c_cost_centre_tenant_and_employee_number.sql",
+      "sha256": "6cfe6dd20ff9261a3f0ec1bcf3ff45a4b662c99edede89ccb86a2ebbda9e04e0",
+      "bytes": 5674
+    },
+    {
+      "order": 104,
+      "name": "20270243d_accountant_full_hr",
+      "file": "20270243d_accountant_full_hr.sql",
+      "sha256": "819e9f2239a11b4cda4ce18566e4efa4e8c82ff0a7a75053364750b093457bc2",
+      "bytes": 3063
+    },
+    {
+      "order": 105,
+      "name": "20270243e_payroll_general_ledger",
+      "file": "20270243e_payroll_general_ledger.sql",
+      "sha256": "eff4fb9f0a3201d80874c92e04faaa9060bfdfedf7c42f53285f319b196109d1",
+      "bytes": 79431
+    },
+    {
+      "order": 106,
+      "name": "20270243g_merge_contacts_authority",
+      "file": "20270243g_merge_contacts_authority.sql",
+      "sha256": "a1dba20b77f5a700b5cf873c8a3c7b0cfa94c296991e506defc8b2870855ed94",
+      "bytes": 9201
+    },
+    {
+      "order": 107,
+      "name": "20270243h_crm_opportunity_visibility",
+      "file": "20270243h_crm_opportunity_visibility.sql",
+      "sha256": "bf601ccf381498ace206556776fa5c41c5d37213bf680108f7d12a878095738b",
+      "bytes": 181257
+    },
+    {
+      "order": 108,
+      "name": "20270243i_employee_shift_unassigned_record",
+      "file": "20270243i_employee_shift_unassigned_record.sql",
+      "sha256": "992f6158e479556e605e29de06d5412c76ae5a6bad28f4165f084670342f4eea",
+      "bytes": 6270
+    },
+    {
+      "order": 109,
+      "name": "20270243j_quantity_stock_count",
+      "file": "20270243j_quantity_stock_count.sql",
+      "sha256": "9bd5e560d58e0c02b680f73ca125e894c7760b07ed3751b71325e7a691c55bce",
+      "bytes": 77863
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "86efd62b98c023f7fa290da0adb25d1fc94fbe90261ce397a5ce58da0f3daac6",
-    "bytes": 40700
+    "sha256": "7a0b366dc1fd1b2f658c7b9f0503f2b82a5c8ffcd91ec6cf93a3fee6aa758349",
+    "bytes": 49088
   }
 }
