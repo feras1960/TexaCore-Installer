@@ -154,7 +154,8 @@ switch ($Step) {
         New-Item -ItemType Directory -Force -Path $v.path | Out-Null          # the app creates the folder first (fs.mkdirSync recursive), initdb then "fixes permissions on the existing directory"
         $out = & $initdb -D $v.path -U postgres -E UTF8 --locale-provider=icu --icu-locale=en-US --locale=C --auth=scram-sha-256 "--pwfile=$pw" 2>&1
         $code = $LASTEXITCODE
-        $err = (($out | Where-Object { $_ -match 'error|could not|denied|fatal' }) | Select-Object -First 2) -join ' '
+        $text = ($out | Out-String)
+        $err = (($text -split "\r?\n" | Where-Object { $_ -match 'error|could not|denied|fatal' }) | Select-Object -First 2) -join ' | '
       } catch { $err = $_.Exception.Message }
       $secs = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
       $acl = ''; try { $acl = ((Get-Acl (Split-Path $v.path -Parent)).Access | Select-Object -First 3 | ForEach-Object { "$($_.IdentityReference):$($_.FileSystemRights)" }) -join ' | ' } catch { }
@@ -163,6 +164,7 @@ switch ($Step) {
     }
     Remove-Item $pw -Force -ErrorAction SilentlyContinue
     Save-State $s
+    exit 0       # the last native command above was initdb: do not let its exit code become the step's
   }
 
   'netguard' {

@@ -528,9 +528,11 @@ async function harness() {
       const r = await rawPost(`${UI}/api/restore-tcdb`, { ...H(), 'Content-Type': m.ct }, m.body);
       const log = readFrom(handle.logFile, 0);
       const errs = (/(\d+) restore COPY errors/.exec(log) || [])[1]; const firstErr = (/psql:[^\n]*?: ERROR:\s*([^\n]*)/.exec(log) || [])[1];
-      const c1 = await count();
+      const c1 = await count(); S.c0 = c0;
       const said = `the app answered ${r.status} ${r.json && r.json.success ? '«success»' : r.text.slice(0, 120)}`;
-      if (errs) throw new Error(`${said}, but the restore logged ${errs} COPY errors (first: «${String(firstErr).trim()}»); rows ${JSON.stringify(c0)} → ${JSON.stringify(c1)}${S.dump ? `; the dump has ${S.dump.crlf} CRLF line endings, ${S.dump.crlfBlocks} COPY blocks with CRLF data` : ''}`);
+      let safety = 0; try { safety = fs.readdirSync(path.join(dataDir, 'backups', 'pre-open')).filter((f) => f.endsWith('.tcdb')).length; } catch { /* none */ }
+      if (errs || JSON.stringify(c0) !== JSON.stringify(c1)) S.restoreFailed = true;
+      if (errs) throw new Error(`${said}, but the restore logged ${errs} COPY errors (first: «${String(firstErr).trim()}»); rows ${JSON.stringify(c0)} → ${JSON.stringify(c1)}${S.dump ? `; the dump has ${S.dump.crlf} CRLF line endings, ${S.dump.crlfBlocks} COPY blocks with CRLF data` : ''}; the app's pre-restore safety copies in backups/pre-open: ${safety}`);
       if (r.status !== 200 || !r.json || !r.json.success) throw new Error(`restore → ${r.status} ${r.text}`);
       if (JSON.stringify(c0) !== JSON.stringify(c1)) throw new Error(`rows changed ${JSON.stringify(c0)} → ${JSON.stringify(c1)}`);
       await signIn();
@@ -540,6 +542,21 @@ async function harness() {
     });
 
     let quit2 = null;
+    await R.check('H32 diagnosis: the SAME dump with its CRLF line endings turned into LF (what a Mac / Linux dump has) is restored by the same app without a single COPY error, and the rows come back', async () => {
+      if (!S.restoreFailed) return 'not needed: the plain restore above already worked';
+      const BM = appRequire(APP_DIR)(path.join(APP_DIR, 'src', 'backup-manager.js'));
+      const bm = new BM({ pgBinDir: path.join(APP_DIR, '..', 'bin', 'pg', 'bin'), dbPassword: 'x', dataDir });
+      const sql = await bm._decompress(bm._decryptParsed(bm._parseTcdbFile(fs.readFileSync(S.exportFile)), '').data);
+      const lf = Buffer.from(sql.toString('latin1').replace(/\r\n/g, '\n'), 'latin1');
+      const gz = await bm._compress(lf); const file = bm._buildTcdbFile(bm._encrypt(gz, 'smoke-passphrase-1'), lf.length, gz.length);
+      const m = multipart(file, 'lf-normalised.tcdb', { passphrase: 'smoke-passphrase-1' });
+      const before = fs.readFileSync(handle.logFile, 'utf8').length;
+      const r = await rawPost(`${UI}/api/restore-tcdb`, { ...H(), 'Content-Type': m.ct }, m.body);
+      const log = fs.readFileSync(handle.logFile, 'utf8').slice(before); const errs = (/(\d+) restore COPY errors/.exec(log) || [])[1];
+      const c1 = (await pg(`SELECT (SELECT count(*) FROM public.companies)::int c, (SELECT count(*) FROM public.journal_entries)::int je, (SELECT count(*) FROM public.sales_transactions)::int st, (SELECT count(*) FROM auth.users)::int u`)).rows[0];
+      if (r.status !== 200 || !r.json || !r.json.success || errs || JSON.stringify(c1) !== JSON.stringify(S.c0)) throw new Error(`the LF copy did not restore cleanly: ${r.status} ${errs ? errs + ' COPY errors' : ''} rows ${JSON.stringify(c1)} (expected ${JSON.stringify(S.c0)})`);
+      return `restored with 0 COPY errors; rows back to ${JSON.stringify(c1)} - the only difference is the line endings (${S.dump.crlf} CRLF -> LF): the restore script is built with LF terminators, the Windows dump has CRLF`;
+    });
     await R.check('H31 final graceful quit: exits by itself, nothing left running', async () => {
       quit2 = await gracefulQuit(handle); if (!quit2.graceful) throw new Error(`the app did not exit by itself (${quit2.how})`);
       await sleep(2500);
