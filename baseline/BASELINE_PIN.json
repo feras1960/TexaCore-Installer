@@ -2,7 +2,7 @@
   "schema": 1,
   "pgMajor": 17,
   "cutTimestamp": "2026-10-13T13:21:12.253Z",
-  "erpCommit": "7d1e0488771bcdf4ca64c262fdb6a19394a1c652",
+  "erpCommit": "a149009330ebe1c8eb44613f1dbc18b7d48f9d20",
   "erpBranch": "claude/release-2.0.6",
   "files": {
     "production_baseline.sql": {

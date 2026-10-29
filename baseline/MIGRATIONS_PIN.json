@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "7d1e0488771bcdf4ca64c262fdb6a19394a1c652",
+  "erpCommit": "a149009330ebe1c8eb44613f1dbc18b7d48f9d20",
   "migrations": [
     {
       "order": 1,
