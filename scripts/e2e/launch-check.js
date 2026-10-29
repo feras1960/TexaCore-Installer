@@ -1891,6 +1891,35 @@ async function main() {
         return `${nCompanies} companies: no yes → 409, nothing written or changed; yes → 200, rows ${JSON.stringify(c0)} intact, pre-open backup ${pre1[pre1.length - 1]} (${newest.length} bytes)`;
       });
 
+      // ═══ 2.0.7: a company file written on WINDOWS (pg_dump writes CRLF line ends) restores on this platform: it said «success» and left the tables EMPTY (the terminator was LF) ═══
+      await R.check('7.16 (2.0.7) a company file whose dump has CRLF line ends (what Windows pg_dump writes), and one that mixes CRLF and LF, restores through the real route with the yes: success, every row comes back (rows equal before), no psql error in the answer; the unchanged export restores the same', async () => {
+        const BM = require('../../src/backup-manager');
+        const exp = await api('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'TexaCore-CRLF-SRC' });
+        if (!exp.json || !exp.json.success) throw new Error(`export → ${exp.text.slice(0, 200)}`);
+        const bm = new BM({ pgBinDir: '/x', encryptionKey: 'texacore-default-backup-key-2026', backupPath: exp.json.path });
+        const dump = await bm._decompress(bm._decryptParsed(bm._parseTcdbFile(fs.readFileSync(exp.json.path)), '').data);
+        if (dump.includes(0x0d)) throw new Error('the export of this platform already has CR bytes: the scenario needs an LF source');
+        const asCrlf = Buffer.from(dump.toString('latin1').replace(/\n/g, '\r\n'), 'latin1');          // Windows text mode: every LF becomes CRLF, in the DDL and in the COPY data alike
+        const lines = dump.toString('latin1').split('\n');
+        const asMixed = Buffer.from(lines.map((l, i) => l + (i % 7 < 3 ? '\r\n' : '\n')).join('').replace(/\r?\n$/, '\n'), 'latin1');   // a blend of both writers, down to single data lines
+        const make = async (buf, name) => { const compressed = await bm._compress(buf); const f = path.join(WORK, name); fs.writeFileSync(f, bm._buildTcdbFile(bm._encrypt(compressed), buf.length, compressed.length)); return f; };
+        const c0 = await rowCounts(); const nCompanies = (await pg('SELECT count(*)::int n FROM public.companies')).rows[0].n;
+        if (nCompanies < 1) throw new Error('the scenario needs at least one company in the database');
+        const outs = [];
+        for (const [label, buf] of [['CRLF', asCrlf], ['mixed', asMixed], ['LF (this platform)', dump]]) {
+          const file = await make(buf, `crlf-${label.replace(/\W+/g, '')}.tcdb`);
+          const m = multipart(fs.readFileSync(file), path.basename(file));
+          const r = await rawRequest('POST', `${UI}/api/restore-tcdb`, { headers: { ...H, 'Content-Type': m.ct }, body: m.body });
+          if (r.status !== 200 || !r.json || !r.json.success) throw new Error(`${label}: restore → ${r.status} ${r.buf.toString().slice(0, 300)}`);
+          if (/end-of-copy marker|does not match previous newline/i.test(r.buf.toString())) throw new Error(`${label}: psql complained about the line ends: ${r.buf.toString().slice(0, 300)}`);
+          const c1 = await rowCounts();
+          if (JSON.stringify(c1) !== JSON.stringify(c0)) throw new Error(`${label}: rows ${JSON.stringify(c0)} -> ${JSON.stringify(c1)} (the restore must give every row back)`);
+          await servicesHealthy(`after the ${label} restore`);
+          outs.push(label);
+        }
+        return `${nCompanies} companies; a CRLF dump (${(asCrlf.length - dump.length).toLocaleString()} CR bytes added), a mixed dump and the plain export each restore with the yes and the rows come back equal (${JSON.stringify(c0)}); services healthy after each`;
+      });
+
       // 2.0.5 RC2: «the default admin collides» - a company for the SIGNED-IN admin goes into HIS tenant (no new tenant / user / session); without a session the collision says how to get out
       await R.check('7.15 (RC2) new company for the signed-in admin: callerAccessToken adds it to his own tenant (attached, no session handed out, no new tenant / user); a bad token is INVALID_SESSION; a colliding admin without a token is EMAIL_EXISTS with the way out', async () => {
         const owner = (await pg(`SELECT t.id tenant_id FROM public.tenants t JOIN auth.users u ON lower(u.email) = lower(t.owner_email) WHERE u.email = 'owner@e2e.test' LIMIT 1`)).rows[0];
