@@ -82,6 +82,8 @@ const V_MD5 = {
   'fn_material_mode_derive(text,boolean,boolean,boolean)': '521081d97f20ee86078bc13b9cd3b78f', 'fn_material_stock_lock_reasons(uuid,boolean,boolean)': 'af15bdf8b84ddda0040b21de0eda3a59',
   'fn_material_tracking_mode(uuid)': 'e8ad0124e16ef96dbd5f00ae7ed1be7b',
 };
+// 20270243n (B-4, 2.0.6): the three write-off functions' md5(prosrc) after the migration = production's post-image (the fingerprints the coordinator recorded when it was applied, 29-10 06:05)
+const V2_MD5 = { 'resolve_writeoff_expense_account(uuid)': '2de4abe2f72b0a645987a3f6d947d2c9', 'post_inventory_writeoff(uuid)': '312b2192d348a4dd07e71bf64fbfa948', 'reverse_inventory_writeoff(uuid)': '8c34fc7fe7245128b15dd64c01c3b69a' };
 
 const binOf = (app) => (app ? path.join(app, 'Contents', 'MacOS', path.basename(app, '.app')) : '');
 const resOf = (app) => (app ? path.join(app, 'Contents', 'Resources') : ROOT);
@@ -661,6 +663,13 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
     const bad = Object.entries(V_MD5).filter(([sig, md5]) => !local.has(sig) || local.get(sig).md5 !== md5).map(([sig]) => `${sig}: ${local.has(sig) ? local.get(sig).md5.slice(0, 8) : 'missing'}`);
     if (bad.length) throw new Error(`${bad.join('; ')}`);
     return `${Object.keys(V_MD5).length}/${Object.keys(V_MD5).length} md5 equal (fn_guard_material_card 2fe6c0a6… = 20270240l, fn_material_tracking_sync db9d6ce5…, …)`;
+  });
+
+  await R.check('V2 20270243n: resolve_writeoff_expense_account / post_inventory_writeoff / reverse_inventory_writeoff have production\'s post-image md5 (2de4abe2…, 312b2192…, 8c34fc7f…)', async () => {
+    const local = fnMap(post);
+    const bad = Object.entries(V2_MD5).filter(([sig, md5]) => !local.has(sig) || local.get(sig).md5 !== md5).map(([sig]) => `${sig}: ${local.has(sig) ? local.get(sig).md5.slice(0, 8) : 'missing'}`);
+    if (bad.length) throw new Error(`${bad.join('; ')}`);
+    return `${Object.keys(V2_MD5).length}/${Object.keys(V2_MD5).length} md5 equal production's post-image`;
   });
 
   // ═════════ the inventory delta of the migrations (what manifest.inventoryAfter carries) ═════════

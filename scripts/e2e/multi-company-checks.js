@@ -7,6 +7,7 @@
 //   9.4 (c) on the desktop an attachment upload answers DESKTOP_STORAGE_UNAVAILABLE with the reason (the shipped bundle, run in the real page), and the share hub issues no public
 //       token (the shipped bundle carries the desktop gate and its reason in every language; no public token exists in the database)
 //   9.13 R6-1 (build #7): the installer-created owner has tenant_id in user_metadata AND app_metadata (database row and session token), and saves a material card from the real materials page
+//   9.14 B-4 (20270243n, 2.0.6): on a fresh desktop company resolve_writeoff_expense_account returns 592 «فروق المخزون», and an approved write-off posts its entry (variance debited, inventory credited, the stock out) and reverses
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -404,6 +405,46 @@ async function multiCompanyChecks(R, ctx) {
       ui = `card «${name}» saved from the materials page by the owner (tenant ${saved[0].tenant_id.slice(0, 8)}…); ${out.slice(0, 180)}`;
     }
     return `owner user_metadata.tenant_id = app_metadata.tenant_id = ${S.tenantId.slice(0, 8)}… (role admin, name kept); no user lacks it; the session token carries it in user_metadata and app_metadata; ${ui}`;
+  });
+
+  // ── B-4 (20270243n, 2.0.6): a write-off is never posted without its entry. A desktop company is built from the desktop chart template: it must carry 592 (the resolver's first fallback) or every write-off would be refused ──
+  await R.check('9.14 B-4 (20270243n): on a fresh desktop company resolve_writeoff_expense_account returns account 592 «فروق المخزون» (postable), and an approved write-off posts its entry as the owner - variance debited, inventory credited, the stock out, gl_skipped false - and its reversal brings the stock back and removes the entry', async () => {
+    const co = S.companies[0].id; const crypto = require('crypto');
+    const acc = (await pg(`SELECT a.id, a.account_code, COALESCE(a.is_group, false) AS grp, COALESCE(a.is_active, true) AS act FROM public.chart_of_accounts a WHERE a.id = public.resolve_writeoff_expense_account($1)`, [co])).rows[0];
+    if (!acc) throw new Error('resolve_writeoff_expense_account returned NULL for a fresh company on the desktop template: a write-off with a value would be REFUSED on the desktop');
+    if (acc.account_code !== '592' || acc.grp || !acc.act) throw new Error(`the resolver answered account ${acc.account_code} (group ${acc.grp}, active ${acc.act}), expected the postable 592`);
+    const set = (await pg('SELECT default_inventory_variance_account_id AS v FROM public.company_accounting_settings WHERE company_id = $1', [co])).rows[0];
+    const wh = (await pg('SELECT id FROM public.warehouses WHERE company_id = $1 ORDER BY created_at LIMIT 1', [co])).rows[0];
+    if (!wh) throw new Error('the company has no warehouse');
+    const mat = crypto.randomUUID(); const wo = crypto.randomUUID(); const batch = crypto.randomUUID();
+    const c = new Client(pgOptions()); await c.connect();
+    try {
+      await c.query('BEGIN'); await c.query('SET LOCAL session_replication_role = replica');
+      await c.query(`INSERT INTO public.fabric_materials (id, tenant_id, company_id, code, name_ar, unit, material_type) VALUES ($1,$2,$3,$4,'خام إتلاف','piece','standard')`, [mat, S.tenantId, co, 'WG-M-' + mat.slice(0, 8)]);
+      await c.query(`INSERT INTO public.inventory_stock (tenant_id, company_id, warehouse_id, material_id, quantity_on_hand, average_cost) VALUES ($1,$2,$3,$4,10,5)`, [S.tenantId, co, wh.id, mat]);
+      await c.query(`INSERT INTO public.products (id, tenant_id, company_id, sku, name, name_ar, product_type, base_uom) VALUES ($1,$2,$3,$4,'خام إتلاف','خام إتلاف','raw_material','KG')`, [mat, S.tenantId, co, 'WG-P-' + mat.slice(0, 8)]);
+      await c.query(`INSERT INTO public.inventory_batches (id, tenant_id, company_id, product_id, warehouse_id, batch_number, initial_quantity, current_quantity) VALUES ($1,$2,$3,$4,$5,$6,10,10)`, [batch, S.tenantId, co, mat, wh.id, 'WG-B-' + batch.slice(0, 8)]);
+      await c.query(`INSERT INTO public.inventory_writeoffs (id, tenant_id, company_id, writeoff_number, writeoff_date, warehouse_id, reason, status) VALUES ($1,$2,$3,$4,CURRENT_DATE,$5,'تالف','approved')`, [wo, S.tenantId, co, 'WG-' + wo.slice(0, 8), wh.id]);
+      await c.query(`INSERT INTO public.inventory_writeoff_lines (tenant_id, writeoff_id, material_id, quantity, batch_id) VALUES ($1,$2,$3,4,$4)`, [S.tenantId, wo, mat, batch]);
+      await c.query('SET LOCAL session_replication_role = origin'); await c.query('COMMIT');
+    } catch (e) { await c.query('ROLLBACK').catch(() => {}); throw e; } finally { await c.end(); }
+    const qty = async () => Number((await pg('SELECT quantity_on_hand AS q FROM public.inventory_stock WHERE warehouse_id = $1 AND material_id = $2', [wh.id, mat])).rows[0].q);
+    const t = await signIn(); const auth = { apikey: anonKey, Authorization: `Bearer ${t.access_token}` };
+    const post = await request('POST', `${API}/rest/v1/rpc/post_inventory_writeoff`, { headers: auth, body: { p_writeoff_id: wo } });
+    if (post.status !== 200 || !post.json || post.json.success !== true) throw new Error(`post_inventory_writeoff → ${post.status} ${post.text.slice(0, 260)}`);
+    if (post.json.gl_skipped !== false || !post.json.journal_entry_id) throw new Error(`the write-off posted with NO entry: ${JSON.stringify(post.json)}`);
+    const lines = (await pg('SELECT account_id, debit::numeric AS d, credit::numeric AS cr FROM public.journal_entry_lines WHERE entry_id = $1', [post.json.journal_entry_id])).rows;
+    const net = (a) => lines.filter((l) => l.account_id === a).reduce((x, l) => x + Number(l.d) - Number(l.cr), 0);
+    if (net(acc.id) !== 20) throw new Error(`592 is net ${net(acc.id)} in the entry (expected a debit of 20); lines ${JSON.stringify(lines)}`);
+    if (lines.reduce((x, l) => x + Number(l.d) - Number(l.cr), 0) !== 0) throw new Error('the write-off entry is not balanced');
+    if ((await qty()) !== 6) throw new Error(`stock after the write-off ${await qty()} (expected 6)`);
+    const w = (await pg('SELECT status, journal_entry_id FROM public.inventory_writeoffs WHERE id = $1', [wo])).rows[0];
+    if (w.status !== 'posted' || w.journal_entry_id !== post.json.journal_entry_id) throw new Error(`write-off row ${JSON.stringify(w)}`);
+    const rev = await request('POST', `${API}/rest/v1/rpc/reverse_inventory_writeoff`, { headers: auth, body: { p_writeoff_id: wo } });
+    if (rev.status !== 200 || !rev.json || rev.json.success !== true) throw new Error(`reverse_inventory_writeoff → ${rev.status} ${rev.text.slice(0, 260)}`);
+    if ((await qty()) !== 10) throw new Error(`stock after the reversal ${await qty()} (expected 10)`);
+    const left = (await pg(`SELECT count(*)::int AS n FROM public.journal_entries WHERE id = $1 AND COALESCE(is_deleted, false) = false AND COALESCE(status, '') NOT IN ('deleted','cancelled','reversed')`, [post.json.journal_entry_id])).rows[0].n;
+    return `resolver → 592 (settings variance account ${set && set.v ? 'set' : 'NOT set - the resolver fell back to the chart'}); write-off of 4 at 5: entry ${String(post.json.journal_entry_id).slice(0, 8)}… Dr 592 20 / Cr inventory 20, stock 10 -> 6, gl_skipped false; reversal: stock back to 10, live entries left ${left}`;
   });
 }
 
