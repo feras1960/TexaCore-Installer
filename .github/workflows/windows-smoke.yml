@@ -56,6 +56,10 @@ jobs:
         id: install
         run: ./scripts/e2e/windows-smoke-install.ps1 -Step install -Out $env:OUT -Version $env:VERSION
 
+      - name: initdb on the paths that matter (plain, spaces, Arabic folder name; C:\ and D:\)
+        if: always() && steps.install.outcome == 'success'
+        run: ./scripts/e2e/windows-smoke-install.ps1 -Step probe -Out $env:OUT -Version $env:VERSION
+
       - name: Block the installed app's outbound network (and prove the block)
         id: netguard
         if: always() && steps.install.outcome == 'success'
@@ -74,7 +78,7 @@ jobs:
         run: |
           node scripts/e2e/windows-smoke.js harness `
             --exe "${{ steps.install.outputs.exe }}" --app-dir "${{ steps.install.outputs.app_dir }}" `
-            --work "$env:RUNNER_TEMP\TexaCore smoke\work" --out $env:OUT --playwright-dir "$PWD\tools" `
+            --work "C:\tcsmoke\work" --out $env:OUT --playwright-dir "$PWD\tools" `
             --version $env:VERSION --migrations $env:MIGRATIONS
 
       - name: Phase 2 - the installed app launched the way a user does (real window, Start Free clicked, default ports)
@@ -90,7 +94,7 @@ jobs:
         if: always()
         run: |
           node scripts/e2e/windows-smoke.js collect --out $env:OUT `
-            --user-data "$env:RUNNER_TEMP\TexaCore smoke\work\user data" --user-data "$env:APPDATA\TexaCore ERP" --user-data "$env:APPDATA\texacore-installer"
+            --user-data "C:\tcsmoke\work\userdata" --user-data "$env:APPDATA\TexaCore ERP" --user-data "$env:APPDATA\texacore-installer"
 
       - name: Uninstall silently
         if: always() && steps.install.outcome == 'success'

@@ -165,9 +165,11 @@ function rawPost(url, headers, body) {
 
 function writeResults(name, R, extra = {}) {
   fs.mkdirSync(OUT, { recursive: true });
-  const rows = R.rows.map((r) => ({ name: r.name, ok: r.ok, skipped: !!r.skipped, evidence: String(r.evidence || '').slice(0, 900), ms: r.ms }));
+  const rows = R.rows.map((r) => ({ name: r.name, ok: r.ok, skipped: !!r.skipped, warn: !!r.warn, evidence: String(r.evidence || '').slice(0, 900), ms: r.ms }));
   fs.writeFileSync(path.join(OUT, `results-${name}.json`), JSON.stringify({ at: new Date().toISOString(), summary: R.summary(), seconds: Math.round((Date.now() - t0All) / 1000), rows, ...extra }, null, 2));
 }
+/** A real finding that does not stop the run: it is listed as WARN in the summary (the product still did its job on this OS). */
+function warn(R, name, evidence) { R.rows.push({ name, ok: true, warn: true, evidence, ms: 0 }); console.log(`  WARN  ${name} — ${evidence}`); }
 function skip(R, name, why) { R.rows.push({ name, ok: true, skipped: true, evidence: why, ms: 0 }); console.log(`  SKIP  ${name} — ${why}`); }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
@@ -184,7 +186,7 @@ async function harness() {
   const UI = `http://127.0.0.1:${P.ui}`; const API = `http://127.0.0.1:${P.api}`; const ADMIN = `http://127.0.0.1:${P.admin}`;
   const R = new Results();
   fs.rmSync(WORK, { recursive: true, force: true }); fs.mkdirSync(WORK, { recursive: true });
-  const userData = path.join(WORK, 'user data'); const dataDir = path.join(userData, 'texacore-data');
+  const userData = path.join(WORK, arg('user-data-name', 'userdata')); const dataDir = path.join(userData, 'texacore-data');
   const hbFile = path.join(userData, 'logs', 'heartbeat.log');
   console.log(`windows-smoke harness: exe=${EXE}\n  work=${WORK}  ports ${BASE}-${BASE + 5}  platform=${process.platform}`);
   for (const p of Object.values(P)) if (await portOpen(p)) { console.error(`port ${p} is already in use`); process.exit(2); }
@@ -431,6 +433,16 @@ async function harness() {
       return `${procs.length} process command lines searched (${mine.length} belong to this install: ${S.procNames.join(', ')}): none contains any of the 6 secrets`;
     });
 
+    // ── the licence is bound to a hardware id; the app asks `wmic` for it, and wmic is gone from Windows 11 24H2 / Server 2025 ──
+    try {
+      const lic = JSON.parse(fs.readFileSync(path.join(dataDir, 'license.dat'), 'utf8'));
+      const fallback = crypto.createHash('sha256').update(`FALLBACK-${os.hostname()}-${process.arch}`).digest('hex').slice(0, 16);
+      const wmic = IS_WIN ? cp.spawnSync('where', ['wmic'], { encoding: 'utf8' }).status === 0 : true;
+      const log = readFrom(path.join(WORK, 'app-1.log'), 0);
+      if (lic.hw === fallback) warn(R, 'H21b hardware id of the licence', `FINDING: wmic.exe is ${wmic ? 'present' : 'NOT present'} on this Windows build and the licence is bound to the FALLBACK id (hostname + arch), not to the machine: ${/'wmic' is not recognized/.test(log) ? '«\'wmic\' is not recognized» is in the app log; ' : ''}renaming the PC would invalidate the cached licence (the app, license-guard.getHardwareId, shells out to wmic; the same tool is used for the disk and OS-edition telemetry)`);
+      else R.rows.push({ name: 'H21b hardware id of the licence', ok: true, evidence: `the licence is bound to the machine id (not the hostname fallback); wmic ${wmic ? 'present' : 'absent'}`, ms: 0 });
+    } catch (e) { warn(R, 'H21b hardware id of the licence', `could not read license.dat: ${e.message}`); }
+
     // ── 6. a real browser on the served page ──
     if (PW_DIR) {
       await R.check('H22 real browser (Chrome on this runner): the login page loads, the owner signs in through the real form and reaches the dashboard; Arabic fonts load', async () => {
@@ -672,16 +684,17 @@ function summarize() {
   const rows = []; const add = (group, list) => (list || []).forEach((c) => rows.push({ group, ...c }));
   add('install', install.checks); add('harness', h && h.rows); add('real launch', r && r.rows); add('uninstall', un && un.checks);
   if (scan) rows.push({ group: 'artifact', name: 'A1 no secret in any uploaded file', ok: scan.filesRemovedForSecrets.length === 0, evidence: `${scan.filesCopied} redacted log files; ${scan.secretsKnown} per-install secret values scrubbed; ${scan.filesRemovedForSecrets.length} files removed` });
-  const bad = rows.filter((x) => !x.ok); const skipped = rows.filter((x) => x.skipped);
+  const bad = rows.filter((x) => !x.ok); const skipped = rows.filter((x) => x.skipped); const warned = rows.filter((x) => x.warn);
   const md = [];
   md.push(`## Windows smoke test — published TexaCore ERP ${install.version || ''} installer`, '');
-  md.push(`**${bad.length ? 'FAIL' : 'PASS'}** — ${rows.length - bad.length - skipped.length} passed, ${bad.length} failed, ${skipped.length} skipped (of ${rows.length}).`, '');
+  md.push(`**${bad.length ? 'FAIL' : 'PASS'}** — ${rows.length - bad.length - skipped.length - warned.length} passed, ${bad.length} failed, ${warned.length} warnings (findings that did not stop the run), ${skipped.length} skipped (of ${rows.length}).`, '');
+  if (warned.length) { md.push('**Findings (WARN):**', ''); warned.forEach((x) => md.push(`- ${esc(x.name)}: ${esc(x.evidence).slice(0, 700)}`)); md.push(''); }
   const f = install.facts || {};
   md.push(`Runner: ${esc(f.os)}; culture ${esc(f.culture)}; installer ${esc(install.sizeMB)} MB, sha256 ${esc(String(install.sha256 || '').slice(0, 16))}…; installed in ${esc(install.installSeconds)} s to \`${esc(install.installDir)}\`; first launch ready in ${h && h.firstMs ? Math.round(h.firstMs / 1000) + ' s' : 'n/a'}.`, '');
   md.push('| # | Group | Step | Result | Evidence |', '|---|---|---|---|---|');
-  rows.forEach((x, i) => md.push(`| ${i + 1} | ${x.group} | ${esc(x.name).slice(0, 190)} | ${x.skipped ? 'SKIP' : x.ok ? 'PASS' : '**FAIL**'} | ${esc(x.evidence).slice(0, 420)} |`));
+  rows.forEach((x, i) => md.push(`| ${i + 1} | ${x.group} | ${esc(x.name).slice(0, 190)} | ${x.skipped ? 'SKIP' : x.warn ? '**WARN**' : x.ok ? 'PASS' : '**FAIL**'} | ${esc(x.evidence).slice(0, 420)} |`));
   fs.writeFileSync(path.join(OUT, 'summary.md'), md.join('\n') + '\n');
-  fs.writeFileSync(path.join(OUT, 'summary.json'), JSON.stringify({ verdict: bad.length ? 'FAIL' : 'PASS', passed: rows.length - bad.length - skipped.length, failed: bad.length, skipped: skipped.length, total: rows.length, failedSteps: bad.map((x) => x.name), install: { version: install.version, installSeconds: install.installSeconds, installDir: install.installDir, sizeMB: install.sizeMB, facts: install.facts }, harnessFirstStartSeconds: h && h.firstMs ? Math.round(h.firstMs / 1000) : null, realStartSeconds: r && r.realMs ? Math.round(r.realMs / 1000) : null }, null, 2));
+  fs.writeFileSync(path.join(OUT, 'summary.json'), JSON.stringify({ verdict: bad.length ? 'FAIL' : 'PASS', passed: rows.length - bad.length - skipped.length - warned.length, failed: bad.length, warnings: warned.length, skipped: skipped.length, total: rows.length, failedSteps: bad.map((x) => x.name), warnedSteps: warned.map((x) => x.name), install: { version: install.version, installSeconds: install.installSeconds, installDir: install.installDir, sizeMB: install.sizeMB, facts: install.facts }, harnessFirstStartSeconds: h && h.firstMs ? Math.round(h.firstMs / 1000) : null, realStartSeconds: r && r.realMs ? Math.round(r.realMs / 1000) : null }, null, 2));
   console.log(md.join('\n'));
   process.exit(bad.length ? 1 : 0);
 }

@@ -2,7 +2,7 @@
 # prove the outbound-network block, uninstall. Every step appends its checks to <Out>\install.json (merged into the job summary by windows-smoke.js).
 # Public repository: no secrets, no SQL, nothing that needs credentials.
 param(
-  [Parameter(Mandatory)][ValidateSet('prepare', 'install', 'netguard', 'uninstall')][string]$Step,
+  [Parameter(Mandatory)][ValidateSet('prepare', 'install', 'probe', 'netguard', 'uninstall')][string]$Step,
   [string]$Out = 'smoke-out',
   [string]$WorkDir = $env:RUNNER_TEMP,
   [string]$Url = '',
@@ -19,9 +19,14 @@ function Load-State {
   return @{ version = $Version; checks = @(); facts = @{} }
 }
 function Save-State($s) { $s | ConvertTo-Json -Depth 8 | Set-Content -Encoding UTF8 $statePath }
-function Add-Check($s, [string]$name, [bool]$ok, [string]$evidence) {
-  $s.checks += @{ name = $name; ok = $ok; evidence = $evidence }
-  Write-Host ('{0}  {1}  -  {2}' -f $(if ($ok) { 'PASS' } else { 'FAIL' }), $name, $evidence)
+function Add-Check($s, [string]$name, [bool]$ok, [string]$evidence, [switch]$Warn) {
+  $isWarn = (-not $ok) -and $Warn
+  $s.checks += @{ name = $name; ok = ($ok -or $isWarn); warn = $isWarn; evidence = $(if ($isWarn) { "FINDING: $evidence" } else { $evidence }) }
+  Write-Host ('{0}  {1}  -  {2}' -f $(if ($ok) { 'PASS' } elseif ($isWarn) { 'WARN' } else { 'FAIL' }), $name, $evidence)
+}
+function Volume-Info($letter) {
+  try { $o = (& fsutil fsinfo volumeinfo "${letter}:" 2>&1) -join ' '; if ($o -match 'File System Name\s*:\s*(\S+)') { return $Matches[1] } } catch { }
+  return 'unknown'
 }
 function Vc-State {
   $k = 'HKLM:\SOFTWARE\Microsoft\VisualStudio\14.0\VC\Runtimes\x64'
@@ -51,7 +56,7 @@ switch ($Step) {
     $s.facts = @{
       os = "$($os.Caption) $($os.Version) ($($os.OSArchitecture))"; culture = (Get-Culture).Name; uiCulture = (Get-UICulture).Name; systemLocale = (Get-WinSystemLocale).Name
       admin = $admin; defender = $defender; firewall = $fw; cpus = [Environment]::ProcessorCount; ramGB = [math]::Round($os.TotalVisibleMemorySize / 1MB, 1)
-      freeGB = [math]::Round((Get-PSDrive C).Free / 1GB, 1); vcBefore = $vc
+      freeGB = [math]::Round((Get-PSDrive C).Free / 1GB, 1); vcBefore = $vc; fsC = (Volume-Info 'C'); fsD = (Volume-Info 'D')
     }
     Write-Host ($s.facts | ConvertTo-Json -Depth 4)
     New-Item -ItemType Directory -Force -Path $WorkDir | Out-Null
@@ -125,6 +130,41 @@ switch ($Step) {
     if (($p.ExitCode -ne 0) -or -not (Test-Path $exe)) { throw 'the silent install failed' }
   }
 
+  'probe' {
+    # initdb is what failed on the first attempt ("could not change permissions of directory ... Permission denied"), on a data folder under D:\ with spaces. The product's own default is
+    # %APPDATA% on C:, so the matrix below runs the SAME initdb command line as the app (src/service-manager.js) on the paths that matter to real users: plain, with spaces, with an
+    # Arabic folder name - on the system drive - and the runner's D: drive (ReFS / Dev Drive on some images) for the record.
+    $dir = $s.installDir
+    $pgbin = Join-Path $dir 'resources\bin\pg\bin'; $initdb = Join-Path $pgbin 'initdb.exe'
+    $env:PATH = "$pgbin;" + (Join-Path $dir 'resources\bin\pg\lib') + ";" + $env:PATH
+    $env:PGSHAREDIR = Join-Path $dir 'resources\bin\pg\share'
+    $pw = Join-Path $WorkDir 'probe-pw.txt'; 'probe-only-password' | Set-Content -Encoding ASCII $pw
+    $arabic = ([string][char]0x0645 + [char]0x0633 + [char]0x062A + [char]0x062E + [char]0x062F + [char]0x0645) + ' ' + ([string][char]0x0641 + [char]0x062D + [char]0x0635)
+    $variants = @(
+      @{ id = 'C:\ plain path';              path = 'C:\tc-probe\plain\pgdata';                                  strict = $true },
+      @{ id = 'C:\ path with spaces';        path = 'C:\tc probe\two words\pg data';                              strict = $true },
+      @{ id = 'C:\ Arabic folder in %APPDATA%'; path = (Join-Path $env:APPDATA "$arabic\pgdata");               strict = $true },
+      @{ id = 'D:\ plain path';              path = 'D:\tc-probe\plain\pgdata';                                  strict = $false },
+      @{ id = 'D:\ path with spaces';        path = 'D:\tc probe\two words\pg data';                              strict = $false },
+      @{ id = 'RUNNER_TEMP path with spaces'; path = (Join-Path $WorkDir 'TexaCore smoke\work\user data\texacore-data\pgdata'); strict = $false }
+    )
+    foreach ($v in $variants) {
+      $t0 = Get-Date; $code = -1; $err = ''
+      try {
+        New-Item -ItemType Directory -Force -Path $v.path | Out-Null          # the app creates the folder first (fs.mkdirSync recursive), initdb then "fixes permissions on the existing directory"
+        $out = & $initdb -D $v.path -U postgres -E UTF8 --locale-provider=icu --icu-locale=en-US --locale=C --auth=scram-sha-256 "--pwfile=$pw" 2>&1
+        $code = $LASTEXITCODE
+        $err = (($out | Where-Object { $_ -match 'error|could not|denied|fatal' }) | Select-Object -First 2) -join ' '
+      } catch { $err = $_.Exception.Message }
+      $secs = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
+      $acl = ''; try { $acl = ((Get-Acl (Split-Path $v.path -Parent)).Access | Select-Object -First 3 | ForEach-Object { "$($_.IdentityReference):$($_.FileSystemRights)" }) -join ' | ' } catch { }
+      Add-Check $s ("P  initdb (the app's exact command line) on: " + $v.id) ($code -eq 0) ("exit {0} in {1} s; {2}{3}" -f $code, $secs, $(if ($err) { $err } else { 'cluster created' }), $(if ($code -ne 0 -and $acl) { "; parent ACL: $acl" } else { '' })) -Warn:(-not $v.strict)
+      Remove-Item -Recurse -Force (Split-Path $v.path -Parent) -ErrorAction SilentlyContinue
+    }
+    Remove-Item $pw -Force -ErrorAction SilentlyContinue
+    Save-State $s
+  }
+
   'netguard' {
     # The real-launch phase presses «Start Free» in the real window. Online that registers a licence in the cloud, which a smoke test must never do, so the app's outbound
     # network is blocked by the firewall first - and the block is PROVEN with a control program before anything is clicked.
@@ -172,7 +212,7 @@ const s = http.createServer((q, r) => r.end('x')).listen(0, '127.0.0.1', () => {
     $lnk = @(Get-ChildItem ([Environment]::GetFolderPath('CommonDesktopDirectory')), ([Environment]::GetFolderPath('CommonPrograms')) -Recurse -Filter 'TexaCore*.lnk' -ErrorAction SilentlyContinue)
     $data = @('TexaCore ERP', 'texacore-installer') | ForEach-Object { Join-Path $env:APPDATA $_ } | Where-Object { Test-Path (Join-Path $_ 'texacore-data') }
     Add-Check $s 'U1 silent uninstall: exit 0, the program, its Apps & features entry and the shortcuts are gone' (($p.ExitCode -eq 0) -and $exeGone -and (-not $reg) -and ($lnk.Count -eq 0)) ("exit code {0} in {1} s; program gone {2}; entry gone {3}; shortcuts left {4}" -f $p.ExitCode, [math]::Round($sw.Elapsed.TotalSeconds, 1), $exeGone, (-not $reg), $lnk.Count)
-    Add-Check $s 'U2 the user data survives an uninstall by design (the company database is not deleted)' ($data.Count -ge 1) ("data folder kept: {0}" -f $(if ($data) { Split-Path $data[0] -Leaf } else { 'NOT FOUND' }))
+    Add-Check $s 'U2 the user data survives an uninstall by design (the company database is not deleted)' ($data.Count -ge 1) ("data folder kept: {0}" -f $(if ($data) { Split-Path @($data)[0] -Leaf } else { 'NOT FOUND' }))
     $un2 = @{ checks = $s.checks | Select-Object -Last 2 }
     $un2 | ConvertTo-Json -Depth 5 | Set-Content -Encoding UTF8 (Join-Path $Out 'uninstall.json')
     # the same checks must not be counted twice in the summary
