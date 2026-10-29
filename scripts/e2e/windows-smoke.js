@@ -719,8 +719,9 @@ async function unicode() {
 //  LOG COLLECTION (redacted) and SUMMARY
 // ═════════════════════════════════════════════════════════════════════════════════════════
 const JWT_RE = /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g;
+const CLOUD_HOST_RE = /\b[a-z0-9]{18,24}\.supabase\.co\b/g;      // the app prints its cloud project's host in its presence log: a production id, not for a public artifact
 function redact(text) {
-  let t = String(text).replace(JWT_RE, '[jwt]');
+  let t = String(text).replace(JWT_RE, '[jwt]').replace(CLOUD_HOST_RE, '[cloud-host].supabase.co').replace(/apikey=eyJ[^\s&"']*/g, 'apikey=[redacted]');
   for (const v of [...secretValues].sort((a, b) => b.length - a.length)) if (v && v.length >= 6) t = t.split(v).join('[secret]');
   return t.replace(/(x-texacore-local-secret["':\s=]+)[A-Za-z0-9_\-]{12,}/gi, '$1[secret]');
 }
@@ -750,7 +751,7 @@ function collect() {
   // the harness keeps its app-N.log beside the work folder
   for (const d of dirs) { const wd = path.dirname(d); for (const f of fs.readdirSync(wd).filter((x) => /^app-.*\.log$/.test(x))) { fs.writeFileSync(path.join(dest, `${path.basename(wd)}-${f}`), redact(fs.readFileSync(path.join(wd, f), 'utf8'))); n += 1; } }
   // final scan: nothing uploaded may hold a secret
-  const hits = []; const scan = (dir) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const f = path.join(dir, e.name); if (e.isDirectory()) scan(f); else if (/\.(log|json|txt|md|yml)$/i.test(f)) { const t = fs.readFileSync(f, 'utf8'); if (JWT_RE.test(t) || [...secretValues].some((v) => v.length >= 6 && t.includes(v))) hits.push(f); JWT_RE.lastIndex = 0; } } };
+  const hits = []; const scan = (dir) => { for (const e of fs.readdirSync(dir, { withFileTypes: true })) { const f = path.join(dir, e.name); if (e.isDirectory()) scan(f); else if (/\.(log|json|txt|md|yml)$/i.test(f)) { const t = fs.readFileSync(f, 'utf8'); if (JWT_RE.test(t) || CLOUD_HOST_RE.test(t) || [...secretValues].some((v) => v.length >= 6 && t.includes(v))) hits.push(f); JWT_RE.lastIndex = 0; CLOUD_HOST_RE.lastIndex = 0; } } };
   scan(OUT);
   for (const f of hits) fs.rmSync(f, { force: true });
   fs.writeFileSync(path.join(OUT, 'secret-scan.json'), JSON.stringify({ filesCopied: n, secretsKnown: secretValues.size, filesRemovedForSecrets: hits.map((h) => path.relative(OUT, h)) }, null, 2));

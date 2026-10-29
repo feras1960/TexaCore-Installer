@@ -154,12 +154,12 @@ switch ($Step) {
         New-Item -ItemType Directory -Force -Path $v.path | Out-Null          # the app creates the folder first (fs.mkdirSync recursive), initdb then "fixes permissions on the existing directory"
         $out = & $initdb -D $v.path -U postgres -E UTF8 --locale-provider=icu --icu-locale=en-US --locale=C --auth=scram-sha-256 "--pwfile=$pw" 2>&1
         $code = $LASTEXITCODE
-        $text = ($out | Out-String)
-        $err = (($text -split "\r?\n" | Where-Object { $_ -match 'error|could not|denied|fatal' }) | Select-Object -First 2) -join ' | '
+        $text = (($out | Out-String) -replace '\s+', ' ').Trim()
+        $err = $text.Substring([Math]::Max(0, $text.Length - 230))        # initdb prints its error last
       } catch { $err = $_.Exception.Message }
       $secs = [math]::Round(((Get-Date) - $t0).TotalSeconds, 1)
       $acl = ''; try { $acl = ((Get-Acl (Split-Path $v.path -Parent)).Access | Select-Object -First 3 | ForEach-Object { "$($_.IdentityReference):$($_.FileSystemRights)" }) -join ' | ' } catch { }
-      Add-Check $s ("P  initdb (the app's exact command line) on: " + $v.id) ($code -eq 0) ("exit {0} in {1} s; {2}{3}" -f $code, $secs, $(if ($err) { $err } else { 'cluster created' }), $(if ($code -ne 0 -and $acl) { "; parent ACL: $acl" } else { '' })) -Warn:(-not $v.strict)
+      Add-Check $s ("P  initdb (the app's exact command line) on: " + $v.id) ($code -eq 0) ("exit {0} in {1} s; {2}{3}" -f $code, $secs, $(if ($code -ne 0 -and $err) { '...' + $err } else { 'cluster created' }), $(if ($code -ne 0 -and $acl) { "; parent ACL: $acl" } else { '' })) -Warn:(-not $v.strict)
       Remove-Item -Recurse -Force (Split-Path $v.path -Parent) -ErrorAction SilentlyContinue
     }
     Remove-Item $pw -Force -ErrorAction SilentlyContinue
