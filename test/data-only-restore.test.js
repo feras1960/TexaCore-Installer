@@ -52,7 +52,7 @@ test('F1: the reviewer\'s ENABLE ALWAYS trigger dump is refused by the scan; wit
   assert.match(s, /COPY public\.loot \(a\) FROM stdin;\n5\n\\\.\n/);
 });
 
-test('the script is BUILT: every COPY header is rebuilt from the names it parsed into (comments, odd spacing, quoted names), the data lines pass through byte for byte (UTF-8, CRLF, backslashes, \\N), sequence values only in the one literal shape', () => {
+test('the script is BUILT: every COPY header is rebuilt from the names it parsed into (comments, odd spacing, quoted names), the data lines pass through byte for byte (UTF-8, backslashes, \\N; a CRLF line end is turned into LF, 2.0.7 - see crlf-dump.test.js), sequence values only in the one literal shape', () => {
   const data = 'a1\tسلام العالم \\N\n' + 'b2\tback\\\\slash \\t tab\r\n' + '\\x41 starts with a backslash\tüñí\n';
   const sql = [
     "SET client_encoding = 'UTF8';",
@@ -70,7 +70,9 @@ test('the script is BUILT: every COPY header is rebuilt from the names it parsed
   const t = text(r);
   assert.match(t, /COPY public\.companies \(id, name\) FROM stdin;\n/);
   assert.ok(t.includes('COPY public."Odd Name" ("Odd Col", b) FROM stdin;\n'));
-  assert.ok(r.script.includes(Buffer.from(data, 'utf8')), 'the data lines are in the script byte for byte');
+  // 2.0.7: the fixture's second line ends CRLF (a Windows writer); psql refuses a COPY whose line ends differ from its `\\.` terminator, so every line end is LF in the script
+  assert.ok(r.script.includes(Buffer.from(data.replace(/\r\n/g, '\n'), 'utf8')), 'the data lines are in the script byte for byte (line ends LF)');
+  assert.ok(!r.script.includes(0x0d), 'no CR in the script');
   assert.ok(!t.includes('/* a comment */') && !t.includes('public . companies'));
   assert.match(t, /SELECT pg_catalog\.setval\('public\.companies_seq', 42, true\);\n/);
   assert.match(t, /SELECT pg_catalog\.setval\('public\.x_seq', -1, false\);\n/);

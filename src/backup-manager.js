@@ -259,7 +259,8 @@ class BackupManager {
   async _produce(keyOverride) {
       // Step 1: Run pg_dump to get SQL dump
       this.onProgress('dump', 'تصدير قاعدة البيانات...');
-      const dumpData = await this._pgDump();
+      // 2.0.7: pg_dump on Windows writes CRLF; the file is always written with LF so it opens on any platform (and on a 2.0.6 build, which cannot read a CRLF dump)
+      const dumpData = sqlGuard.normalizeNewlines(await this._pgDump());
 
       // Step 1.5: Verify dump completeness — CRITICAL: prevent empty backups
       this.onProgress('verify', 'التحقق من اكتمال البيانات...');
@@ -464,7 +465,9 @@ class BackupManager {
     return new Promise((resolve, reject) => {
       zlib.gunzip(data, (err, result) => {
         if (err) reject(err);
-        else resolve(result);
+        // 2.0.7: a company file written on Windows holds CRLF line ends (Windows pg_dump) - psql refuses a COPY whose terminator does not match them and the restore ended with
+        // the tables empty. Every reader of the dump (the scan, the plan, the tracking-mode check, the login step) gets LF only; a Mac / Linux file comes back unchanged (no copy).
+        else resolve(sqlGuard.normalizeNewlines(result));
       });
     });
   }

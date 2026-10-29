@@ -14,6 +14,7 @@ const { getOrCreateSecrets } = require('./secrets');
 const { getVendorAccount } = require('./vendor-support');
 const { PORTS, harnessAllowed } = require('./ports');
 const bootstrap = require('./bootstrap');
+const { asciiSafePath } = require('./ascii-path');   // 2.0.7: the ANSI programs (initdb / pg_ctl) get an ASCII-only name for a folder with a non-ASCII name
 const { validateAdminPassword, adminPasswordProblem, defaultAdminPasswordFor } = require('./admin-password');
 const netGuard = require('./net-guard');
 const { openBaselineStore } = require('./baseline-store');
@@ -415,7 +416,7 @@ class ServiceManager {
 
     return new Promise((resolve, reject) => {
       const proc = spawn(initdb, [
-        '-D', this.pgDataDir,
+        '-D', asciiSafePath(this.pgDataDir),
         '-U', 'postgres',
         '-E', 'UTF8',
         '--locale-provider=icu',
@@ -425,7 +426,7 @@ class ServiceManager {
         // there is no such libc name, and an invalid one would stop initdb — "C" is the one value that is always valid there.
         `--locale=${this.isWindows ? 'C' : 'en_US.UTF-8'}`,
         '--auth=scram-sha-256',          // NO trust, not even while bootstrapping: every client (ours included) presents a password
-        `--pwfile=${pwFile}`,
+        `--pwfile=${asciiSafePath(pwFile)}`,
       ], { env: this._pgEnv() });
 
       let errOut = '';
@@ -540,7 +541,7 @@ class ServiceManager {
       if (fs.existsSync(pidFile)) {
         try {
           const pgCtl = path.join(this.pgBin, this.isWindows ? 'pg_ctl.exe' : 'pg_ctl');
-          execSync(`"${pgCtl}" stop -D "${this.pgDataDir}" -m fast -w -t 15`, { env: this._pgEnv(), timeout: 20000, stdio: 'ignore' });
+          execSync(`"${pgCtl}" stop -D "${asciiSafePath(this.pgDataDir)}" -m fast -w -t 15`, { env: this._pgEnv(), timeout: 20000, stdio: 'ignore' });
           console.log('[ServiceManager] Leftover PostgreSQL stopped via pg_ctl');
           await this._sleep(1000);
         } catch { /* fall through to the re-check */ }
@@ -565,7 +566,7 @@ class ServiceManager {
     }
 
     const pgEnv = this._pgEnv();
-    pgEnv.PGDATA = this.pgDataDir;
+    pgEnv.PGDATA = asciiSafePath(this.pgDataDir);
     if (!this.isWindows) {
       pgEnv.LC_ALL = 'en_US.UTF-8';
       pgEnv.LANG = 'en_US.UTF-8';
@@ -577,7 +578,7 @@ class ServiceManager {
       console.log('[ServiceManager] Using pg_ctl to start PostgreSQL on Windows');
       try {
         // -w waits for start. -t 30 sets timeout. -l sets log file. -o passes options to postgres.exe
-        execSync(`"${pgCtl}" start -D "${this.pgDataDir}" -l "${logFile}" -w -t 30 -o "-p ${PG_PORT}"`, { env: pgEnv, stdio: 'ignore' });
+        execSync(`"${pgCtl}" start -D "${asciiSafePath(this.pgDataDir)}" -l "${asciiSafePath(logFile)}" -w -t 30 -o "-p ${PG_PORT}"`, { env: pgEnv, stdio: 'ignore' });
         this.processes.postgres = { isPgCtl: true }; // dummy object to track status
         console.log('[ServiceManager] PostgreSQL is ready via pg_ctl');
         await this._hardenAuth();
@@ -2001,7 +2002,7 @@ window.__TEXACORE_CONFIG__ = {
     if (this.processes.postgres) {
       try {
         const pgCtl = this.isWindows ? 'pg_ctl.exe' : 'pg_ctl';
-        execSync(`"${path.join(this.pgBin, pgCtl)}" -D "${this.pgDataDir}" stop -m fast`, { timeout: 10000 });
+        execSync(`"${path.join(this.pgBin, pgCtl)}" -D "${asciiSafePath(this.pgDataDir)}" stop -m fast`, { timeout: 10000 });
       } catch {
         this._killProcess('postgres');
       }

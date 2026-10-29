@@ -578,17 +578,8 @@ class HeartbeatSender {
     let diskUsedPercent = null;
     try {
       if (process.platform === 'win32') {
-        const { execSync } = require('child_process');
-        const out = execSync('wmic logicaldisk get size,freespace,caption /format:csv', { encoding: 'utf8', timeout: 5000 });
-        const lines = out.trim().split('\n').filter(l => l.includes(','));
-        if (lines.length > 1) {
-          const parts = lines[1].split(',');
-          if (parts.length >= 4) {
-            const free = parseInt(parts[2]);
-            const total = parseInt(parts[3]);
-            if (total > 0) diskUsedPercent = +((1 - free / total) * 100).toFixed(1);
-          }
-        }
+        // 2.0.7: wmic is missing on Windows 11 24H2 / Server 2025 - win-info asks it first and falls back to PowerShell (Get-CimInstance); telemetry only
+        diskUsedPercent = require('./win-info').diskUsedPercent();
       }
     } catch {}
 
@@ -640,9 +631,8 @@ class HeartbeatSender {
     let osEdition = `${process.platform} ${os.release()} ${process.arch}`;
     try {
       if (process.platform === 'win32') {
-        const caption = execSync('wmic os get Caption /format:list', { encoding: 'utf8', timeout: 3000 });
-        const match = caption.match(/Caption=(.+)/);
-        if (match) osEdition = `${match[1].trim()} (${process.arch})`;
+        const caption = require('./win-info').osCaption();   // 2.0.7: wmic first, Get-CimInstance when wmic is missing (telemetry only)
+        if (caption) osEdition = `${caption} (${process.arch})`;
       }
     } catch {}
 

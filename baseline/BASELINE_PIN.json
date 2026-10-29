@@ -2,8 +2,8 @@
   "schema": 1,
   "pgMajor": 17,
   "cutTimestamp": "2026-10-13T13:21:12.253Z",
-  "erpCommit": "7584141de4a9cdd53cffbf99c7e803b897b3036b",
-  "erpBranch": "claude/release-2.0.6",
+  "erpCommit": "cf53de1073a76c9a5586c508ac348f9e9e62dbd3",
+  "erpBranch": "claude/release-2.0.7",
   "files": {
     "production_baseline.sql": {
       "source": "supabase/baseline/production_baseline.sql",

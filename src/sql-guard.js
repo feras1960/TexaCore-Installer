@@ -278,9 +278,33 @@ function finish(out, raw, add) {
   return out;
 }
 
+const CRLF = Buffer.from('\r\n', 'latin1');
+/**
+ * CRLF -> LF over a whole dump (2.0.7). pg_dump on Windows writes every line ending as CRLF (a real Windows dump: 289,056 CRLF, 0 LF) while the COPY terminator this module
+ * appends is `\.` + LF; psql then stops every COPY with «end-of-copy marker does not match previous newline style», loads nothing and the restore ends with the tables
+ * EMPTY. A COPY text stream never holds a raw CR or LF inside a value (they are written as the two characters `\r` and `\n`), so every raw CRLF of a dump is a line ending
+ * and turning it into LF loses nothing - for the data AND, since Windows text mode only turned each LF into CRLF, for the DDL text too. A dump written by a Mac / Linux
+ * pg_dump has no CRLF: the very same Buffer comes back (no copy). Used before every guard / parse step and on the restore script, so a Windows-made file restores on a Mac
+ * and a Mac-made file on Windows. Accepts a Buffer or a string; returns the same kind.
+ */
+function normalizeNewlines(input) {
+  if (!Buffer.isBuffer(input)) return String(input).replace(/\r\n/g, '\n');
+  let i = input.indexOf(CRLF);
+  if (i === -1) return input;
+  const out = Buffer.allocUnsafe(input.length);
+  let w = 0; let r = 0;
+  while (i !== -1) {
+    w += input.copy(out, w, r, i);      // everything up to the CR; the CR is dropped, the LF that follows is copied with the next piece
+    r = i + 1;
+    i = input.indexOf(CRLF, r);
+  }
+  w += input.copy(out, w, r, input.length);
+  return out.subarray(0, w);
+}
+
 /** The whole report: { findings: [{kind, line}], statements, copyBlocks }. Never throws on content. */
 function scanDump(input) {
-  const text = Buffer.isBuffer(input) ? input.toString('utf8') : String(input);
+  const text = normalizeNewlines(Buffer.isBuffer(input) ? input.toString('utf8') : String(input));
   const { statements, findings, copyBlocks } = lex(text);
   const all = [...findings];
   for (const st of statements) for (const f of checkStatement(st)) { if (all.length < 100) all.push(f); }
@@ -311,7 +335,7 @@ function assertSafeDump(input) {
 function prepareDump(input, { before = '', after = '', key = crypto.randomBytes(24).toString('hex'), strip = true } = {}) {
   // byte for byte: the dump is read as latin1 (one char per byte) so no byte of it is ever re-encoded; only whole lines of the two \restrict kinds are dropped
   // (strip:false = not even those: the script is the program's own, built by renderDataScript(), and its COPY data is passed on exactly as it came)
-  const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input), 'utf8');
+  const buf = normalizeNewlines(Buffer.isBuffer(input) ? input : Buffer.from(String(input), 'utf8'));   // 2.0.7: a CRLF script is never handed to psql
   const body = strip ? buf.toString('latin1').split('\n').filter((l) => !/^\\(restrict|unrestrict) [A-Za-z0-9]{8,200}\r?$/.test(l)).join('\n') : buf.toString('latin1');
   return Buffer.concat([Buffer.from(`\\restrict ${key}\n${before}`, 'latin1'), Buffer.from(body, 'latin1'), Buffer.from(`${after}\n\\unrestrict ${key}\n`, 'latin1')]);
 }
@@ -384,7 +408,8 @@ function identName(tok) {
  * `start`/`end` are BYTE offsets of the block's data lines in the input. Run assertSafeDump() first; this only decides what is taken.
  */
 function planDataRestore(input) {
-  const buf = Buffer.isBuffer(input) ? input : Buffer.from(String(input), 'utf8');
+  // 2.0.7: a dump written by Windows has CRLF line ends; the byte offsets below (and plan.bytes, which renderDataScript cuts the data from) are those of the LF-normalised bytes
+  const buf = normalizeNewlines(Buffer.isBuffer(input) ? input : Buffer.from(String(input), 'utf8'));
   const text = buf.toString('latin1');                 // one char per byte: every offset below is a byte offset
   const { statements, copies } = lex(text);
   const copyOf = new Map(copies.map((c) => [c.stmt, c]));
@@ -427,7 +452,7 @@ function renderDataScript(plan, { known = null, before = '', after = '' } = {}) 
   let loaded = 0;
   for (const b of plan.blocks) {
     if (b.schema === 'auth' && (b.table === 'users' || b.table === 'identities')) {
-      if (!auth[b.table] && (!known || known.has(b.qualified))) auth[b.table] = piece(b);   // the first block of each, like the previous restore
+      if (!auth[b.table] && (!known || known.has(b.qualified))) auth[b.table] = normalizeNewlines(piece(b));   // the first block of each, like the previous restore
       continue;
     }
     if (b.schema === 'auth') { skipped.push({ table: b.qualified, why: 'auth-other' }); continue; }   // GoTrue's own bookkeeping (sessions, tokens, audit log, its migrations): never carried between installs
@@ -439,8 +464,8 @@ function renderDataScript(plan, { known = null, before = '', after = '' } = {}) 
   const head = Buffer.from(
     // what the dump's own first lines used to set, now the program's: UTF-8 data, no time limits on a long COPY, replica role (foreign keys / user triggers off, as before)
     `SET client_encoding = 'UTF8';\nSET standard_conforming_strings = on;\nSET statement_timeout = 0;\nSET lock_timeout = 0;\nSET idle_in_transaction_session_timeout = 0;\n${before}`, 'latin1');
-  const script = Buffer.concat([head, ...parts, ...seq.map((x) => x), Buffer.from(`${after}`, 'latin1')]);
+  const script = normalizeNewlines(Buffer.concat([head, ...parts, ...seq.map((x) => x), Buffer.from(`${after}`, 'latin1')]));   // 2.0.7: whatever came in, psql gets LF only (its `\\.` terminator is LF)
   return { script, tables, auth, skipped, loaded };
 }
 
-module.exports = { scanDump, assertSafeDump, prepareDump, planDataRestore, renderDataScript, parseCopyHeader, lex, checkStatement, KIND_TEXT, SAFE_EXTENSIONS };
+module.exports = { normalizeNewlines, scanDump, assertSafeDump, prepareDump, planDataRestore, renderDataScript, parseCopyHeader, lex, checkStatement, KIND_TEXT, SAFE_EXTENSIONS };

@@ -108,7 +108,7 @@ test('create-local-company refuses a dbFileName that is not a plain name before 
 test('database authentication: initdb is scram with a pwfile (not argv), nothing in the installer asks for trust except the one-off recovery rule, psql never prompts', () => {
   const sm = lineCode(all.find((x) => x.f === 'service-manager.js').text);
   assert.match(sm, /'--auth=scram-sha-256'/);
-  assert.match(sm, /`--pwfile=\$\{pwFile\}`/);
+  assert.match(sm, /`--pwfile=\$\{(?:asciiSafePath\(pwFile\)|pwFile)\}`/);   // 2.0.7: the same file, by its ASCII-only name on Windows (ascii-path.js)
   assert.doesNotMatch(sm, /--auth=trust|--auth-host=trust|--auth-local=trust/);
   assert.doesNotMatch(sm, /'host\s+all\s+all\s+127\.0\.0\.1\/32\s+trust'/, 'no hand-written trust rule');
   assert.match(sm, /_writeHba\(\{ trust: true \}\)/, 'the recovery rule exists, once');
