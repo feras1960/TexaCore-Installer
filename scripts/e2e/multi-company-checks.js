@@ -8,6 +8,7 @@
 //       token (the shipped bundle carries the desktop gate and its reason in every language; no public token exists in the database)
 //   9.13 R6-1 (build #7): the installer-created owner has tenant_id in user_metadata AND app_metadata (database row and session token), and saves a material card from the real materials page
 //   9.14 B-4 (20270243n, 2.0.6): on a fresh desktop company resolve_writeoff_expense_account returns 592 «فروق المخزون», and an approved write-off posts its entry (variance debited, inventory credited, the stock out) and reverses
+//   9.15 ج-1 (20270243o, 2.0.6): a container of NON-fabric goods received through complete_goods_receipt_full with rolls [] writes its receipt WITH lines, the movements, a balanced entry (Dr inventory / Cr the container account), container_items.received_quantity and status 'received'; a replay with the same request_key changes nothing; the shipped web bundle carries the client path (the 'grnq_' key)
 const fs = require('fs');
 const path = require('path');
 const { spawnSync } = require('child_process');
@@ -445,6 +446,76 @@ async function multiCompanyChecks(R, ctx) {
     if ((await qty()) !== 10) throw new Error(`stock after the reversal ${await qty()} (expected 10)`);
     const left = (await pg(`SELECT count(*)::int AS n FROM public.journal_entries WHERE id = $1 AND COALESCE(is_deleted, false) = false AND COALESCE(status, '') NOT IN ('deleted','cancelled','reversed')`, [post.json.journal_entry_id])).rows[0].n;
     return `resolver → 592 (settings variance account ${set && set.v ? 'set' : 'NOT set - the resolver fell back to the chart'}); write-off of 4 at 5: entry ${String(post.json.journal_entry_id).slice(0, 8)}… Dr 592 20 / Cr inventory 20, stock 10 -> 6, gl_skipped false; reversal: stock back to 10, live entries left ${left}`;
+  });
+
+  // ── ج-1 (20270243o, 2.0.6): a container of goods WITHOUT rolls is received through the same server door as a fabric container; the receipt must carry its LINES ──
+  await R.check('9.15 ج-1 (20270243o): a container of NON-fabric goods (footwear 100 @ 10 USD, chemical 50 @ 4 USD, rate 40) received through complete_goods_receipt_full with rolls [] as the owner writes its receipt WITH 2 lines (material_id, received = accepted, note «quantity receipt»), 2 container_receipt movements, a balanced entry Dr inventory / Cr the container account (48,000), container_items.received_quantity = the quantity, container status received, stock 100 / 50; a replay with the same request_key (another receipt number) is a no-op; and the shipped web bundle carries the client path (grnq_)', async () => {
+    const co = S.companies[0].id; const crypto = require('crypto');
+    const u = (await pg('SELECT id FROM public.user_profiles WHERE tenant_id = $1 ORDER BY created_at LIMIT 1', [S.tenantId])).rows[0].id;
+    const wh = (await pg('SELECT id FROM public.warehouses WHERE company_id = $1 ORDER BY created_at LIMIT 1', [co])).rows[0];
+    const sett = (await pg('SELECT default_inventory_account_id AS inv, default_container_shortage_account_id AS short FROM public.company_accounting_settings WHERE company_id = $1', [co])).rows[0];
+    if (!wh || !sett || !sett.inv) throw new Error(`the company lacks a warehouse or its default inventory account (${JSON.stringify({ wh: !!wh, sett })})`);
+    const pay = (await pg(`SELECT id FROM public.chart_of_accounts WHERE company_id = $1 AND account_code LIKE '2%' AND NOT COALESCE(is_group, false) AND NOT COALESCE(is_summary_account, false) AND COALESCE(is_active, true) ORDER BY account_code LIMIT 1`, [co])).rows[0];
+    if (!pay) throw new Error('the chart has no postable (not group, not summary) 2xxx liability account');
+    if (!sett.short) {   // a SHORT container needs the shortage account (20270242u); this one arrives in full, the setting is filled in so the scenario cannot trip on it
+      const exp = (await pg(`SELECT id FROM public.chart_of_accounts WHERE company_id = $1 AND account_code LIKE '5%' AND NOT COALESCE(is_group, false) AND COALESCE(is_active, true) ORDER BY account_code LIMIT 1`, [co])).rows[0];
+      if (exp) await pg('UPDATE public.company_accounting_settings SET default_container_shortage_account_id = $2 WHERE company_id = $1', [co, exp.id]);
+    }
+    const tag = crypto.randomBytes(3).toString('hex'); const sup = crypto.randomUUID(); const shoe = crypto.randomUUID(); const chem = crypto.randomUUID(); const ct = crypto.randomUUID();
+    await pg(`INSERT INTO public.suppliers (id, tenant_id, company_id, code, name_ar, name_en, currency, status) VALUES ($1,$2,$3,$4,'مورّد حاوية','Container supplier','USD','active')`, [sup, S.tenantId, co, 'LC-SUP-' + tag]);
+    await pg(`INSERT INTO public.fabric_materials (id, tenant_id, company_id, code, name_ar, material_type, unit, currency) VALUES ($1,$2,$3,$4,'حذاء حاوية','footwear','pair','USD'), ($5,$2,$3,$6,'كيميائي حاوية','chemical','kg','USD')`, [shoe, S.tenantId, co, 'LC-SHOE-' + tag, chem, 'LC-CHEM-' + tag]);
+    await pg(`INSERT INTO public.containers (id, tenant_id, company_id, container_number, status, supplier_id, goods_currency, goods_exchange_rate, total_expected_items, currency) VALUES ($1,$2,$3,$4,'cleared',$5,'USD',40,0,'USD')`, [ct, S.tenantId, co, 'LC-' + tag, sup]);
+    await pg(`INSERT INTO public.container_items (tenant_id, container_id, material_id, expected_quantity, unit_cost, unit_price, unit, item_description) VALUES ($1,$2,$3,100,10,10,'pair','shoes'), ($1,$2,$4,50,4,4,'kg','chemical')`, [S.tenantId, ct, shoe, chem]);
+    const acc = (await pg('SELECT container_account_id AS a FROM public.containers WHERE id = $1', [ct])).rows[0].a;
+    if (!acc) throw new Error('the container got no account of its own (the containers trigger)');
+    // the goods' value on the container account, in the company's currency: what a purchase invoice linked to the container posts (Dr container account / Cr the supplier's payable)
+    const today = new Date().toISOString().slice(0, 10); const je = crypto.randomUUID(); const value = (100 * 10 + 50 * 4) * 40;
+    await pg(`INSERT INTO public.journal_entries (id, tenant_id, company_id, entry_number, entry_date, entry_type, description, status, is_posted, total_debit, total_credit, created_by)
+              VALUES ($1,$2,$3,public.fn_allocate_journal_entry_number($3, $4::date),$4::date,'auto','launch-check goods value on the container account','draft',false,$5,$5,$6)`, [je, S.tenantId, co, today, value, u]);
+    await pg(`INSERT INTO public.journal_entry_lines (tenant_id, entry_id, line_number, account_id, description, debit, credit) VALUES ($1,$2,1,$3,'container goods',$5,0), ($1,$2,2,$4,'supplier',0,$5)`, [S.tenantId, je, acc, pay.id, value]);
+    await pg('SELECT public.post_journal_entry($1, $2)', [je, u]);
+    const payload = (number, key) => ({ tenant_id: S.tenantId, company_id: co, warehouse_id: wh.id, supplier_id: sup, source_document_id: ct, source_document_type: 'container', source_document_number: 'LC-' + tag,
+      receipt_number: number, receipt_date: today, request_key: key, movement_ref_number: number, notes: 'launch-check', actual_total: 1200,
+      items: [{ material_id: shoe, quantity: 100, roll_count: 0, unit_cost: 10 }, { material_id: chem, quantity: 50, roll_count: 0, unit_cost: 4 }], rolls: [],
+      variance: { status: 'ok', amount: 0, pct: 0, tolerance_pct: 1 } });
+    const key = `grnq_${ct}_lc${tag}_2`;
+    const t = await signIn(); const auth = { apikey: anonKey, Authorization: `Bearer ${t.access_token}` };
+    const call = (p) => request('POST', `${API}/rest/v1/rpc/complete_goods_receipt_full`, { headers: auth, body: { p_payload: p } });
+    const snap = async () => {
+      const r = (name) => name;
+      const receipts = (await pg(`SELECT id, receipt_type, status, receipt_number, journal_entry_id FROM public.purchase_receipts WHERE container_id = $1 ORDER BY created_at`, [ct])).rows;
+      const lines = (await pg(`SELECT i.material_id, i.product_id, i.quantity_received::float8 AS rec, i.quantity_accepted::float8 AS acc, i.quantity_rejected::float8 AS rej, i.notes FROM public.purchase_receipt_items i JOIN public.purchase_receipts r ON r.id = i.receipt_id WHERE r.container_id = $1 ORDER BY i.quantity_received`, [ct])).rows;
+      const mv = (await pg(`SELECT m.movement_type, m.quantity::float8 AS q FROM public.inventory_movements m JOIN public.purchase_receipts r ON r.id = m.reference_id AND m.reference_type = 'goods_receipt' WHERE r.container_id = $1 ORDER BY m.quantity`, [ct])).rows;
+      const entry = (await pg(`SELECT l.account_id, l.debit::float8 AS d, l.credit::float8 AS c FROM public.journal_entries e JOIN public.journal_entry_lines l ON l.entry_id = e.id JOIN public.purchase_receipts r ON r.id = e.reference_id AND e.reference_type = 'goods_receipt' WHERE r.container_id = $1 ORDER BY l.line_number`, [ct])).rows;
+      const items = (await pg(`SELECT material_id, expected_quantity::float8 AS exp, received_quantity::float8 AS rec FROM public.container_items WHERE container_id = $1 ORDER BY expected_quantity`, [ct])).rows;
+      const cont = (await pg('SELECT status, total_received_items::float8 AS tot FROM public.containers WHERE id = $1', [ct])).rows[0];
+      const stock = (await pg('SELECT material_id, quantity_on_hand::float8 AS q FROM public.inventory_stock WHERE warehouse_id = $1 AND material_id = ANY($2) ORDER BY quantity_on_hand', [wh.id, [shoe, chem]])).rows;
+      return { receipts, lines, mv, entry, items, cont, stock };
+    };
+    const first = await call(payload('GRN-LC-' + tag + '-1', key));
+    if (first.status !== 200 || !first.json || first.json.success !== true || first.json.already_processed === true) throw new Error(`complete_goods_receipt_full → ${first.status} ${first.text.slice(0, 300)}`);
+    if (Number(first.json.items) !== 2) throw new Error(`the receipt answered items = ${first.json.items} (the receipt has no lines: expected 2)`);
+    const a = await snap();
+    if (a.receipts.length !== 1 || a.receipts[0].receipt_type !== 'container' || a.receipts[0].status !== 'completed' || !a.receipts[0].journal_entry_id) throw new Error(`receipts ${JSON.stringify(a.receipts)}`);
+    if (JSON.stringify(a.lines.map((l) => [l.rec, l.acc, l.rej, l.notes, !!l.material_id, !l.product_id])) !== JSON.stringify([[50, 50, 0, 'quantity receipt', true, true], [100, 100, 0, 'quantity receipt', true, true]])) throw new Error(`receipt lines ${JSON.stringify(a.lines)}`);
+    if (a.mv.length !== 2 || a.mv.some((m) => m.movement_type !== 'container_receipt')) throw new Error(`movements ${JSON.stringify(a.mv)}`);
+    const dr = a.entry.reduce((x, l) => x + l.d, 0); const cr = a.entry.reduce((x, l) => x + l.c, 0);
+    if (dr !== cr || dr !== value) throw new Error(`the entry is ${dr} / ${cr} (expected a balanced ${value}); lines ${JSON.stringify(a.entry)}`);
+    if (a.entry.length !== 2 || !a.entry.some((l) => l.account_id === sett.inv && l.d === value) || !a.entry.some((l) => l.account_id === acc && l.c === value)) throw new Error(`the entry is not Dr inventory / Cr the container account: ${JSON.stringify(a.entry)}`);
+    if (a.items.some((i) => i.rec !== i.exp)) throw new Error(`container_items ${JSON.stringify(a.items)}`);
+    if (a.cont.status !== 'received' || a.cont.tot !== 150) throw new Error(`container ${JSON.stringify(a.cont)} (expected received, 150)`);
+    if (JSON.stringify(a.stock.map((x) => x.q)) !== JSON.stringify([50, 100])) throw new Error(`stock ${JSON.stringify(a.stock)}`);
+    const replay = await call(payload('GRN-LC-' + tag + '-2', key));
+    if (replay.status !== 200 || !replay.json || replay.json.success !== true || replay.json.already_processed !== true || replay.json.receipt_id !== first.json.receipt_id) throw new Error(`the replay → ${replay.status} ${replay.text.slice(0, 240)}`);
+    const b = await snap();
+    if (JSON.stringify(b) !== JSON.stringify(a)) throw new Error('the replay changed something');
+    // the client path ships in the web bundle the app serves: the PWA precache list names every chunk
+    const sw = await request('GET', `${UI}/sw.js`, {});
+    const chunks = [...new Set([...String(sw.text).matchAll(/["'](?:\.?\/)?(assets\/[^"']+\.js)["']/g)].map((m) => m[1]))];
+    if (!chunks.length) throw new Error(`the service worker lists no script (sw.js → ${sw.status})`);
+    let found = ''; for (const c of chunks) { const r = await request('GET', `${UI}/${c}`, {}); if (r.status === 200 && String(r.text).includes('grnq_')) { found = c; break; } }
+    if (!found) throw new Error(`none of the ${chunks.length} scripts the app serves carries the container quantity-receipt key (grnq_): the shipped frontend is older than ج-1`);
+    return `receipt ${String(first.json.receipt_id).slice(0, 8)}… (container, completed, 2 lines: 100 + 50, accepted = received, rejected 0), 2 container_receipt movements, entry Dr inventory / Cr container account ${value} (balanced), container_items received = expected, container received (150), stock 100 / 50; replay with the same key: already_processed, same receipt, nothing changed; client path grnq_ found in ${found}`;
   });
 }
 

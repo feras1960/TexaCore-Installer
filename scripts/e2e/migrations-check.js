@@ -84,6 +84,8 @@ const V_MD5 = {
 };
 // 20270243n (B-4, 2.0.6): the three write-off functions' md5(prosrc) after the migration = production's post-image (the fingerprints the coordinator recorded when it was applied, 29-10 06:05)
 const V2_MD5 = { 'resolve_writeoff_expense_account(uuid)': '2de4abe2f72b0a645987a3f6d947d2c9', 'post_inventory_writeoff(uuid)': '312b2192d348a4dd07e71bf64fbfa948', 'reverse_inventory_writeoff(uuid)': '8c34fc7fe7245128b15dd64c01c3b69a' };
+// 20270243o (ج-1, 2.0.6): complete_goods_receipt_full after the migration = production's post-image (applied 29-10; pre-image ab0cd620…)
+const V3_MD5 = { 'complete_goods_receipt_full(jsonb)': 'aaa5a5da519d3acae7d3bd3d7396df03' };
 
 const binOf = (app) => (app ? path.join(app, 'Contents', 'MacOS', path.basename(app, '.app')) : '');
 const resOf = (app) => (app ? path.join(app, 'Contents', 'Resources') : ROOT);
@@ -670,6 +672,13 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
     const bad = Object.entries(V2_MD5).filter(([sig, md5]) => !local.has(sig) || local.get(sig).md5 !== md5).map(([sig]) => `${sig}: ${local.has(sig) ? local.get(sig).md5.slice(0, 8) : 'missing'}`);
     if (bad.length) throw new Error(`${bad.join('; ')}`);
     return `${Object.keys(V2_MD5).length}/${Object.keys(V2_MD5).length} md5 equal production's post-image`;
+  });
+
+  await R.check('V3 20270243o: complete_goods_receipt_full has production\'s post-image md5 (aaa5a5da…; the pre-image ab0cd620… is what the migration\'s own gate accepted)', async () => {
+    const local = fnMap(post);
+    const bad = Object.entries(V3_MD5).filter(([sig, md5]) => !local.has(sig) || local.get(sig).md5 !== md5).map(([sig]) => `${sig}: ${local.has(sig) ? local.get(sig).md5.slice(0, 8) : 'missing'}`);
+    if (bad.length) throw new Error(`${bad.join('; ')}`);
+    return `${Object.keys(V3_MD5).length}/${Object.keys(V3_MD5).length} md5 equal production's post-image`;
   });
 
   // ═════════ the inventory delta of the migrations (what manifest.inventoryAfter carries) ═════════
