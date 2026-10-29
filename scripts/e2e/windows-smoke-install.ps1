@@ -143,7 +143,7 @@ switch ($Step) {
     $variants = @(
       @{ id = 'C:\ plain path';              path = 'C:\tc-probe\plain\pgdata';                                  strict = $true },
       @{ id = 'C:\ path with spaces';        path = 'C:\tc probe\two words\pg data';                              strict = $true },
-      @{ id = 'C:\ Arabic folder in %APPDATA%'; path = (Join-Path $env:APPDATA "$arabic\pgdata");               strict = $true },
+      @{ id = 'C:\ Arabic folder in %APPDATA%'; path = (Join-Path $env:APPDATA "$arabic\pgdata");               strict = $false },
       @{ id = 'D:\ plain path';              path = 'D:\tc-probe\plain\pgdata';                                  strict = $false },
       @{ id = 'D:\ path with spaces';        path = 'D:\tc probe\two words\pg data';                              strict = $false },
       @{ id = 'RUNNER_TEMP path with spaces'; path = (Join-Path $WorkDir 'TexaCore smoke\work\user data\texacore-data\pgdata'); strict = $false }

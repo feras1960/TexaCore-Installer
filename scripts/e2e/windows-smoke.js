@@ -163,6 +163,24 @@ function rawPost(url, headers, body) {
   });
 }
 
+/** Open a .tcdb with the INSTALLED app's own BackupManager and measure the line endings of the SQL inside (counts only - no SQL leaves this function). */
+async function analyzeTcdb(appDir, file, dataDir) {
+  const BM = appRequire(appDir)(path.join(appDir, 'src', 'backup-manager.js'));
+  const bm = new BM({ pgBinDir: path.join(appDir, '..', 'bin', 'pg', 'bin'), dbPassword: 'x', dataDir });
+  const parsed = bm._parseTcdbFile(fs.readFileSync(file));
+  const sql = await bm._decompress(bm._decryptParsed(parsed, '').data);
+  let crlf = 0; let lf = 0;
+  for (let i = 0; i < sql.length; i++) if (sql[i] === 10) { if (i > 0 && sql[i - 1] === 13) crlf += 1; else lf += 1; }
+  const lines = sql.toString('latin1').split('\n'); let inCopy = false; let copyBlocks = 0; let blocksWithData = 0; let crlfBlocks = 0; let blockData = 0; let blockCr = 0;
+  for (const raw of lines) {
+    const l = raw.replace(/\r$/, '');
+    if (!inCopy) { if (/^COPY .* FROM stdin;$/.test(l)) { inCopy = true; copyBlocks += 1; blockData = 0; blockCr = 0; } continue; }
+    if (l === '\\.') { inCopy = false; if (blockData) { blocksWithData += 1; if (blockCr) crlfBlocks += 1; } continue; }
+    blockData += 1; if (raw.endsWith('\r')) blockCr += 1;
+  }
+  return { bytes: sql.length, crlf, lf, copyBlocks, blocksWithData, crlfBlocks };
+}
+
 function writeResults(name, R, extra = {}) {
   fs.mkdirSync(OUT, { recursive: true });
   const rows = R.rows.map((r) => ({ name: r.name, ok: r.ok, skipped: !!r.skipped, warn: !!r.warn, evidence: String(r.evidence || '').slice(0, 900), ms: r.ms }));
@@ -390,29 +408,6 @@ async function harness() {
       S.totals = tot; return `${tot.entries} posted lines, ${bad} unbalanced entries; total Dr ${tot.dr} = Cr ${tot.cr}`;
     });
 
-    // ── 4. backup / export / restore ──
-    await R.check('H18 export a company file (.tcdb) from the app: lands in the company folder, TCDB magic, a second export gets «(2)», nothing half-written', async () => {
-      const info = await admin('GET', '/api/backup-export-info'); if (!info.json || !info.json.success || !info.json.ready) throw new Error(`info ${info.text.slice(0, 200)}`);
-      const a = await admin('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'TexaCore-smoke-export' });
-      if (!a.json || !a.json.success || a.json.encrypted !== false) throw new Error(`export → ${a.text.slice(0, 250)}`);
-      const b = await admin('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'TexaCore-smoke-export' });
-      if (!b.json || !b.json.success || !/\(2\)\.tcdb$/.test(b.json.path)) throw new Error(`second export → ${b.text.slice(0, 250)}`);
-      const bytes = fs.readFileSync(a.json.path); if (bytes.subarray(0, 4).toString('latin1') !== 'TCDB' || bytes.length < 10000) throw new Error(`not a .tcdb (${bytes.length} bytes)`);
-      if (fs.readdirSync(path.dirname(a.json.path)).some((f) => f.endsWith('.tmp'))) throw new Error('a temp file was left behind');
-      S.exportFile = a.json.path; return `${path.basename(a.json.path)} ${bytes.length} bytes (TCDB), then ${path.basename(b.json.path)}; platform ${info.json.platform}`;
-    });
-    await R.check('H19 restore that export through the app (psql / pg_restore on Windows): success, the company, the invoice (paid) and the entries are all still there', async () => {
-      const count = async () => (await pg(`SELECT (SELECT count(*) FROM public.companies)::int c, (SELECT count(*) FROM public.journal_entries)::int je, (SELECT count(*) FROM public.sales_transactions)::int st, (SELECT count(*) FROM auth.users)::int u`)).rows[0];
-      const c0 = await count(); const m = multipart(fs.readFileSync(S.exportFile), path.basename(S.exportFile));
-      const r = await rawPost(`${UI}/api/restore-tcdb`, { ...H(), 'Content-Type': m.ct }, m.body);
-      if (r.status !== 200 || !r.json || !r.json.success) throw new Error(`restore → ${r.status} ${r.text}`);
-      const c1 = await count(); if (JSON.stringify(c0) !== JSON.stringify(c1)) throw new Error(`rows changed ${JSON.stringify(c0)} → ${JSON.stringify(c1)}`);
-      await signIn();
-      const inv = must(await rest('GET', `sales_transactions?id=eq.${S.invoice}&select=stage,paid_amount,balance,invoice_no`), 'invoice after restore')[0];
-      if (inv.stage !== 'paid' || Number(inv.paid_amount) !== 300 || inv.invoice_no !== S.invoiceNo) throw new Error(`invoice after the restore ${JSON.stringify(inv)}`);
-      return `restored; rows ${JSON.stringify(c1)} unchanged; ${inv.invoice_no} still paid 300`;
-    });
-
     // ── 5. exposure on this machine ──
     await R.check('H20 listeners: PostgreSQL, PostgREST, GoTrue and the admin API refuse connections on the machine\'s LAN address; the web UI answers there and its /config.js carries no admin secret', async () => {
       const lan = require('../../src/lan-address').pickLanAddress(os.networkInterfaces());
@@ -495,8 +490,8 @@ async function harness() {
       const after = await snapshot();
       for (const k of Object.keys(before)) if (JSON.stringify(before[k]) !== JSON.stringify(after[k])) throw new Error(`${k}: before ${JSON.stringify(before[k])} → after ${JSON.stringify(after[k])}`);
       const list = await admin('GET', '/api/companies'); if (!list.json || !list.json.success || !list.json.companies.some((c) => c.id === CO && c.name === COMPANY.name)) throw new Error(`companies after restart: ${list.text.slice(0, 200)}`);
-      if (!fs.existsSync(S.liveFile) || !fs.existsSync(S.exportFile)) throw new Error('a company file / export disappeared');
-      return `identical: invoice ${after.inv}, stock ${after.stock}, ${after.lines} journal lines (Dr ${after.dr}), migrations ${after.mig}; company file + export still on disk`;
+      if (!fs.existsSync(S.liveFile)) throw new Error('the company file disappeared');
+      return `identical: invoice ${after.inv}, stock ${after.stock}, ${after.lines} journal lines (Dr ${after.dr}), migrations ${after.mig}; company file still on disk`;
     });
     await R.check('H26 the system still works after the restart: a SECOND sale (2 @ 100) is posted and a partial receipt (50) leaves the invoice posted with balance 150', async () => {
       const r = must(await rpc('create_and_post_direct_sale', { p_header: { company_id: CO, tenant_id: TENANT, customer_id: S.cust, warehouse_id: S.wh, stock_warehouse_id: S.wh, currency: ccy, payment_terms_days: 0 },
@@ -509,8 +504,43 @@ async function harness() {
       const st = must(await rest('GET', `inventory_stock?material_id=eq.${S.mat}&select=quantity_on_hand`), 'stock')[0]; if (Number(st.quantity_on_hand) !== 45) throw new Error(`stock ${st.quantity_on_hand}`);
       return `${inv.invoice_no}: total 200, paid 50, balance 150, stage ${inv.stage}; stock 45`;
     });
+    // ── 4. backup / export / restore (kept for last: a restore replaces the whole database) ──
+    await R.check('H28 export a company file (.tcdb) from the app: lands in the company folder, TCDB magic, a second export gets «(2)», nothing half-written', async () => {
+      const info = await admin('GET', '/api/backup-export-info'); if (!info.json || !info.json.success || !info.json.ready) throw new Error(`info ${info.text.slice(0, 200)}`);
+      const a = await admin('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'TexaCore-smoke-export' });
+      if (!a.json || !a.json.success || a.json.encrypted !== false) throw new Error(`export → ${a.text.slice(0, 250)}`);
+      const b = await admin('POST', '/api/export-backup', { mode: 'company-folder', fileBase: 'TexaCore-smoke-export' });
+      if (!b.json || !b.json.success || !/\(2\)\.tcdb$/.test(b.json.path)) throw new Error(`second export → ${b.text.slice(0, 250)}`);
+      const bytes = fs.readFileSync(a.json.path); if (bytes.subarray(0, 4).toString('latin1') !== 'TCDB' || bytes.length < 10000) throw new Error(`not a .tcdb (${bytes.length} bytes)`);
+      if (fs.readdirSync(path.dirname(a.json.path)).some((f) => f.endsWith('.tmp'))) throw new Error('a temp file was left behind');
+      S.exportFile = a.json.path; return `${path.basename(a.json.path)} ${bytes.length} bytes (TCDB), then ${path.basename(b.json.path)}; platform ${info.json.platform}`;
+    });
+    await R.check('H29 the exported file is a clean dump: one line-ending style throughout (what pg_dump writes on this OS), consistent inside every COPY block', async () => {
+      const a = await analyzeTcdb(APP_DIR, S.exportFile, dataDir);
+      S.dump = a;
+      const evidence = `${(a.bytes / 1e6).toFixed(1)} MB of SQL; line endings: ${a.crlf} CRLF / ${a.lf} LF-only; ${a.copyBlocks} COPY blocks, ${a.blocksWithData} with data, ${a.crlfBlocks} of them with CRLF data lines`;
+      if (a.crlf > 0 && a.lf > 0) throw new Error(`mixed line endings — ${evidence}`);
+      return evidence;
+    });
+    await R.check('H30 restore that export through the app (psql on Windows): success, and the company, the invoices (paid) and the entries are all still there', async () => {
+      const count = async () => (await pg(`SELECT (SELECT count(*) FROM public.companies)::int c, (SELECT count(*) FROM public.journal_entries)::int je, (SELECT count(*) FROM public.sales_transactions)::int st, (SELECT count(*) FROM auth.users)::int u`)).rows[0];
+      const c0 = await count(); const m = multipart(fs.readFileSync(S.exportFile), path.basename(S.exportFile));
+      const r = await rawPost(`${UI}/api/restore-tcdb`, { ...H(), 'Content-Type': m.ct }, m.body);
+      const log = readFrom(handle.logFile, 0);
+      const errs = (/(\d+) restore COPY errors/.exec(log) || [])[1]; const firstErr = (/psql:[^\n]*?: ERROR:\s*([^\n]*)/.exec(log) || [])[1];
+      const c1 = await count();
+      const said = `the app answered ${r.status} ${r.json && r.json.success ? '«success»' : r.text.slice(0, 120)}`;
+      if (errs) throw new Error(`${said}, but the restore logged ${errs} COPY errors (first: «${String(firstErr).trim()}»); rows ${JSON.stringify(c0)} → ${JSON.stringify(c1)}${S.dump ? `; the dump has ${S.dump.crlf} CRLF line endings, ${S.dump.crlfBlocks} COPY blocks with CRLF data` : ''}`);
+      if (r.status !== 200 || !r.json || !r.json.success) throw new Error(`restore → ${r.status} ${r.text}`);
+      if (JSON.stringify(c0) !== JSON.stringify(c1)) throw new Error(`rows changed ${JSON.stringify(c0)} → ${JSON.stringify(c1)}`);
+      await signIn();
+      const inv = must(await rest('GET', `sales_transactions?id=eq.${S.invoice}&select=stage,paid_amount,invoice_no`), 'invoice after restore')[0];
+      if (!inv || inv.stage !== 'paid' || Number(inv.paid_amount) !== 300 || inv.invoice_no !== S.invoiceNo) throw new Error(`invoice after the restore ${JSON.stringify(inv)}`);
+      return `restored; rows ${JSON.stringify(c1)} unchanged; ${inv.invoice_no} still paid 300`;
+    });
+
     let quit2 = null;
-    await R.check('H27 second graceful quit: exits by itself, nothing left running', async () => {
+    await R.check('H31 final graceful quit: exits by itself, nothing left running', async () => {
       quit2 = await gracefulQuit(handle); if (!quit2.graceful) throw new Error(`the app did not exit by itself (${quit2.how})`);
       await sleep(2500);
       const left = installProcs(INSTALL_ROOT, [userData]); if (left.length) throw new Error(`left running: ${left.map((p) => p.name).join(', ')}`);
@@ -635,6 +665,40 @@ async function real() {
 }
 
 // ═════════════════════════════════════════════════════════════════════════════════════════
+//  PHASE 3: the data folder under an Arabic folder name (a Windows account named in Arabic on a PC whose system code page is not Arabic)
+// ═════════════════════════════════════════════════════════════════════════════════════════
+async function unicode() {
+  const EXE = path.resolve(arg('exe')); const APP_DIR = path.resolve(arg('app-dir')); const BASE = Number(arg('port-base', '47491'));
+  const ROOT_DIR = arg('root', IS_WIN ? 'C:\\' : os.tmpdir()); const INSTALL_ROOT = path.resolve(APP_DIR, '..', '..');
+  const req = appRequire(APP_DIR); cdp.WebSocket = req('ws');
+  const R = new Results();
+  const arabic = '\u0628\u064a\u0627\u0646\u0627\u062a \u0641\u062d\u0635';     // «بيانات فحص»
+  const work = path.join(ROOT_DIR, arabic); const userData = path.join(work, 'userdata'); const hbFile = path.join(userData, 'logs', 'heartbeat.log');
+  fs.rmSync(work, { recursive: true, force: true }); fs.mkdirSync(work, { recursive: true });
+  let child = null;
+  try {
+    const logFile = path.join(OUT, 'unicode-app.log'); fs.mkdirSync(OUT, { recursive: true });
+    const env = { ...process.env, TEXACORE_HEADLESS: '1', TEXACORE_PORT_BASE: String(BASE), TEXACORE_USER_DATA: userData, TEXACORE_TCDB_DIR: path.join(work, 'restore'), TEXACORE_STUB_TUNNEL: '1', TEXACORE_STUB_MDM: '1', TEXACORE_E2E_AUTOSTART: '1', TEXACORE_E2E_LICENSE: 'free' };
+    child = launch({ exe: EXE, env, extraArgs: [], logFile });
+    let ready = null; let failure = '';
+    try { ready = await waitReady({ child, logFile, hbFile, hbOffset: 0, timeoutMs: 6 * 60 * 1000 }); } catch (e) { failure = e.message; }
+    const text = readFrom(logFile, 0);
+    if (ready && ready.ok) R.rows.push({ name: 'U3 the app starts with its data folder under an Arabic folder name (first run: initdb, baseline, migrations)', ok: true, evidence: `ready in ${Math.round(ready.ms / 1000)} s with the data folder «${arabic}\\userdata»; this PC's ANSI code page can represent the folder name`, ms: 0 });
+    else {
+      const err = (ready && ready.error) || failure; const why = (/could not create directory[^\n]*/.exec(text) || /initdb[^\n]*error[^\n]*/.exec(text) || [''])[0].slice(0, 300);
+      warn(R, 'U3 the app starts with its data folder under an Arabic folder name (first run: initdb, baseline, migrations)', `the first run FAILED: ${String(err).slice(0, 300)} ${why ? '| ' + why : ''} - PostgreSQL's initdb receives its -D path in the system ANSI code page (here Windows-1252, en-US), which cannot hold Arabic letters; on an Arabic Windows (code page 1256) the same folder name is representable. Affects an English-language Windows whose account / folder name is Arabic. NOT reproducible-proof for Arabic Windows (hosted runners are en-US).`);
+    }
+  } catch (e) { R.rows.push({ name: 'unicode', ok: false, evidence: e.stack || e.message, ms: 0 }); }
+  finally {
+    if (child && child.exitCode === null) { killTree(child.pid); await sleep(1500); }
+    for (const p of installProcs(INSTALL_ROOT, [work])) killTree(p.pid);
+  }
+  writeResults('unicode', R, { userData });
+  console.log(`\nwindows-smoke unicode: ${R.summary()}`);
+  process.exit(R.failed.length ? 1 : 0);
+}
+
+// ═════════════════════════════════════════════════════════════════════════════════════════
 //  LOG COLLECTION (redacted) and SUMMARY
 // ═════════════════════════════════════════════════════════════════════════════════════════
 const JWT_RE = /eyJ[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}\.[A-Za-z0-9_-]{10,}/g;
@@ -682,7 +746,8 @@ function summarize() {
   const install = read('install.json') || { checks: [] }; const h = read('results-harness.json'); const r = read('results-real.json'); const un = read('uninstall.json'); const scan = read('secret-scan.json');
   const esc = (s) => String(s || '').replace(/\|/g, '\\|').replace(/\r?\n/g, ' ');
   const rows = []; const add = (group, list) => (list || []).forEach((c) => rows.push({ group, ...c }));
-  add('install', install.checks); add('harness', h && h.rows); add('real launch', r && r.rows); add('uninstall', un && un.checks);
+  const u3 = read('results-unicode.json');
+  add('install', install.checks); add('harness', h && h.rows); add('real launch', r && r.rows); add('arabic folder', u3 && u3.rows); add('uninstall', un && un.checks);
   if (scan) rows.push({ group: 'artifact', name: 'A1 no secret in any uploaded file', ok: scan.filesRemovedForSecrets.length === 0, evidence: `${scan.filesCopied} redacted log files; ${scan.secretsKnown} per-install secret values scrubbed; ${scan.filesRemovedForSecrets.length} files removed` });
   const bad = rows.filter((x) => !x.ok); const skipped = rows.filter((x) => x.skipped); const warned = rows.filter((x) => x.warn);
   const md = [];
@@ -702,6 +767,7 @@ function summarize() {
 (async () => {
   if (CMD === 'harness') return harness();
   if (CMD === 'real') return real();
+  if (CMD === 'unicode') return unicode();
   if (CMD === 'collect') return collect();
   if (CMD === 'summarize') return summarize();
   console.error('usage: windows-smoke.js harness|real|collect|summarize …'); process.exit(2);

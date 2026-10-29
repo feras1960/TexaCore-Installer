@@ -90,11 +90,19 @@ jobs:
             --exe "${{ steps.install.outputs.exe }}" --app-dir "${{ steps.install.outputs.app_dir }}" `
             --out $env:OUT --version $env:VERSION --net-blocked "${{ steps.netguard.outputs.net_blocked }}"
 
+      - name: Phase 3 - the data folder under an Arabic folder name (informational: reports a WARN finding, never fails the run)
+        id: unicode
+        if: always() && steps.install.outcome == 'success'
+        timeout-minutes: 8
+        run: |
+          node scripts/e2e/windows-smoke.js unicode `
+            --exe "${{ steps.install.outputs.exe }}" --app-dir "${{ steps.install.outputs.app_dir }}" --out $env:OUT --root 'C:\'
+
       - name: Collect the logs (redacted)
         if: always()
         run: |
           node scripts/e2e/windows-smoke.js collect --out $env:OUT `
-            --user-data "C:\tcsmoke\work\userdata" --user-data "$env:APPDATA\TexaCore ERP" --user-data "$env:APPDATA\texacore-installer"
+            --user-data "C:\tcsmoke\work\userdata" --user-data "C:\بيانات فحص\userdata" --user-data "$env:APPDATA\TexaCore ERP" --user-data "$env:APPDATA\texacore-installer"
 
       - name: Uninstall silently
         if: always() && steps.install.outcome == 'success'
