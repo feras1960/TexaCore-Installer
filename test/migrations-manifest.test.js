@@ -23,9 +23,9 @@ test('baseline/MIGRATIONS_PIN.json exists, is valid and tied to the PINNED basel
   assert.equal(pin.baselineSha256, pinSha);
 });
 
-test('2.0.6 ships the 111 migrations production received after the 2026-10-13T13:21Z cut that matter locally, in PRODUCTION\'s apply order: the 19 of 2.0.4 first (unchanged), then 20270220x/y (applied 13-15 Oct, no function in common with the 19), then 17-10 to 23-10 as BOARD records them (the 16:40 batch of 20-10 is 19a, b, c, 23a-h; 26d before 26c; RC2 adds the 23-10 applies 238a, 237b, 237d, 237e in the order production applied them - the data-only seed for the two deleted companies is NOT shipped; the final adds the 26-10 applies 239a and 240b and the 27-10 applies 240c-240l and 240n, and the 28-10 applies 241a-d / 242a-e; 2.0.6 adds the 28-29-10 applies 242f-z, 243a-e, g-j and 243n (the write-off entry, B-4) and 243o (the container quantity receipt lines) - NOT 243k / 243l / 243m / 243p: the platform Telegram bot is cloud-only); 20270210l is production-only data and 20270217b is a catalogue-data migration - neither is shipped', () => {
+test('2.0.7 ships the 111 migrations of 2.0.6 first (unchanged, 2.0.6 apply order) and 38 more after them (149 in all) production received after the 2026-10-13T13:21Z cut that matter locally, in PRODUCTION\'s apply order: the 19 of 2.0.4 first (unchanged), then 20270220x/y (applied 13-15 Oct, no function in common with the 19), then 17-10 to 23-10 as BOARD records them (the 16:40 batch of 20-10 is 19a, b, c, 23a-h; 26d before 26c; RC2 adds the 23-10 applies 238a, 237b, 237d, 237e in the order production applied them - the data-only seed for the two deleted companies is NOT shipped; the final adds the 26-10 applies 239a and 240b and the 27-10 applies 240c-240l and 240n, and the 28-10 applies 241a-d / 242a-e; 2.0.6 adds the 28-29-10 applies 242f-z, 243a-e, g-j and 243n (the write-off entry, B-4) and 243o (the container quantity receipt lines) - NOT 243k / 243l / 243m / 243p: the platform Telegram bot is cloud-only); 20270210l is production-only data and 20270217b is a catalogue-data migration - neither is shipped', () => {
   assert.deepEqual(pin.migrations.slice(0, 19).map((x) => x.name.replace(/^2027021[01]([a-z]).*/, '$1')), ['i', 'j', 'k', 'q', 'm', 'n', 'o', 'p', 's', 't', 'r', 'u', 'v', 'x', 'a', 'y', 'b', 'c', 'd']);
-  assert.deepEqual(pin.migrations.slice(19).map((x) => x.name), [
+  assert.deepEqual(pin.migrations.slice(19, 111).map((x) => x.name), [
     "20270220x_ecom_smoke_fixes",
     "20270220y_ecom_single_erp_customer",
     "20270213a_exchange_setup_create_only",
@@ -119,10 +119,55 @@ test('2.0.6 ships the 111 migrations production received after the 2026-10-13T13
     "20270243n_writeoff_gl_required",
     "20270243o_container_quantity_receipt_items"
 ]);
-  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 111 }, (_, i) => i + 1));
+  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 149 }, (_, i) => i + 1));
   assert.ok(!pin.migrations.some((x) => /20270210l|20270217b/.test(x.name)));
   // the first 19 are exactly what 2.0.4 shipped (same names, same sha256): the upgrade from 2.0.4 applies ONLY the 34 after them
   assert.equal(require('crypto').createHash('sha256').update(JSON.stringify(pin.migrations.slice(0, 19).map((x) => [x.name, x.sha256]))).digest('hex'), '85744a0afb4dc0c7000a047e212257d8ae47158cd6736f431f4175b0a7ae137c', 'the first 19 entries (name + sha256) are byte-for-byte what 2.0.4 pinned');
+});
+
+// 2.0.7: the 38 migrations production received after 2.0.6's set (29-10 .. 06-11), in PRODUCTION's apply order. Shipped although bot-named: 243k/l/m/q/r/x/y (drift gates of 245a/245b/246s need them; dormant on a desktop).
+// NOT shipped (the Telegram bot / portal / NexaLive / edge chain, no desktop use): 243p 243s-w 243z 244a-g 246b-d 246i 246k 246l 247a 248a-d 248f 249a 249b.
+test('2.0.7 adds exactly these 38 migrations after the 111 of 2.0.6', () => {
+  assert.deepEqual(pin.migrations.slice(111).map((x) => x.name), [
+    "20270243k_platform_telegram_bot",
+    "20270243l_telegram_connections_server_writes",
+    "20270243m_bot_security_tenant_bound",
+    "20270243q_bot_dialog_company_bound",
+    "20270243r_bot_my_hr_company_bound",
+    "20270243x_bot_notify_company_header",
+    "20270243y_bot_platform_cutover_blockers",
+    "20270246a_user_security_controls",
+    "20270244h_crm_statuses_company_scope",
+    "20270244i_crm_statuses_seed_new_companies",
+    "20270244n_crm_statuses_tenant_readers",
+    "20270244k_crm_work_hours",
+    "20270244m_contact_interactions_company_scope",
+    "20270244p_crm_logic_batch_1",
+    "20270244q_crm_conditional_fields",
+    "20270244r_bot_draft_currency_guard",
+    "20270244s_inbox_draft_currency",
+    "20270244t_draft_confirm_row_lock",
+    "20270245a_party_balance_readers_single_source",
+    "20270245d_mfg_accounts_under_expenses_root",
+    "20270245e_chart_category_groups",
+    "20270245b_balance_readers_deleted_predicate",
+    "20270246f_cost_center_readers_company_gate",
+    "20270246h_recurring_entries_generator_gate",
+    "20270246e_balance_readers_parity",
+    "20270246g_balance_readers_statement_dashboard_cards",
+    "20270246j_user_company_oracle_and_pending_recurring_gate",
+    "20270246m_revoke_authenticated_from_ungated_definers",
+    "20270246n_revoke_ungated_definers_batch2",
+    "20270246p_gate_tenant_and_platform_definers",
+    "20270246o_revoke_ungated_definers_batch3",
+    "20270246q_revoke_and_gate_ungated_definers",
+    "20270246r_revoke_container_cost_engines_and_gate_white_label_validity",
+    "20270246s_revoke_unreachable_definers_batch5",
+    "20270246t_gate_login_session_functions",
+    "20270246u_close_container_refuse_credit_balance",
+    "20270246v_retire_fc_balance_readers_acl",
+    "20270248e_balance_readers_package2_insights_dashboard_botlist",
+  ]);
 });
 
 test('the pin holds names, order, sha256 and sizes ONLY: no SQL, no tenant id, no function body (the repo is public)', () => {
@@ -203,7 +248,7 @@ test('the measured inventory delta (baseline/migrations.inventory.json, private)
   assert.deepEqual(r.problems, []);
   assert.ok(r.inventory.catalogDelta && r.inventory.functions);
   assert.ok(Object.keys(r.inventory.functions).length > 50);
-  assert.equal(r.inventory.catalogDelta.tables, 15, 'the runner\'s own bookkeeping table + the 14 tables the 79 migrations add (+ dashboard_user_layouts, voucher_invoice_allocations) (RC2: + journal_number_counters of 20270237b)');
+  assert.equal(r.inventory.catalogDelta.tables, 20, 'the runner\'s own bookkeeping table + the 14 tables the 79 migrations add (+ dashboard_user_layouts, voucher_invoice_allocations) (RC2: + journal_number_counters of 20270237b) (2.0.7: 20 = + the dormant Telegram tables of 243k/l/y and the tables of 244i/246a-era CRM and company settings)');
   for (const sig of Object.keys(r.inventory.functions)) assert.match(sig, /^(public|licensing)\.[a-z_0-9]+\(.*\)$/, sig);   // 2.0.5: a licensing-schema trigger function is replaced too (the inventory schemas: public, licensing, newpost, tomgenerators)
 });
 
@@ -227,10 +272,13 @@ test('every generated migration is ONE transaction (BEGIN … COMMIT), so a fail
 });
 
 test('no shipped migration names a production tenant: no uuid literal in any of them (20270210l, which named 16, is not shipped)', { skip: !generated }, () => {
+  // 2.0.7: four literals of production ids ship, each REVIEWED as inert on any other database (the owner's tenant / company ids; nothing else): 243k / 243y keep the platform admin tenant in a bot function body, 244p updates one CRM settings row only
+  // `WHERE EXISTS (company with that id)`, 245e re-groups the chart of that one tenant (`v_tenant constant`). A desktop that does not hold those ids does nothing.
+  const REVIEWED = { '20270243k_platform_telegram_bot.sql': ["'681aa0e4-7692-4337-a3e8-2c127f80e573'"], '20270243y_bot_platform_cutover_blockers.sql': ["'681aa0e4-7692-4337-a3e8-2c127f80e573'"], '20270244p_crm_logic_batch_1.sql': ["'02d921f0-1b40-48ca-b5c1-ba3bbd79c36d'"], '20270245e_chart_category_groups.sql': ["'681aa0e4-7692-4337-a3e8-2c127f80e573'"] };
   for (const e of manifestOf().migrations) {
     const sql = fs.readFileSync(path.join(ROOT, 'migrations', e.file), 'utf8');
     // 20270226b seeds ONE system print template under a fixed, hand-made id (date-shaped, not a tenant, company or user id); nothing else may carry a uuid literal
-    const literals = (sql.match(/'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'/gi) || []).filter((x) => x.toLowerCase() !== "'20270226-0000-4000-8000-000000000026'" && x !== "'00000000-0000-0000-0000-000000000000'");   // the nil uuid is a sentinel (20270242u), not an id of anything
+    const literals = (sql.match(/'[0-9a-f]{8}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{4}-[0-9a-f]{12}'/gi) || []).filter((x) => x.toLowerCase() !== "'20270226-0000-4000-8000-000000000026'" && !(REVIEWED[e.file] || []).includes(x.toLowerCase()) && x !== "'00000000-0000-0000-0000-000000000000'");   // the nil uuid is a sentinel (20270242u), not an id of anything
     assert.deepEqual(literals, [], `${e.file}: a uuid literal`);
   }
 });

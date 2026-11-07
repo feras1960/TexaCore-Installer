@@ -642,21 +642,26 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
       // the functions the migrations touched: new or changed vs the previous build's install (upgrade run); on a fresh-only run: those that differ from nothing known -> all
       const touched = before ? [...local.keys()].filter((s) => !before.has(s) || before.get(s).md5 !== local.get(s).md5 || before.get(s).acl !== local.get(s).acl || before.get(s).secdef !== local.get(s).secdef) : [...local.keys()];
       const bad = []; let same = 0; let sameMd5 = 0;
+      // 2.0.7: functions that production has a LATER body of, written by migrations this release deliberately does not ship (the Telegram bot chain 20270243p, 20270244b, 20270244e, 20270247a, 20270248b-c, 20270249a-b ...).
+      // They are the bot's own senders / routers or bot-only readers, dormant on a desktop; listed by signature so any other difference still fails.
+      const EXCLUDED_CHAIN = new Set(['fn_attendance_reminders_run(timestamp with time zone,boolean)', 'fn_attendance_set_site(bigint,uuid,numeric,numeric,numeric)', 'fn_bot_capabilities(uuid,uuid)', 'fn_bot_payslip_receive(uuid,uuid,text)', 'fn_day_close_dispatch(uuid,date,boolean)', 'fn_group_actor_admin(bigint,uuid)', 'fn_payroll_notify_accounting(uuid,text)', 'fn_payroll_remind_owner(uuid)', 'fn_portal_account(bigint,uuid,integer)', 'fn_production_plan_create(uuid,uuid,numeric,date,uuid,text,uuid,text)', 'fn_telegram_bots_for_me(uuid)', 'fn_tg_assign_role(bigint,uuid,text,uuid)', 'fn_tg_notify_company(uuid,text)', 'fn_tg_notify_user(uuid,uuid,text)', /* same body, but 20270244b (not shipped) also revokes EXECUTE from authenticated: a bot sender, dormant on a desktop */ 'fn_tg_platform_cutover(uuid,bigint[],text)', 'fn_tg_platform_issue_code()', 'fn_tg_send(uuid,uuid,text,jsonb)', 'fn_tg_send_route(uuid,uuid)', 'get_confirmation_inbox(uuid,text,text)']);
+      const expectedDiff = [];
       for (const s of touched) {
         const p = prod.get(s); const l = local.get(s);
         if (!p) { bad.push(`${s}: not in production's post-image`); continue; }
-        if (p.md5 !== l.md5) { bad.push(`${s}: md5 ${l.md5.slice(0, 8)} here, ${p.md5.slice(0, 8)} in production`); continue; }
+        const sink = EXCLUDED_CHAIN.has(s) ? expectedDiff : bad;
+        if (p.md5 !== l.md5) { sink.push(`${s}: md5 ${l.md5.slice(0, 8)} here, ${p.md5.slice(0, 8)} in production`); continue; }
         sameMd5++;
-        if (p.secdef !== l.secdef || p.acl !== l.acl) bad.push(`${s}: same body, but secdef/grants differ (here ${l.secdef} ${l.acl.slice(0, 60)} / production ${p.secdef} ${p.acl.slice(0, 60)})`);
+        if (p.secdef !== l.secdef || p.acl !== l.acl) sink.push(`${s}: same body, but secdef/grants differ (here ${l.secdef} ${l.acl.slice(0, 60)} / production ${p.secdef} ${p.acl.slice(0, 60)})`);
         else same++;
       }
       // the rest of the functions: how far is this database from production overall (informational: the baseline's four redacted functions + the installer's local extras live here)
       const outside = [...local.keys()].filter((s) => !touched.includes(s) && (!prod.has(s) || prod.get(s).md5 !== local.get(s).md5));
       const prodOnly = [...prod.keys()].filter((s) => !local.has(s));
-      ev.d = { touched: touched.length, same, sameMd5, bad, outside, prodOnly: prodOnly.length };
-      fs.writeFileSync(path.join(WORK, 'fingerprint-report.json'), JSON.stringify({ touched, bad, outsideMd5Differ: outside, productionOnly: prodOnly }, null, 2));
+      ev.d = { touched: touched.length, same, sameMd5, bad, expectedDiff, outside, prodOnly: prodOnly.length };
+      fs.writeFileSync(path.join(WORK, 'fingerprint-report.json'), JSON.stringify({ touched, bad, expectedExcludedChainDifferences: expectedDiff, outsideMd5Differ: outside, productionOnly: prodOnly }, null, 2));
       if (bad.length) throw new Error(`${bad.length} of ${touched.length} touched functions differ:\n  ${bad.slice(0, 12).join('\n  ')}`);
-      return `${touched.length} functions created/replaced by the shipped migrations: ${sameMd5} md5 = production, ${same} with identical SECURITY DEFINER + grants; outside them: ${outside.length} differ from production's md5 (redacted / local extras), ${prodOnly.length} production-only functions`;
+      return `${touched.length} functions created/replaced by the shipped migrations (${expectedDiff.length} more differ ONLY because a migration this release does not ship changed them later - see fingerprint-report.json): ${sameMd5} md5 = production, ${same} with identical SECURITY DEFINER + grants; outside them: ${outside.length} differ from production's md5 (redacted / local extras), ${prodOnly.length} production-only functions`;
     });
   }
 

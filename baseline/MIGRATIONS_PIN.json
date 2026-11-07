@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "cf53de1073a76c9a5586c508ac348f9e9e62dbd3",
+  "erpCommit": "3f1e8c05aa4ad4c554b69be02670c5baf877d9ec",
   "migrations": [
     {
       "order": 1,
@@ -780,11 +780,277 @@
       "file": "20270243o_container_quantity_receipt_items.sql",
       "sha256": "f96450d433aca2e7ae4533646994eae2ee71e63ca8468a1ee130a755dc14dd32",
       "bytes": 66869
+    },
+    {
+      "order": 112,
+      "name": "20270243k_platform_telegram_bot",
+      "file": "20270243k_platform_telegram_bot.sql",
+      "sha256": "127a1fd087a47bcbc7c851c066521898b0602c066d213bd60bbf252103364d92",
+      "bytes": 118229
+    },
+    {
+      "order": 113,
+      "name": "20270243l_telegram_connections_server_writes",
+      "file": "20270243l_telegram_connections_server_writes.sql",
+      "sha256": "e4e14557fe199ecf2e2512ec31277d7ec7880e72a3bc8ac52ebe5dc495a52142",
+      "bytes": 17553
+    },
+    {
+      "order": 114,
+      "name": "20270243m_bot_security_tenant_bound",
+      "file": "20270243m_bot_security_tenant_bound.sql",
+      "sha256": "c7db690e1552a69a0fb05f6956da52fe5a48cdba13690c661ade90589fe43d1e",
+      "bytes": 73958
+    },
+    {
+      "order": 115,
+      "name": "20270243q_bot_dialog_company_bound",
+      "file": "20270243q_bot_dialog_company_bound.sql",
+      "sha256": "d801df02eee04b5df9c462f11cc9fbd756e133d1188a88a79d147fedc03b57ef",
+      "bytes": 37190
+    },
+    {
+      "order": 116,
+      "name": "20270243r_bot_my_hr_company_bound",
+      "file": "20270243r_bot_my_hr_company_bound.sql",
+      "sha256": "0daa4988ca3b130af8ea37264774d57d2d2aeb62bd3a9e11f039226832653cbc",
+      "bytes": 13764
+    },
+    {
+      "order": 117,
+      "name": "20270243x_bot_notify_company_header",
+      "file": "20270243x_bot_notify_company_header.sql",
+      "sha256": "c1c21e20c05340007c758aad435de19b07ef777b34c3e04b5fb1d559096de0ef",
+      "bytes": 62860
+    },
+    {
+      "order": 118,
+      "name": "20270243y_bot_platform_cutover_blockers",
+      "file": "20270243y_bot_platform_cutover_blockers.sql",
+      "sha256": "727ec148f9d6527ba1a8ed8cc924c383bd8a2f8374f21c00e2c1841df00da3fd",
+      "bytes": 36667
+    },
+    {
+      "order": 119,
+      "name": "20270246a_user_security_controls",
+      "file": "20270246a_user_security_controls.sql",
+      "sha256": "1d3bfcab44718b84f922d0eeff303e93438936d3ba6a23922c7e85572166113e",
+      "bytes": 29415
+    },
+    {
+      "order": 120,
+      "name": "20270244h_crm_statuses_company_scope",
+      "file": "20270244h_crm_statuses_company_scope.sql",
+      "sha256": "08665a20cf9e3a1b5d1d3f32641c47a7d0ae6c3a378c496bb63e3f279b00d345",
+      "bytes": 17615
+    },
+    {
+      "order": 121,
+      "name": "20270244i_crm_statuses_seed_new_companies",
+      "file": "20270244i_crm_statuses_seed_new_companies.sql",
+      "sha256": "22f7e1715bb3604b430adf410b90e1865a10b5d7f0ad304ca715a0077e8b67e3",
+      "bytes": 43817
+    },
+    {
+      "order": 122,
+      "name": "20270244n_crm_statuses_tenant_readers",
+      "file": "20270244n_crm_statuses_tenant_readers.sql",
+      "sha256": "0c5ce638f6053522717f06aea686c3925d150e7391a758f299769e8321a01bff",
+      "bytes": 18007
+    },
+    {
+      "order": 123,
+      "name": "20270244k_crm_work_hours",
+      "file": "20270244k_crm_work_hours.sql",
+      "sha256": "9505533b299bab7f8b977419d1b2a44d9c9dea0fa869f7647f9b8ea98023face",
+      "bytes": 9896
+    },
+    {
+      "order": 124,
+      "name": "20270244m_contact_interactions_company_scope",
+      "file": "20270244m_contact_interactions_company_scope.sql",
+      "sha256": "89909ecdf787ac10d596cf5b8e53ccd81e842d545999b4deb84a651c9ac68ab8",
+      "bytes": 9524
+    },
+    {
+      "order": 125,
+      "name": "20270244p_crm_logic_batch_1",
+      "file": "20270244p_crm_logic_batch_1.sql",
+      "sha256": "afe3459b9d19389ef8f58d7cf63025d3b77238f362488013c72ad977393073c0",
+      "bytes": 81998
+    },
+    {
+      "order": 126,
+      "name": "20270244q_crm_conditional_fields",
+      "file": "20270244q_crm_conditional_fields.sql",
+      "sha256": "7cb3ef46a2594ad8dc75af7a09f78b27c4f89604a2fb76a6d49a98687f2b7dff",
+      "bytes": 7872
+    },
+    {
+      "order": 127,
+      "name": "20270244r_bot_draft_currency_guard",
+      "file": "20270244r_bot_draft_currency_guard.sql",
+      "sha256": "91f299d2d1007b5dc9133450a0258dc8b325379c687160687975c55b0f0a348e",
+      "bytes": 25833
+    },
+    {
+      "order": 128,
+      "name": "20270244s_inbox_draft_currency",
+      "file": "20270244s_inbox_draft_currency.sql",
+      "sha256": "a38eb2524c408a4eccfae2c6b73d1b97e8585f1a7ce0ac587e5c7d3f9896a1d2",
+      "bytes": 15743
+    },
+    {
+      "order": 129,
+      "name": "20270244t_draft_confirm_row_lock",
+      "file": "20270244t_draft_confirm_row_lock.sql",
+      "sha256": "3532fcaf2e95a448f80f004bbdce490830fd4c22c50c1c22be55af33d953f784",
+      "bytes": 26462
+    },
+    {
+      "order": 130,
+      "name": "20270245a_party_balance_readers_single_source",
+      "file": "20270245a_party_balance_readers_single_source.sql",
+      "sha256": "5a0ca08fabe161e663c269606937af3cf31087fb3fc1363433491e1349afa70e",
+      "bytes": 26814
+    },
+    {
+      "order": 131,
+      "name": "20270245d_mfg_accounts_under_expenses_root",
+      "file": "20270245d_mfg_accounts_under_expenses_root.sql",
+      "sha256": "a028330ea1cc08256570861228aeb609e554f2fc68c26baa30a88a407c2ad598",
+      "bytes": 11410
+    },
+    {
+      "order": 132,
+      "name": "20270245e_chart_category_groups",
+      "file": "20270245e_chart_category_groups.sql",
+      "sha256": "a6da00f8ee40716c9a1bebaa38dcf4617de3db5ff09e286b79c6d39beb326293",
+      "bytes": 14045
+    },
+    {
+      "order": 133,
+      "name": "20270245b_balance_readers_deleted_predicate",
+      "file": "20270245b_balance_readers_deleted_predicate.sql",
+      "sha256": "f439c549995890d48f5d1a7dec716915c1fa1ee2ace512eb1abd8755ea6a66e5",
+      "bytes": 59219
+    },
+    {
+      "order": 134,
+      "name": "20270246f_cost_center_readers_company_gate",
+      "file": "20270246f_cost_center_readers_company_gate.sql",
+      "sha256": "229bc7de9662b398a3b5665ba8afc9ba56923c0f00b121a7cd6b320b20b5ade8",
+      "bytes": 12176
+    },
+    {
+      "order": 135,
+      "name": "20270246h_recurring_entries_generator_gate",
+      "file": "20270246h_recurring_entries_generator_gate.sql",
+      "sha256": "9bf8618d0ce41788b2bf71c73174046aa20fb8a55f363a287a3913c04488cb20",
+      "bytes": 15795
+    },
+    {
+      "order": 136,
+      "name": "20270246e_balance_readers_parity",
+      "file": "20270246e_balance_readers_parity.sql",
+      "sha256": "7ef155246c9633ba53b4d4e1b20eecd42e63a8ab894e499f7c5792784b529043",
+      "bytes": 18880
+    },
+    {
+      "order": 137,
+      "name": "20270246g_balance_readers_statement_dashboard_cards",
+      "file": "20270246g_balance_readers_statement_dashboard_cards.sql",
+      "sha256": "66521ea74a19ee9ffd3fc6a03f3bf791eeec03e374388034b045367a88f45794",
+      "bytes": 45585
+    },
+    {
+      "order": 138,
+      "name": "20270246j_user_company_oracle_and_pending_recurring_gate",
+      "file": "20270246j_user_company_oracle_and_pending_recurring_gate.sql",
+      "sha256": "42d54477682763f5604e7828769c0898511d7c4eea619dd80ad25b0efbf685d5",
+      "bytes": 16790
+    },
+    {
+      "order": 139,
+      "name": "20270246m_revoke_authenticated_from_ungated_definers",
+      "file": "20270246m_revoke_authenticated_from_ungated_definers.sql",
+      "sha256": "c37534a79c52d09100358b4ba2a7361fde4494ad4e534aa07977f24c32ca1a18",
+      "bytes": 12087
+    },
+    {
+      "order": 140,
+      "name": "20270246n_revoke_ungated_definers_batch2",
+      "file": "20270246n_revoke_ungated_definers_batch2.sql",
+      "sha256": "a4b08384844f0dbfd7f922f58d516de6d6b592fa86108e523c18e393223811ab",
+      "bytes": 24968
+    },
+    {
+      "order": 141,
+      "name": "20270246p_gate_tenant_and_platform_definers",
+      "file": "20270246p_gate_tenant_and_platform_definers.sql",
+      "sha256": "69c0d8883e565f84844c1d7b8d98a1dfcb2be9037f841851d8a14008a6d24107",
+      "bytes": 26733
+    },
+    {
+      "order": 142,
+      "name": "20270246o_revoke_ungated_definers_batch3",
+      "file": "20270246o_revoke_ungated_definers_batch3.sql",
+      "sha256": "fa62e885fd8ab784a8224ca857971dd1897c65e9e726b644e49c7d904186bc77",
+      "bytes": 22799
+    },
+    {
+      "order": 143,
+      "name": "20270246q_revoke_and_gate_ungated_definers",
+      "file": "20270246q_revoke_and_gate_ungated_definers.sql",
+      "sha256": "81611f73cb0b257b2ce4898bb115b1415d0d7429f2fd3ed3e0657331378257e7",
+      "bytes": 49048
+    },
+    {
+      "order": 144,
+      "name": "20270246r_revoke_container_cost_engines_and_gate_white_label_validity",
+      "file": "20270246r_revoke_container_cost_engines_and_gate_white_label_validity.sql",
+      "sha256": "7124ac9222f47e026daf759fcdb25896fbb8b18a78fa4561a22d9734a9c2cca1",
+      "bytes": 22227
+    },
+    {
+      "order": 145,
+      "name": "20270246s_revoke_unreachable_definers_batch5",
+      "file": "20270246s_revoke_unreachable_definers_batch5.sql",
+      "sha256": "0e1a4dc8e5219024ff1e889d1cc4ecbcbeeabf3cd43e3d5dad8221b01dea388f",
+      "bytes": 18328
+    },
+    {
+      "order": 146,
+      "name": "20270246t_gate_login_session_functions",
+      "file": "20270246t_gate_login_session_functions.sql",
+      "sha256": "5e9947a2f825b220dd3291b260fd3d144eaf4705f0fb32dce9a537e890b345af",
+      "bytes": 18400
+    },
+    {
+      "order": 147,
+      "name": "20270246u_close_container_refuse_credit_balance",
+      "file": "20270246u_close_container_refuse_credit_balance.sql",
+      "sha256": "1e99df4628e7c040f7a0d17a97f5102a315d0124ea0bed20dbe8445cf0d48016",
+      "bytes": 13452
+    },
+    {
+      "order": 148,
+      "name": "20270246v_retire_fc_balance_readers_acl",
+      "file": "20270246v_retire_fc_balance_readers_acl.sql",
+      "sha256": "625e69797c80d999d14bfaccd2872c627be710792597bbb07f76b198e9950384",
+      "bytes": 10245
+    },
+    {
+      "order": 149,
+      "name": "20270248e_balance_readers_package2_insights_dashboard_botlist",
+      "file": "20270248e_balance_readers_package2_insights_dashboard_botlist.sql",
+      "sha256": "d818355347fbaef69ca68478fe42ba11be82e5d9f3761979271b59f8abfa6c77",
+      "bytes": 31444
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "257fcf570b2b9c603b2f1f1813cfcb3f1fb51c9ebbfcbb26d3be2c1c11bc3f68",
-    "bytes": 49381
+    "sha256": "82a1c03dc2afac42b332796b013c158a47ff570a33ec7f234bffec514570045a",
+    "bytes": 64211
   }
 }

@@ -1,12 +1,13 @@
 {
  "source": "production, read-only (BEGIN READ ONLY ... ROLLBACK)",
- "measuredAt": "2026-10-29T00:10Z",
+ "measuredAt": "2026-11-07T21:50Z",
  "definition": "global rows: tenant_id AND company_id NULL (both columns), else the one that exists, else the whole table",
  "tables": {
   "capability_catalog": {
-   "prod": 156,
-   "desktop": 156,
-   "scope": "whole"
+   "prod": 164,
+   "desktop": 160,
+   "scope": "whole",
+   "note": "2.0.7: desktop 160/941 BY DESIGN - bot-only capabilities of the excluded Telegram migrations are absent (bot.expense_draft, bot.opps_create, bot.opps_view, bot.payments_draft, bot.quote_create) and bot.report_handle (removed in production by the excluded 20270244a) is still present"
   },
   "capability_deny_presets": {
    "prod": 7,
@@ -20,9 +21,10 @@
    "note": "+ platform_admin (installer seed role, not in production's global set)"
   },
   "role_capabilities": {
-   "prod": 897,
-   "desktop": 897,
-   "scope": "tenant"
+   "prod": 974,
+   "desktop": 941,
+   "scope": "tenant",
+   "note": "2.0.7: desktop 160/941 BY DESIGN - bot-only capabilities of the excluded Telegram migrations are absent (bot.expense_draft, bot.opps_create, bot.opps_view, bot.payments_draft, bot.quote_create) and bot.report_handle (removed in production by the excluded 20270244a) is still present"
   },
   "business_industries": {
    "prod": 5,

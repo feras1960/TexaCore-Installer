@@ -18,10 +18,10 @@ test('g3-expected.json: production\'s global row counts of the catalogs the desk
   assert.ok(t.print_entity_types.prod >= 43 && t.print_entity_types.desktop === t.print_entity_types.prod);
   assert.ok(t.print_templates.prod >= 70 && t.print_templates.desktop === t.print_templates.prod);
   assert.ok(t.print_template_known_variables.desktop > 500);
-  // the only two intended differences: the installer's own platform_admin role, and the FX engine's single flag out of production's per-company markers
+  // the intended differences: the installer's own platform_admin role, the FX engine's single flag out of production's per-company markers and (2.0.7) the bot-only capabilities of the Telegram migrations this release does not ship
   assert.equal(t.roles.desktop, t.roles.prod + 1);
   assert.equal(t.fx_platform_state.desktop, 1);
-  assert.deepEqual(Object.entries(t).filter(([, v]) => v.desktop !== v.prod).map(([k]) => k).sort(), ['fx_platform_state', 'roles']);
+  assert.deepEqual(Object.entries(t).filter(([, v]) => v.desktop !== v.prod).map(([k]) => k).sort(), ['capability_catalog', 'fx_platform_state', 'role_capabilities', 'roles']);
 });
 
 test('the launch-check and migrations-check carry the data-parity checks (fresh install, upgrade, real page)', () => {
