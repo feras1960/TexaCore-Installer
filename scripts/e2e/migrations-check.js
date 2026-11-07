@@ -655,6 +655,14 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         if (p.secdef !== l.secdef || p.acl !== l.acl) sink.push(`${s}: same body, but secdef/grants differ (here ${l.secdef} ${l.acl.slice(0, 60)} / production ${p.secdef} ${p.acl.slice(0, 60)})`);
         else same++;
       }
+      // the 19 allow-listed functions must still be EXACTLY what was recorded for 2.0.7 (md5, SECURITY DEFINER flag, ACL): an allowed difference from production is not an open door for further change
+      const FIXTURE = JSON.parse(fs.readFileSync(path.join(__dirname, 'excluded-chain-fixture.json'), 'utf8')).functions;
+      for (const sig of EXCLUDED_CHAIN) {
+        const rec = FIXTURE[sig]; const l = local.get(sig);
+        if (!rec) { bad.push(`${sig}: not in excluded-chain-fixture.json`); continue; }
+        if (!l) { bad.push(`${sig}: missing on this database (recorded)`); continue; }
+        if (l.md5 !== rec.md5 || String(l.secdef) !== String(rec.secdef) || l.acl !== rec.acl) bad.push(`${sig}: drifted from the 2.0.7 recording (md5 ${l.md5.slice(0, 8)} / ${rec.md5.slice(0, 8)}, acl ${l.acl === rec.acl ? 'same' : 'different'})`);
+      }
       // the rest of the functions: how far is this database from production overall (informational: the baseline's four redacted functions + the installer's local extras live here)
       const outside = [...local.keys()].filter((s) => !touched.includes(s) && (!prod.has(s) || prod.get(s).md5 !== local.get(s).md5));
       const prodOnly = [...prod.keys()].filter((s) => !local.has(s));

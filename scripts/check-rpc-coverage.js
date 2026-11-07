@@ -17,17 +17,23 @@ const ROOT = path.join(__dirname, '..');
 
 function ermRpcNames(srcDir) {
   const names = new Set();
+  const consts = new Map();    // 2.0.7: `export const CONSUME_RPC = 'fn_pending_action_consume'` then `.rpc(CONSUME_RPC, ...)` - the name is a constant
+  const constCalls = new Set();
   const walk = (d) => {
     for (const e of fs.readdirSync(d, { withFileTypes: true })) {
       if (e.name === 'node_modules' || e.name.startsWith('.')) continue;
       const f = path.join(d, e.name);
       if (e.isDirectory()) walk(f);
       else if (/\.(ts|tsx)$/.test(e.name) && !/\.test\./.test(e.name)) {
-        for (const m of fs.readFileSync(f, 'utf8').matchAll(/\.rpc\(\s*['"]([a-zA-Z0-9_]+)['"]/g)) names.add(m[1]);
+        const text = fs.readFileSync(f, 'utf8');
+        for (const m of text.matchAll(/\.rpc\(\s*['"]([a-zA-Z0-9_]+)['"]/g)) names.add(m[1]);
+        for (const m of text.matchAll(/(?:export\s+)?const\s+([A-Z][A-Z0-9_]*)\s*=\s*['"]([a-zA-Z0-9_]+)['"]/g)) consts.set(m[1], m[2]);
+        for (const m of text.matchAll(/\.rpc\(\s*([A-Z][A-Z0-9_]*)\s*[,)]/g)) constCalls.add(m[1]);
       }
     }
   };
   walk(srcDir);
+  for (const c of constCalls) if (consts.has(c)) names.add(consts.get(c));
   return names;
 }
 
