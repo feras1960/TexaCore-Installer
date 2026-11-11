@@ -222,7 +222,7 @@ function updateStatusCards(state) {
   else if (lv.kind === 'paid' || lv.kind === 'paid-open') {
     text = lv.daysLeft !== null ? fillText(t('ui.chip.paid'), { n: Math.max(0, lv.daysLeft), d: daysWord(lv.daysLeft) }) : t('status.active');
     if (lv.daysLeft !== null && lv.daysLeft <= 7) { cls = 'warn'; dot = 'yellow'; }
-  } else if (lv.kind === 'expired') { cls = 'bad'; dot = 'red'; text = t('ui.chip.expired'); }
+  } else if (lv.kind === 'expired') { cls = 'bad'; dot = 'red'; text = isReadOnly(state) ? t('ui.chip.readOnly') : t('ui.chip.expired'); }
   else { cls = 'bad'; dot = 'red'; text = t('status.inactive'); }
   setChip('chip-license', 'indicator-license', 'status-license', cls, dot, text);
   renderTunnelStatus(state);
@@ -237,18 +237,20 @@ function updateControlButtons(state) {
 // ─── Hero: the company and the ONE primary button ────────────
 let _starting = false;
 function heroMode(state) {
-  if (!state.hasLicense) return 'nolicense';
+  if (!state.hasLicense && !isReadOnly(state)) return 'nolicense';
   if (!state.containerRunning) return 'stopped';
   if (_empListed && !_empCompanies.length) return 'nocompany';
   return 'ready';
 }
+// 2.0.8: an expired paid licence (or a clock set back) runs READ-ONLY — the database refuses every change (main.js / licence-access.js)
+function isReadOnly(state) { return !!(state && state.licenceAccess && state.licenceAccess.mode === 'read_only'); }
 function renderHero(state) {
   const hero = $('hero');
   if (!hero) return;
   const mode = heroMode(state);
   hero.dataset.mode = mode;
   const note = $('hero-note');
-  if (note) note.textContent = mode === 'nocompany' ? t('ui.hero.noCompany') : mode === 'nolicense' ? t('ui.hero.noLicense') : '';
+  if (note) note.textContent = mode === 'nocompany' ? t('ui.hero.noCompany') : mode === 'nolicense' ? t('ui.hero.noLicense') : isReadOnly(state) ? t('ui.hero.readOnly') : '';
   const open = $('btn-open-label');
   if (open) open.textContent = mode === 'nocompany' ? t('ui.hero.createCompany') : t('ui.openProgram');
   const startBtn = $('btn-start');
@@ -970,7 +972,14 @@ function renderLicense(state) {
   $('license-active').style.display = (has && !_licensePanelOpen) ? 'flex' : 'none';
   $('license-actions').style.display = showPanel ? 'none' : 'flex';
   $('btn-cancel-license').style.display = (has && _licensePanelOpen) ? 'inline-block' : 'none';
-  $('license-expired-note').style.display = has ? 'none' : 'flex';
+  const ro = isReadOnly(state);
+  $('license-expired-note').style.display = (has || ro) ? 'none' : 'flex';
+  const roNote = $('license-readonly-note');
+  if (roNote) {
+    roNote.style.display = ro ? 'flex' : 'none';
+    const roText = $('license-readonly-text');
+    if (roText && ro) roText.textContent = state.licenceAccess.reason === 'clock_tamper' ? t('ui.license.readOnlyClockNote') : t('ui.license.readOnlyNote');
+  }
   if (!has && state.config && state.config.licenseKey && document.activeElement !== $('input-license') && !$('input-license').value) $('input-license').value = state.config.licenseKey;
 
   // tier chip
@@ -978,7 +987,7 @@ function renderLicense(state) {
   let chipCls = 'chip chip-sm push'; let tierText = '';
   if (lv.kind === 'trial') { chipCls += ' warn'; tierText = t('ui.tier.trial'); }
   else if (lv.kind === 'free') { chipCls += ' ok'; tierText = t('ui.tier.free'); }
-  else if (lv.kind === 'expired' || lv.kind === 'none') { chipCls += ' bad'; tierText = lv.kind === 'expired' ? t('ui.chip.expired') : t('status.inactive'); }
+  else if (lv.kind === 'expired' || lv.kind === 'none') { chipCls += ' bad'; tierText = lv.kind === 'expired' ? (ro ? t('ui.chip.readOnly') : t('ui.chip.expired')) : t('status.inactive'); }
   else { chipCls += ' ok'; tierText = String(lv.tier || 'PRO').toUpperCase(); }
   if (chip) chip.className = chipCls;
   if (tier) tier.textContent = tierText;

@@ -102,14 +102,13 @@ test('win-info: neither wmic nor PowerShell, or an unreadable answer -> null (th
   assert.equal(winInfo.usedPercentFromPair('30000000000,120000000000'), 75);
 });
 
-test('the heartbeat uses win-info (no direct wmic left in main.js), and the licence hardware id is exactly what it was: wmic csproduct, then the host-name fallback', () => {
+test('the heartbeat uses win-info (no direct wmic left in main.js); the licence hardware id still reads wmic csproduct first (its fallbacks: test/license-hwid.test.js)', () => {
   const main = fs.readFileSync(path.join(__dirname, '..', 'src', 'main.js'), 'utf8');
   assert.doesNotMatch(main, /exec(Sync)?\(['"]wmic/, 'no wmic call is left in main.js');
   assert.match(main, /require\('\.\/win-info'\)\.diskUsedPercent\(\)/);
   assert.match(main, /require\('\.\/win-info'\)\.osCaption\(\)/);
   const lg = fs.readFileSync(path.join(__dirname, '..', 'src', 'license-guard.js'), 'utf8');
   assert.match(lg, /'wmic csproduct get uuid'/, 'the licence id still reads wmic csproduct');
-  assert.match(lg, /this\._hwId = `WIN-\$\{uuid\}`;/);
-  assert.match(lg, /this\._hwId = `FALLBACK-\$\{require\('os'\)\.hostname\(\)\}-\$\{process\.arch\}`;/, 'and falls back to the host name where wmic is missing');
-  assert.equal((lg.match(/wmic/g) || []).length, 1, 'license-guard.js has not been touched');
+  assert.match(lg, /`WIN-\$\{wmic\(\)\}`/, 'as WIN-<uuid>, exactly as before where wmic answers');
+  assert.match(lg, /_legacyFallbackId\(\) \{ return `FALLBACK-\$\{this\._hostname\(\)\}-\$\{this\._arch\}`; \}/, 'the host-name fallback keeps its exact shape');
 });

@@ -237,6 +237,29 @@ function repairOutcome(r) {
   }
 }
 
+// ─── the register-subdomain request body ───────────────────────
+/**
+ * The ONE body every register-subdomain call sends (launcher «register», the repair, the token refresh of startCloudflared).
+ *
+ * register-subdomain (ERP supabase/functions/register-subdomain) reads the device proof from `hardwareId` (or `hardware_id`) and hands
+ * `machineId` to licensing_verify_device as p_hostname, which compares it with the licence's stored HOSTNAME. 2.0.7 sent the hardware id
+ * in `machineId` and no `hardwareId`, so the current server compared a hardware id with a host name: HARDWARE_MISMATCH for every licence
+ * bound to hardware, and never the strong proof (via = 'hardware_id') a token re-issue needs.
+ *   hardwareId  the licence hardware id (license-guard getHardwareId: the same id activation / trial / register_free / heartbeat bind)
+ *   machineId   UNCHANGED from 2.0.7 (the hardware id, or the host name when there is none): the server version before the hardwareId field
+ *               compared the licence's hardware_id with `machineId` directly; the current one ignores `machineId` whenever `hardwareId` is set
+ *   hostname    always the real host name
+ * Without a hardware id (the provider threw) only the host name goes out, as installers <=1.9.0 did (the server's hostname path).
+ */
+function registerSubdomainBody({ licenseKey, subdomain, hardwareId, hostname, companyName }) {
+  const hw = typeof hardwareId === 'string' && hardwareId.trim() ? hardwareId.trim() : null;
+  const host = typeof hostname === 'string' && hostname ? hostname : require('os').hostname();
+  const body = { licenseKey, subdomain, machineId: hw || host, hostname: host };
+  if (hw) body.hardwareId = hw;
+  if (companyName) body.companyName = companyName;
+  return body;
+}
+
 /** Harness only (isolated runs): a JSON override of the timings, so an end-to-end check does not wait 90 seconds. */
 function parseTimingOverride(text) {
   try {
@@ -253,4 +276,5 @@ function parseTimingOverride(text) {
 module.exports = {
   PROBE_PREFIX, NONCE_RE, SCHEDULE_MS, QUICK_MS, RECHECK_MS, PROBE_TIMEOUT_MS,
   newBootId, newNonce, probeBody, answerProbe, handleProbeRequest, classifyProbe, defaultProbe, RouteVerifier, deriveStatus, repairOutcome, parseTimingOverride,
+  registerSubdomainBody,
 };

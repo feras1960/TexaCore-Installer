@@ -47,6 +47,7 @@ function world({ companiesBefore, live, config }) {
     UNIFIED_BACKUP_KEY: 'k',
     LICENSING_URL: 'https://licensing.invalid',
     getVendorAccount: () => null,
+    licenceWriteRefusal: () => null,   // 2.0.8: a valid licence (the read-only refusal is tested in licence-access.test.js)
     mainWindow: null,
     heartbeatSender: { _uploadCloudBackup: async () => {} },
     BackupManager,

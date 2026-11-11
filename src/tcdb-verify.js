@@ -148,12 +148,29 @@ function analyzeSql(sql) {
     'fiscal_years', 'company_accounting_settings',
   ];
 
+  // Rows per table: pg_dump writes a COPY block for EVERY table, an empty one too (COPY … FROM stdin; then \. at once), so a COPY line alone
+  // does not mean "with data" — count the data lines of each block.
+  const rowsByTable = {};
+  let inCopy = null;
+  for (const l of lines) {
+    if (inCopy !== null) {
+      if (l === '\\.' || l === '\\.\r') { inCopy = null; continue; }
+      rowsByTable[inCopy] += 1;
+      continue;
+    }
+    if (l.startsWith('COPY ') && /FROM stdin;\s*$/.test(l)) {
+      const m = l.match(/COPY\s+(\w+\.)?(\w+)\s/);
+      inCopy = m ? m[2] : 'unknown';
+      if (!(inCopy in rowsByTable)) rowsByTable[inCopy] = 0;
+    }
+  }
+
   const foundTables = {};
   for (const table of criticalTables) {
     // Check COPY or CREATE TABLE
     const hasCopy = copyStatements.includes(table);
     const hasCreate = createTables.includes(table);
-    foundTables[table] = { copy: hasCopy, create: hasCreate, present: hasCopy || hasCreate };
+    foundTables[table] = { copy: hasCopy, create: hasCreate, present: hasCopy || hasCreate, rows: hasCopy ? (rowsByTable[table] || 0) : 0 };
   }
 
   // Count auth schema items
@@ -305,7 +322,7 @@ async function main() {
   let missingCount = 0;
   for (const [table, status] of Object.entries(analysis.criticalTables)) {
     if (status.present) {
-      const hasData = status.copy ? ' (مع بيانات)' : ' (هيكل فقط)';
+      const hasData = describeTableData(status);
       console.log(`    ${C.green}✅${C.reset} ${table}${C.dim}${hasData}${C.reset}`);
     } else {
       console.log(`    ${C.red}❌${C.reset} ${table} — ${C.red}مفقود!${C.reset}`);
@@ -364,7 +381,18 @@ async function main() {
   console.log();
 }
 
-main().catch(e => {
-  err(`خطأ غير متوقع: ${e.message}`);
-  process.exit(1);
-});
+/** The note after a present critical table: its real row count, "empty" for a COPY block without rows, "structure only" without a COPY block. */
+function describeTableData(status) {
+  if (!status || !status.copy) return ' (هيكل فقط)';
+  const n = Number(status.rows) || 0;
+  return n > 0 ? ` (مع بيانات — ${n.toLocaleString('en-US')} صف)` : ' (فارغ — 0 صف)';
+}
+
+module.exports = { analyzeSql, describeTableData };
+
+if (require.main === module) {
+  main().catch(e => {
+    err(`خطأ غير متوقع: ${e.message}`);
+    process.exit(1);
+  });
+}

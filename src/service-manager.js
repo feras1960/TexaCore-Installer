@@ -69,7 +69,8 @@ class ServiceManager {
     this.status = 'stopped'; // stopped | starting | running | error
     this.tunnel = new TunnelMonitor();   // the honest state of the Cloudflare connector (tunnel-monitor.js)
     this.logger = null;                  // main.js passes its file logger (heartbeat.log) so tunnel events are diagnosable from the log the owner sends
-    this.hardwareIdProvider = null;      // main.js passes licenseGuard.getHardwareId (register-subdomain compares it with the licence's bound hardware)
+    this.hardwareIdProvider = null;
+    this.writeRefusal = null;            // 2.0.8: main.js — () => refusal | null while the licence is read-only (the local invite route asks it)      // main.js passes licenseGuard.getHardwareId (register-subdomain compares it with the licence's bound hardware)
 
     // 2.0.2: «connected» must mean the PUBLIC LINK reaches this machine, not only that cloudflared registered a connection (tunnel-route.js).
     this.bootId = tunnelRoute.newBootId();            // per process: the probe answers `texacore-probe:<nonce>:<bootId>`
@@ -268,7 +269,7 @@ class ServiceManager {
     this.repairing = true;
     this._tlog(`[Tunnel] repair (${trigger}): re-registering ${cfg.subdomain}.texacore.ai with this computer's hardware id`);
     let hw = null; try { hw = this.hardwareIdProvider ? this.hardwareIdProvider() : null; } catch { /* fall back to the hostname */ }
-    const res = await this._postRegister({ licenseKey: cfg.licenseKey || 'desktop-user', subdomain: cfg.subdomain, machineId: hw || require('os').hostname(), hostname: require('os').hostname(), companyName: 'TexaCore Desktop' });
+    const res = await this._postRegister(tunnelRoute.registerSubdomainBody({ licenseKey: cfg.licenseKey || 'desktop-user', subdomain: cfg.subdomain, hardwareId: hw, hostname: require('os').hostname(), companyName: 'TexaCore Desktop' }));
     const o = tunnelRoute.repairOutcome(res);
     if (o.outcome !== 'registered') {
       this._tlog(`[Tunnel] repair (${trigger}): register-subdomain answered ${o.outcome}${o.code ? ' (' + o.code + ')' : ''}${o.retryAfterSec ? ', retry after ' + o.retryAfterSec + 's' : ''} — nothing changed`);
@@ -1253,6 +1254,9 @@ class ServiceManager {
       }
       console.log(`[ServiceManager] Migrations: ${migrationResult.applied} applied, ${migrationResult.failed || 0} failed`);
 
+      // 4b. 2.0.8: the caller's hook BEFORE the API exists (main.js: the licence read-only state of the database). A throw fails the start (everything is stopped).
+      if (typeof options.beforeApi === 'function') await options.beforeApi();
+
       // 5. Start PostgREST — grants and RLS are production's, untouched (no GRANT ... TO anon, no DISABLE ROW LEVEL SECURITY)
       await this.startPostgREST();
 
@@ -1472,7 +1476,12 @@ window.__TEXACORE_CONFIG__ = {
       if (!this.localInviteRoutes) {
         this.localInviteRoutes = localInviteRoute.createLocalInviteRoutes({
           getDeps: () => (this.isRunning() ? (this.getProvisioningDeps ? this.getProvisioningDeps() : this.provisioningDeps()) : null),
-          invite: (deps, input) => provisioning.inviteLocalUserAsCaller(deps, input),
+          // 2.0.8: refused while the licence is read-only (main.js sets writeRefusal) — before GoTrue creates any account
+          invite: async (deps, input) => {
+            const ro = this.writeRefusal ? this.writeRefusal() : null;
+            if (ro) return { success: false, code: 'NOT_ALLOWED', reason: 'licence_read_only', error: ro.error };
+            return provisioning.inviteLocalUserAsCaller(deps, input);
+          },
           authenticate: (deps, token) => provisioning.authenticateCaller(deps, token),
           log: (m) => console.log(m),
         });
@@ -1720,15 +1729,15 @@ window.__TEXACORE_CONFIG__ = {
     try {
       const https = require('https');
       const autoFixResult = await new Promise((resolve, reject) => {
-        // register-subdomain refuses a licence bound to hardware unless `machineId` IS that hardware id (not the hostname)
+        // register-subdomain proves the device by `hardwareId` (tunnel-route.registerSubdomainBody: hardwareId + machineId + the real hostname)
         let hw = null; try { hw = this.hardwareIdProvider ? this.hardwareIdProvider() : null; } catch { /* fall back to the hostname */ }
-        const postData = JSON.stringify({
+        const postData = JSON.stringify(tunnelRoute.registerSubdomainBody({
           licenseKey: config.licenseKey || 'desktop-user',
           subdomain: config.subdomain,
-          machineId: hw || require('os').hostname(),
+          hardwareId: hw,
           hostname: require('os').hostname(),
           companyName: 'TexaCore Desktop'
-        });
+        }));
         const url = new URL('https://wzkklenfsaepegymfxfz.supabase.co/functions/v1/register-subdomain');
         const reqOpts = {
           hostname: url.hostname, port: 443, path: url.pathname,

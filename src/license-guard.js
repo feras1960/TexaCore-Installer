@@ -6,7 +6,7 @@
 const crypto = require('crypto');
 const fs = require('fs');
 const path = require('path');
-const { execSync } = require('child_process');
+const { execSync, execFileSync } = require('child_process');
 
 // ─── Obfuscated Constants ────────────────────────────────────
 // These are derived at runtime — not stored as plain strings
@@ -69,38 +69,129 @@ class LicenseGuard {
     this.licensePath = path.join(dataDir, 'license.dat'); // .dat not .json
     this.legacyPath = path.join(dataDir, 'license.json'); // for migration
     this._hwId = null;
+    // opts (tests only): platform / execSync / execFileSync / hostname / arch — the hardware-id probes are shell-outs; production passes none.
+    this._platform = (opts && opts.platform) || process.platform;
+    this._execSync = (opts && opts.execSync) || execSync;
+    this._execFileSync = (opts && opts.execFileSync) || execFileSync;
+    this._hostname = (opts && typeof opts.hostname === 'function') ? opts.hostname : () => require('os').hostname();
+    this._arch = (opts && opts.arch) || process.arch;
     this._cachedLicense = null;
     this._lastCheck = 0;
   }
 
   // ─── Hardware Fingerprint ──────────────────────────────────
+  // macOS: MAC-<serial>-<hardware uuid> (system_profiler). Linux: wmic (absent) → FALLBACK. Both unchanged.
+  // Windows (2.0.8): see _windowsHardwareId — the SAME `WIN-<SMBIOS uuid>` with or without wmic, and an existing licence.dat keeps the id it is bound to.
   getHardwareId() {
     if (this._hwId) return this._hwId;
 
+    if (this._platform === 'win32') {
+      this._hwId = this._windowsHardwareId();
+      return this._hwId;
+    }
+
     try {
-      if (process.platform === 'darwin') {
-        const serial = execSync(
+      if (this._platform === 'darwin') {
+        const serial = this._execSync(
           "system_profiler SPHardwareDataType | grep 'Serial Number' | awk '{print $NF}'",
           { timeout: 5000 }
         ).toString().trim();
-        const uuid = execSync(
+        const uuid = this._execSync(
           "system_profiler SPHardwareDataType | grep 'Hardware UUID' | awk '{print $NF}'",
           { timeout: 5000 }
         ).toString().trim();
         this._hwId = `MAC-${serial}-${uuid}`;
       } else {
-        const uuid = execSync(
+        const uuid = this._execSync(
           'wmic csproduct get uuid',
-          { timeout: 5000 }
+          { timeout: 5000, windowsHide: true }
         ).toString().trim().split('\n').pop().trim();
         this._hwId = `WIN-${uuid}`;
       }
     } catch {
       // Fallback: use hostname + arch
-      this._hwId = `FALLBACK-${require('os').hostname()}-${process.arch}`;
+      this._hwId = this._legacyFallbackId();
     }
 
     return this._hwId;
+  }
+
+  // The id every platform used when its probe failed — and what a Windows PC without wmic (11 24H2 / Server 2025) was bound to up to 2.0.7.
+  _legacyFallbackId() { return `FALLBACK-${this._hostname()}-${this._arch}`; }
+
+  // ─── Windows: the SMBIOS system UUID, with or without wmic ────
+  // Up to 2.0.7 the id was `WIN-` + `wmic csproduct get uuid`, else FALLBACK-<hostname>-<arch>. wmic is gone from Windows 11 24H2 / Server 2025, so those
+  // PCs got the host-name id and renaming the PC invalidated license.dat. Now:
+  //   1. wmic csproduct get uuid                                       (unchanged: same command, same parsing → same id where wmic exists)
+  //   2. PowerShell (Get-CimInstance Win32_ComputerSystemProduct).UUID  (the SAME WMI property wmic reads → the same WIN-<uuid> where wmic is missing)
+  //   3. WINMG-<HKLM\SOFTWARE\Microsoft\Cryptography MachineGuid>       (stable per Windows install; only when neither query answers)
+  //   4. FALLBACK-<hostname>-<arch>                                     (as before)
+  // A licence.dat that ALREADY exists is bound (its `hw` field = sha256(id)[:16], and its AES key / HMAC derive from the id) to whatever id this PC had
+  // when it was written — for a PC without wmic that is the FALLBACK id, which the server also holds as the licence's hardware_id. So when license.dat
+  // exists and the first id of the chain is not the one it is bound to, the other ids this PC can produce are tried, and the one license.dat is bound
+  // to is used — for decryption AND for what is sent to the server, so the binding on both sides stays exactly what it was (no rebind: a local rebind
+  // alone would make the heartbeat send an id the server does not hold → HARDWARE_MISMATCH). A licence written from now on binds to WIN-<uuid>.
+  // Only ids THIS PC computes are candidates (nothing is read from the file but the 16-hex hash), so a license.dat copied from another PC still fails.
+  _windowsHardwareId() {
+    const memo = {};
+    const once = (k, fn) => { if (!(k in memo)) { try { memo[k] = fn(); } catch { memo[k] = null; } } return memo[k]; };
+    const wmic = () => once('wmic', () => this._wmicUuid());          // string ('' possible, as before) or null when wmic is missing / failed
+    const cim = () => once('cim', () => this._cimUuid());              // non-empty string, or null (PowerShell failed / the property is empty)
+    const guid = () => once('guid', () => this._machineGuid());        // non-empty string or null
+    const candidates = [
+      () => (wmic() !== null ? `WIN-${wmic()}` : null),                 // exactly the 2.0.7 id when wmic answers
+      () => (cim() ? `WIN-${cim()}` : null),                             // the same WMI property → the same id wmic gives
+      () => (guid() ? `WINMG-${guid()}` : null),
+      () => this._legacyFallbackId(),
+    ];
+    // the first id the chain produces (what a NEW licence binds to)
+    let primary = null;
+    for (const c of candidates) { primary = c(); if (primary) break; }
+    const bound = this._boundHwHash();
+    if (!bound || this._hwHash(primary) === bound) return primary;
+    // license.dat is bound to another id: is it one this PC can still produce?
+    for (const c of candidates) {
+      const id = c();
+      if (id && id !== primary && this._hwHash(id) === bound) {
+        console.warn(`[LicenseGuard] license.dat is bound to this PC's ${id.startsWith('FALLBACK-') ? 'host-name' : id.startsWith('WINMG-') ? 'MachineGuid' : 'SMBIOS'} id — kept`);
+        return id;
+      }
+    }
+    return primary;   // bound to an id this PC cannot produce (another PC, or a renamed PC with a host-name licence): as before, it does not open
+  }
+
+  _wmicUuid() {
+    return this._execSync('wmic csproduct get uuid', { timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] })
+      .toString().trim().split('\n').pop().trim();
+  }
+
+  _cimUuid() {
+    const root = (process.env.SystemRoot || process.env.windir || 'C:\\Windows');
+    const ps = path.win32.join(root, 'System32', 'WindowsPowerShell', 'v1.0', 'powershell.exe');
+    const out = this._execFileSync(ps, ['-NoProfile', '-NonInteractive', '-ExecutionPolicy', 'Bypass', '-Command',
+      '(Get-CimInstance -ClassName Win32_ComputerSystemProduct).UUID'],
+      { timeout: 10000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+    const lines = out.split(/\r?\n/).map((l) => l.trim()).filter(Boolean);
+    const v = lines.length ? lines[lines.length - 1] : '';
+    return /^\S{1,200}$/.test(v) ? v : null;   // the property value as WMI holds it; empty → null (errors go to stderr, which is not read)
+  }
+
+  _machineGuid() {
+    const out = this._execFileSync('reg', ['query', 'HKLM\\SOFTWARE\\Microsoft\\Cryptography', '/v', 'MachineGuid'],
+      { timeout: 5000, windowsHide: true, stdio: ['ignore', 'pipe', 'ignore'] }).toString();
+    const m = /MachineGuid\s+REG_SZ\s+([0-9A-Fa-f-]{32,40})/i.exec(out);
+    return m ? m[1].toLowerCase() : null;
+  }
+
+  _hwHash(id) { return crypto.createHash('sha256').update(String(id)).digest('hex').slice(0, 16); }
+
+  // The `hw` field of an existing license.dat (the 16-hex hash of the id it is bound to), or null (no file / unreadable / not v2).
+  _boundHwHash() {
+    try {
+      if (!fs.existsSync(this.licensePath)) return null;
+      const p = JSON.parse(fs.readFileSync(this.licensePath, 'utf8'));
+      return p && p.v === 2 && typeof p.hw === 'string' && /^[0-9a-f]{16}$/.test(p.hw) ? p.hw : null;
+    } catch { return null; }
   }
 
   // ─── Derive encryption key from hardware ID ────────────────

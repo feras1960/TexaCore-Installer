@@ -1243,11 +1243,13 @@ class BackupManager {
    * @param {object} opts
    * @param {string} opts.licensingUrl - Supabase functions URL
    * @param {string} opts.licenseKey  - License key for auth
+   * @param {string} [opts.hardwareId] - The licence hardware id (sent as hardware_id; the server verifies the device with it)
    * @param {number} opts.cloudIntervalMs - Upload interval (default: 6 hours)
    */
   configureCloudSync(opts) {
     this._cloudUrl = opts.licensingUrl;
     this._licenseKey = opts.licenseKey;
+    this._hardwareId = (typeof opts.hardwareId === 'string' && opts.hardwareId) ? opts.hardwareId : null;   // the licence hardware id (license-cloud-backup verifies the device)
     this._cloudIntervalMs = opts.cloudIntervalMs || 6 * 60 * 60 * 1000; // 6 hours
     this._cloudUploadCount = 0;
     this._lastCloudUpload = null;
@@ -1311,6 +1313,7 @@ class BackupManager {
 
       const result = await this._httpPost(`${this._cloudUrl}/license-cloud-backup`, {
         license_key: this._licenseKey,
+        ...(this._hardwareId ? { hardware_id: this._hardwareId } : {}),
         file_size_mb: fileSizeMb,
         db_size_mb: info ? +(info.originalSize / 1024 / 1024).toFixed(2) : 0,
         checksum,
