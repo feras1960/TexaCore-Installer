@@ -4,8 +4,8 @@
 //
 // wmic.exe is gone from Windows 11 24H2 / Windows Server 2025 (the GitHub-hosted Windows runner of the smoke test of 2.0.6 has none): both calls threw, the surrounding
 // try/catch swallowed it and the fields went out empty. wmic stays the FIRST choice (older Windows, unchanged answers); PowerShell's Get-CimInstance is the fallback.
-// TELEMETRY ONLY. The licence's hardware id (license-guard.js getHardwareId) is deliberately not touched: changing what it reads would change the id and
-// invalidate every issued licence (its own fallback, the host name, is what a machine without wmic uses today).
+// TELEMETRY ONLY. The licence's hardware id is license-guard.js getHardwareId (2.0.8: its own wmic → Get-CimInstance → MachineGuid → host-name chain, and an
+// existing license.dat keeps the id it is bound to - see _windowsHardwareId there).
 // ════════════════════════════════════════════════════════════════
 const path = require('path');
 const { execFileSync, execSync } = require('child_process');

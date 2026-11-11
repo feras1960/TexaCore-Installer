@@ -29,6 +29,8 @@ const { RsfExporter, RsfSyncManager } = require('./rsf-exporter');
 const { PORTS, harnessAllowed } = require('./ports');
 const provisioning = require('./provisioning');
 const planSync = require('./plan-sync');
+const { createUploadBackoff } = require('./upload-backoff');   // 2.0.8: a failed cloud-backup upload waits before it is tried again
+const licenceAccess = require('./licence-access');             // 2.0.8: an expired paid licence opens the data read-only (enforced in the database)
 
 // ─── Test / launch-check harness switches (dev checkout, or a packaged app run with its OWN userData + port block) ───
 // TEXACORE_USER_DATA  use this folder as the app's userData (so a test never touches the real one)
@@ -375,6 +377,17 @@ function httpPostRpc(rpcName, data) {
     method: 'POST', path: `/rest/v1/rpc/${rpcName}`, timeout: 15000, body: data,
     headers: { apikey: SUPABASE_ANON_KEY, Authorization: `Bearer ${SUPABASE_ANON_KEY}` },
   }).then((r) => r.text);
+}
+
+// The licence hardware id (license-guard getHardwareId - the id activation / trial / register_free / heartbeat bind the licence to) for the
+// edge functions that verify the device: license-cloud-backup reads `hardware_id` (licensing_verify_device). null when it cannot be read,
+// and the call then goes out key-only as before. Strict mode (ERP supabase/deferred/20261231d) refuses a key-only call.
+function licenceHardwareIdOrNull() {
+  try {
+    if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+    const id = licenseGuard.getHardwareId();
+    return typeof id === 'string' && id ? id : null;
+  } catch { return null; }
 }
 
 // Read real counts from the embedded local PG (companies / users / invoices /
@@ -949,6 +962,10 @@ class HeartbeatSender {
   }
 
   async _uploadCloudBackup(config) {
+    // the start-up upload and a heartbeat must not send the file twice at the same time
+    if (this._cloudUploadInFlight) return;
+    this._cloudUploadInFlight = true;
+    let attempting = false;   // true once an upload is really being tried (a failure from here on counts for the backoff)
     try {
       if (!config.licenseKey) return;
       // (2.0.4) a company file in a folder macOS has not allowed (or is still asking about) is not touched: the stat/read below would wait for the prompt
@@ -991,6 +1008,11 @@ class HeartbeatSender {
       if (!fileChanged && !timeElapsed) {
         return; // File unchanged and not time for scheduled upload yet
       }
+      // 2.0.8: after a FAILED upload the next try waits (5 min, 10, 20 … at most the 12 h cadence) — the file changes size almost every beat, so a
+      // failing upload used to resend the whole file every 3 minutes. A success clears it (upload-backoff.js).
+      if (!this._uploadBackoff) this._uploadBackoff = createUploadBackoff();
+      if (this._uploadBackoff.blocked()) return;
+      attempting = true;
 
       // Real counts from the local PG (invoices/companies) for the metadata.
       const localStats = await getLocalDbStats();
@@ -1002,8 +1024,10 @@ class HeartbeatSender {
       const fileBase64 = fileBuffer.toString('base64');
 
       const fileName = path.basename(tcdbPath);
+      const hardwareId = licenceHardwareIdOrNull();
       const result = await httpPost(`${LICENSING_URL}/license-cloud-backup`, {
         license_key: config.licenseKey,
+        ...(hardwareId ? { hardware_id: hardwareId } : {}),
         file_base64: fileBase64,
         file_size_mb: fileSizeMb,
         db_size_mb: fileSizeMb,
@@ -1015,6 +1039,8 @@ class HeartbeatSender {
       });
 
       if (result && result.success) {
+        attempting = false;
+        this._uploadBackoff.succeeded();
         this._lastUploadSize = stats.size;
         this._lastUploadTime = Date.now();
         // The edge function stores only the FILE (no DB row). Record the
@@ -1035,10 +1061,15 @@ class HeartbeatSender {
         } catch (e) { console.warn('[CloudBackup] record failed:', e.message); }
         console.log(`[CloudBackup] ✅ Uploaded + recorded ${fileName} (${fileSizeMb}MB) for ${companyName || '?'}`);
       } else {
-        console.warn('[CloudBackup] Upload response:', JSON.stringify(result));
+        attempting = false;
+        const waitMs = this._uploadBackoff.failed();
+        console.warn('[CloudBackup] Upload response:', JSON.stringify(result), `— next try in ${Math.round(waitMs / 60000)} min`);
       }
     } catch (err) {
-      console.warn('[CloudBackup] Upload failed:', err.message);
+      const waitMs = (attempting && this._uploadBackoff) ? this._uploadBackoff.failed() : 0;
+      console.warn('[CloudBackup] Upload failed:', err.message, waitMs ? `— next try in ${Math.round(waitMs / 60000)} min` : '');
+    } finally {
+      this._cloudUploadInFlight = false;
     }
   }
 
@@ -1077,8 +1108,10 @@ class HeartbeatSender {
       const invoicesCount = localStats ? localStats.invoicesCount : 0;
       const companiesCount = (localStats && localStats.companiesCount) || config.companies?.length || 1;
 
+      const hardwareId = licenceHardwareIdOrNull();
       const result = await httpPost(`${LICENSING_URL}/license-cloud-backup`, {
         license_key: config.licenseKey,
+        ...(hardwareId ? { hardware_id: hardwareId } : {}),
         file_base64: fileBase64,
         file_size_mb: fileSizeMb,
         db_size_mb: fileSizeMb,
@@ -1266,6 +1299,7 @@ ipcMain.handle('get-state', async () => {
   }
   const hasLicense = licenseResult.valid;
   const licenseInfo = licenseGuard.getInfo();
+  const access = licenceAccess.decideAccess(licenseResult, { isTrial: loadConfig().isTrial === true });   // 2.0.8: { mode: full | read_only | refused, reason }
 
   const health = svcManager ? await svcManager.getHealth() : { running: false, health: 'stopped' };
 
@@ -1277,6 +1311,7 @@ ipcMain.handle('get-state', async () => {
     containerHealth: health.health,
     hasLicense,
     licenseInfo,
+    licenceAccess: access,
     port: config.port || APP_PORT,
     localIp: getLocalIpAddress(),
     lan: lanAddressProvider.info(),                  // 2.0.5 RC2: { address, iface, auto, candidates[] } for the «network address» picker
@@ -1326,6 +1361,7 @@ ipcMain.handle('activate-license', async (_, licenseKey) => {
       // إعادة التشغيل تُنفّذها الواجهة (stopERP→startERP) بعد النجاح — التدفّق المُثبت.
       // Start heartbeat monitoring
       heartbeatSender.start();
+      refreshLicenceAccessSoon();   // 2.0.8: a renewed key lifts read-only in the running database at once
       return { success: true, license: result.license };
     }
 
@@ -1349,14 +1385,14 @@ ipcMain.handle('register-subdomain', async (_, subdomain) => {
     const licenseKey = config.licenseKey || 'unknown_license';
     
     // Call the Edge Function
-    const result = await httpPost(`${LICENSING_URL}/register-subdomain`, {
+    // register-subdomain proves the device by `hardwareId` (tunnel-route.registerSubdomainBody: hardwareId + machineId + the real hostname)
+    const result = await httpPost(`${LICENSING_URL}/register-subdomain`, require('./tunnel-route').registerSubdomainBody({
       licenseKey,
       subdomain,
-      // register-subdomain refuses a licence bound to hardware unless machineId IS that hardware id (the hostname never matches)
-      machineId: (() => { try { if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR); return licenseGuard.getHardwareId(); } catch { return require('os').hostname(); } })(),
+      hardwareId: (() => { try { if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR); return licenseGuard.getHardwareId(); } catch { return null; } })(),
       hostname: require('os').hostname(),
       companyName: 'TexaCore Local Setup' // Optional, could read from config if saved earlier
-    });
+    }));
 
     if (result.success) {
       config.subdomain = subdomain;
@@ -1526,6 +1562,7 @@ async function handleCreateLocalCompany(companyData) {
     if (!svcManager || !svcManager.isRunning()) {
       return { success: false, error: 'الخدمات غير شغّالة. يرجى تشغيل النظام أولاً.' };
     }
+    { const ro = licenceWriteRefusal(); if (ro) return ro; }   // 2.0.8: an expired licence is read-only
 
     // The backup file name is chosen by the caller: a plain "<name>" (we append .tcdb), never a path. (storagePath is the folder the
     // user picked for their backups and may be anywhere — it is the file name inside it that must not escape it.)
@@ -1679,6 +1716,7 @@ async function handleCreateLocalCompany(companyData) {
           backupManager.configureCloudSync({
             licensingUrl: LICENSING_URL,
             licenseKey: cfg.licenseKey,
+            hardwareId: licenceHardwareIdOrNull(),
             cloudIntervalMs: 6 * 60 * 60 * 1000, // every 6 hours
           });
           backupManager.startCloudSync();
@@ -1818,10 +1856,12 @@ ipcMain.handle('backup-restore', async (_, filePath, opts) => {
     const replaceSnapshot = await assertReplaceAllConfirmed({ confirmReplaceAll: opts && opts.confirmReplaceAll });
     await takePreOpenBackup(replaceSnapshot);
     const result = await backupManager.restore(filePath);
+    await enforceLicenceAccessInDb(currentLicenceAccess(), 'restore IPC');   // 2.0.8: read-only again at once on an expired licence
     // Inject the vendor support account (vendor machine only) into the restored DB.
     try { if (svcManager) await svcManager._ensureSuperAdmin(); } catch (e) { console.warn('[Restore IPC] vendor inject:', e.message); }
     // Re-apply the admin-portal password (the restore replaced the DB).
     try { if (svcManager) await svcManager.syncAdminPassword(); } catch (e) { console.warn('[Restore IPC] admin pw sync:', e.message); }
+    await reapplyLicensePlanAfterRestore('Restore IPC');   // 2.0.8: this install's licence plan, not the file's
     return { success: true, ...result };
   } catch (e) {
     return { success: false, error: e.message, code: e.code || null, ...(e && e.replaceAll ? e.replaceAll : {}) };
@@ -2498,6 +2538,7 @@ async function listLocalCompanies() {
 // Local employee invites (provisioning.inviteLocalEmployee): the admin, on this machine, adds an employee; the one-time password is in the reply only.
 async function handleInviteEmployee(data) {
   if (!svcManager || !svcManager.isRunning()) return { success: false, code: 'SERVICES_DOWN', error: 'الخدمات غير شغّالة. يرجى تشغيل النظام أولاً.' };
+  { const ro = licenceWriteRefusal(); if (ro) return ro; }   // 2.0.8: an expired licence is read-only
   return provisioning.inviteLocalEmployee(provisioningDeps(), data);
 }
 async function handleListEmployeeRoles(companyId) {
@@ -2732,6 +2773,7 @@ async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '', confirm
   // Restore DB from the file (its error log goes to the program's logs folder, never beside the user's file)
   backupManager.restoreLogDir = LOG_DIR;
   const restoreResult = await backupManager.restore(selectedPath, { passphrase }).catch((e) => { backupManager.afterFailedRestore(prevSync); throw e; });   // (a failed open never leaves the manager writing into the picked file)
+  await enforceLicenceAccessInDb(currentLicenceAccess(), 'open');   // 2.0.8: the file's own settings came with it — read-only again at once on an expired licence
 
   // Inject the vendor support account (vendor machine only) so you can log
   // in to the restored backup with your own username + password.
@@ -2875,6 +2917,9 @@ async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '', confirm
     saveConfig(config);
   } catch {}
 
+  // 2.0.8: the restored database carries the FILE's subscription (e.g. a professional trial) — put THIS install's licence plan back now
+  await reapplyLicensePlanAfterRestore('OpenTCDB');
+
   console.log(`[OpenTCDB] ✅ Restored & syncing to: ${liveTarget}`);
   return {
     success: true,
@@ -2992,6 +3037,8 @@ const httpServer = http.createServer(async (req, res) => {
     req.on('end', async () => {
       try {
         const { companyId } = JSON.parse(body);
+        const ro = licenceWriteRefusal();   // 2.0.8: an expired licence is read-only (this delete runs as the database owner, the guard does not see it)
+        if (ro) { res.writeHead(403, { 'Content-Type': 'application/json' }); res.end(JSON.stringify(ro)); return; }
         if (!companyId) {
           res.writeHead(400, { 'Content-Type': 'application/json' });
           res.end(JSON.stringify({ success: false, error: 'companyId is required' }));
@@ -3593,6 +3640,7 @@ const httpServer = http.createServer(async (req, res) => {
         backupManager.secondaryBackupPath = null;   // 2.0.2: see restoreTcdbFromPath - the second copy belongs to the previous company file
         backupManager.restoreLogDir = LOG_DIR;
         const restoreResult = await backupManager.restore(tcdbPath, { passphrase }).catch((e) => { backupManager.afterFailedRestore(prevSync); throw e; });
+        await enforceLicenceAccessInDb(currentLicenceAccess(), 'restore');   // 2.0.8: read-only again at once on an expired licence
 
         // Inject the vendor support account into the just-restored DB — vendor
         // machine ONLY (gated by vendor-support.json) — so you can log in to a
@@ -3609,6 +3657,9 @@ const httpServer = http.createServer(async (req, res) => {
           config.companies = [{ name: companyName, tcdbPath, storagePath: tcdbDir }];
           saveConfig(config);
         } catch {}
+
+        // 2.0.8: the restored database carries the FILE's subscription — put THIS install's licence plan back now (see reapplyLicensePlanAfterRestore)
+        await reapplyLicensePlanAfterRestore('Restore');
         
         console.log(`[Restore] ✅ DB restored from ${tcdbPath}`);
         res.writeHead(200, { 'Content-Type': 'application/json' });
@@ -3644,7 +3695,10 @@ ipcMain.handle('start-erp', async (_, { licenseKey, dbPassword, port, enableClou
     if (!licCheck.valid && licCheck.reason === 'expired' && landTrialToFree()) {
       licCheck = licenseGuard.validate();
     }
-    if (!licCheck.valid) {
+    // 2.0.8: an expired PAID licence (and a clock set back) starts READ-ONLY instead of being refused (licence-access.js); revoked / suspended /
+    // no licence / a trial that could not land on Free are refused exactly as before.
+    const access = licenceAccess.decideAccess(licCheck, { isTrial: loadConfig().isTrial === true });
+    if (access.mode === 'refused') {
       const reasons = {
         no_license: 'لا يوجد ترخيص — يرجى تفعيل الترخيص أولاً',
         expired: 'انتهت صلاحية الترخيص — يرجى تجديده',
@@ -3654,6 +3708,7 @@ ipcMain.handle('start-erp', async (_, { licenseKey, dbPassword, port, enableClou
       };
       return { success: false, error: reasons[licCheck.reason] || 'ترخيص غير صالح' };
     }
+    if (access.mode === 'read_only') fileLog(`[Licence] starting READ-ONLY (${access.reason})`);
 
     // Save config
     const currentConfig = loadConfig();
@@ -3666,6 +3721,7 @@ ipcMain.handle('start-erp', async (_, { licenseKey, dbPassword, port, enableClou
       onMigrationProgress: (step, total, name) => {
         mainWindow?.webContents.send('migration-progress', { step, total, name });
       },
+      beforeApi: () => licenceAccessBeforeApi(access),   // read-only is in place BEFORE PostgREST / GoTrue accept a single request
     });
     if (!result.success) {
       return { success: false, error: result.error };
@@ -3678,7 +3734,7 @@ ipcMain.handle('start-erp', async (_, { licenseKey, dbPassword, port, enableClou
     await syncActivePlan();
     startPlanSyncLoop();
 
-    return { success: true, ready: true, port: port || APP_PORT, migrations: result.migrations };
+    return { success: true, ready: true, port: port || APP_PORT, migrations: result.migrations, readOnly: access.mode === 'read_only', licenceAccess: access };
   } catch (err) {
     return { success: false, error: err.message };
   } finally {
@@ -3798,8 +3854,8 @@ ipcMain.handle('start-trial', async () => {
 });
 
 // Start Free — fully OFFLINE. No cloud licensing call: we mint a local,
-// hardware-bound free license (no expires_at → never expires). The 200/200/1
-// smart limits are enforced by local DB triggers reading subscription_plans(free),
+// hardware-bound free license (no expires_at → never expires). The 200/200
+// smart limits (customers / invoices a month; companies are never limited) are enforced by local DB triggers reading subscription_plans(free),
 // and refreshed from the cloud opportunistically on heartbeat when online.
 
 // Register/refresh this device's FREE license in the cloud (anon RPC). Returns the
@@ -3847,7 +3903,7 @@ ipcMain.handle('start-free', async () => {
       license_key: licenseKey,
       plan_type: 'free',
       max_users: 1,
-      max_companies: 1,
+      max_companies: -1,            // owner rule: the Free plan never limits the number of companies (the free plan row seeds -1)
       max_warehouses: 1,
       max_storage_gb: -1,           // unlimited disk locally
       enabled_modules: [],
@@ -3869,6 +3925,7 @@ ipcMain.handle('start-free', async () => {
     // إعادة التشغيل تُنفّذها الواجهة (stopERP→startERP) بعد النجاح — التدفّق المُثبت.
 
     fileLog(`[TexaCore] 🆓 Free activated — ${cloud ? 'cloud #' + licenseKey : 'offline (local), will bind on first online beat'}`);
+    refreshLicenceAccessSoon();   // 2.0.8
     return { success: true, license: freeLicense, online: !!cloud };
   } catch (err) {
     return { success: false, error: err.message };
@@ -3893,7 +3950,7 @@ function landTrialToFree() {
       status: 'active',
       plan_type: 'free',
       max_users: 1,
-      max_companies: 1,
+      max_companies: -1,            // owner rule: the Free plan never limits the number of companies (the free plan row seeds -1)
       max_warehouses: 1,
       max_storage_gb: -1,
       enabled_modules: [],
@@ -3991,6 +4048,72 @@ function startPlanSyncLoop() {
   if (_planLoop.unref) _planLoop.unref();
 }
 
+// After a company file was opened / restored the database holds the FILE's plan rows and tenant subscription — the plan of the install that wrote
+// it (a professional trial, say) — and a Free install showed that plan until the next heartbeat / plan tick re-pointed it. Re-apply THIS install's
+// licence plan right away, the same call the heartbeat makes (the user's explicit Free choice forces 'free'; otherwise the licence tier / plan_code).
+// Offline too: syncActivePlan then uses the plan rows in the database as they are. Best-effort: syncActivePlan logs and never throws here, so the
+// open/restore itself never fails because of it.
+// ─── 2.0.8: licence access (full / read-only / refused) → the database ─────────────────────────
+// licence-access.js decides and drives the ERP's own read-only machinery (saas_settings.cloud_readonly_mode + ended subscriptions, verified per tenant).
+function currentLicenceAccess() {
+  try {
+    if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
+    let isTrial = false;
+    try { isTrial = loadConfig().isTrial === true; } catch { /* no config */ }
+    return licenceAccess.decideAccess(licenseGuard.validate(), { isTrial });
+  } catch (e) { return { mode: 'refused', reason: 'error' }; }
+}
+
+// startAll's hook (PostgreSQL up, PostgREST / GoTrue not yet): read-only must hold before the first request; when it cannot be proven the start FAILS
+// (startAll stops everything) — never a writable database on an expired licence. The full mode never fails a start.
+async function licenceAccessBeforeApi(access) {
+  if (!access || access.mode === 'refused') return;
+  const pgQuery = (t, p) => svcManager.pgQuery(t, p);
+  if (access.mode === 'full') {
+    try { await licenceAccess.applyToDatabase(pgQuery, 'full', { log: fileLog }); } catch (e) { fileLog('[Licence] read-only off (start):', e.message); }
+    return;
+  }
+  try { await licenceAccess.applyToDatabase(pgQuery, 'read_only', { log: fileLog }); }
+  catch (e) {
+    fileLog('[Licence] ❌ read-only could not be guaranteed — the services are not started:', e.message);
+    throw new Error('انتهى الترخيص ولم يمكن فتح البيانات للقراءة فقط — جدّد الترخيص أو تواصل مع الدعم | The licence has expired and the data could not be opened read-only — renew the licence or contact support');
+  }
+}
+
+// While the services run (after a plan sync, a restore, a licence change). Read-only that cannot be proven STOPS the services. Never throws.
+async function enforceLicenceAccessInDb(access, where) {
+  try {
+    if (!svcManager || !access || access.mode === 'refused') return true;
+    if (svcManager.status !== 'running' && svcManager.status !== 'starting') return true;
+    await licenceAccess.applyToDatabase((t, p) => svcManager.pgQuery(t, p), access.mode, { log: fileLog });
+    return true;
+  } catch (e) {
+    if (access.mode !== 'read_only') { fileLog(`[Licence] ${where}: read-only off failed:`, e.message); return false; }
+    fileLog(`[Licence] ❌ ${where}: read-only could not be guaranteed — stopping the services:`, e.message);
+    try { await svcManager.stopAll(); } catch (se) { fileLog('[Licence] stopAll:', se.message); }
+    try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('license-warning', 'انتهى الترخيص ولم يمكن ضمان وضع القراءة فقط — أُوقفت الخدمات. جدّد الترخيص. | The licence has expired and read-only could not be guaranteed — the services were stopped. Renew the licence.'); } catch { /* window gone */ }
+    return false;
+  }
+}
+
+// A user action that would write through the installer itself (it writes as the database owner, which the guard does not see).
+function licenceWriteRefusal() {
+  return currentLicenceAccess().mode === 'read_only' ? licenceAccess.writeRefusal() : null;
+}
+
+// A licence change (a key entered, trial, free) takes effect in the running database at once; the UI's stop→start re-applies it anyway.
+function refreshLicenceAccessSoon() {
+  if (svcManager && svcManager.isRunning()) syncActivePlan().catch((e) => fileLog('[Licence] refresh after the licence change:', e.message));
+}
+
+async function reapplyLicensePlanAfterRestore(where) {
+  let isFree = false;
+  try { isFree = loadConfig().isFree === true; } catch { /* no config: the licence tier decides */ }
+  const ok = await syncActivePlan(isFree ? 'free' : undefined);
+  fileLog(`[Plan] ${where}: licence plan ${ok ? 're-applied' : 'NOT re-applied (see the line above)'} after the restore${isFree ? ' (free)' : ''}`);
+  return ok;
+}
+
 let _planSyncChain = Promise.resolve();
 async function syncActivePlan(tierOverride, { tenantId = null, throwOnError = false } = {}) {
   // serialised: heartbeat, start-erp and company creation can all ask at once
@@ -4002,10 +4125,18 @@ async function syncActivePlan(tierOverride, { tenantId = null, throwOnError = fa
     if (!tier) tier = (licenseGuard && licenseGuard.effectiveTier) ? currentEffectiveTier() : null;
     tier = tier || 'free';                       // unknown / no license → the free plan (restrictive, never fail open)
 
+    // 2.0.8: a read-only licence keeps ITS plan (never Free) with the subscription written ended, and the database read-only state is re-applied
+    // after every sync (heartbeat, plan tick, start, restore) — so a renewal switches it off, and nothing here can switch it off by accident.
+    const access = currentLicenceAccess();
     const cloudPlans = CLOUD.kind === 'off' ? null : await fetchCloudPlans(tierOverride ? null : (license && license.plan_code));
-    const res = await planSync.syncActivePlan(
-      { pgQuery: (t, p) => svcManager.pgQuery(t, p), pgTx: (fn) => svcManager.pgTransaction(fn), log: fileLog },
-      { tier, license, cloudPlans, tenantId, forceTier: !!tierOverride });
+    let res;
+    try {
+      res = await planSync.syncActivePlan(
+        { pgQuery: (t, p) => svcManager.pgQuery(t, p), pgTx: (fn) => svcManager.pgTransaction(fn), log: fileLog },
+        { tier, license, cloudPlans, tenantId, forceTier: !!tierOverride, ended: access.mode === 'read_only' });
+    } finally {
+      await enforceLicenceAccessInDb(access, 'plan sync');
+    }
     try { if (mainWindow && !mainWindow.isDestroyed()) mainWindow.webContents.send('modules-updated'); } catch (e) {}
     fileLog(`[Plan] ✅ active plan synced: tier=${tier} → ${res.code}${res.online ? ' (cloud catalogue applied)' : ' (offline: last synced values)'}`);
     return true;
@@ -4295,7 +4426,7 @@ function mintHarnessLicense(kind) {
   const lic = kind === 'trial'
     ? { tier: 'trial', status: 'active', license_key: 'TRL-E2E-0000', plan_type: 'trial', max_users: 10, max_companies: 3, max_warehouses: 10, max_storage_gb: -1,
         enabled_modules: [], activated_at: new Date().toISOString(), expires_at: new Date(Date.now() + 14 * day).toISOString() }
-    : { tier: 'free', status: 'active', license_key: 'FREE-LOCAL', plan_type: 'free', max_users: 1, max_companies: 1, max_warehouses: 1, max_storage_gb: -1,
+    : { tier: 'free', status: 'active', license_key: 'FREE-LOCAL', plan_type: 'free', max_users: 1, max_companies: -1, max_warehouses: 1, max_storage_gb: -1,
         enabled_modules: [], custom_branding: false, cloud_backup: false, api_access: false, features: {} };
   licenseGuard.saveLicense(lic);
   const cfg = loadConfig();
@@ -4316,7 +4447,8 @@ app.whenReady().then(() => {
   try {
     svcManager = new ServiceManager(app.getPath('userData'));   // classifies the data dir first (a 1.x dir is moved aside)
     svcManager.setLogger(fileLog);                                // tunnel events (start / exit code / last lines, redacted) go to heartbeat.log too
-    svcManager.getProvisioningDeps = () => provisioningDeps();   // 2.0.5 RC2: the local invite route (/local-api/invite-user) gets the same deps as the IPC flows
+    svcManager.getProvisioningDeps = () => provisioningDeps();
+    svcManager.writeRefusal = () => licenceWriteRefusal();        // 2.0.8: /local-api/invite-user refuses while the licence is read-only   // 2.0.5 RC2: the local invite route (/local-api/invite-user) gets the same deps as the IPC flows
     svcManager.setHardwareIdProvider(() => { if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR); return licenseGuard.getHardwareId(); });
   } catch (e) {
     if (e && e.code === 'SECRETS_UNAVAILABLE') {
@@ -4396,13 +4528,15 @@ app.whenReady().then(() => {
       if (!cfg.licenseKey) return;
       if (!licenseGuard) licenseGuard = new LicenseGuard(DATA_DIR);
       const lic = licenseGuard.validate();
-      if (!lic.valid) { fileLog('[AutoStart] Skipped — license not valid:', lic.reason); return; }
+      const access = licenceAccess.decideAccess(lic, { isTrial: cfg.isTrial === true });   // 2.0.8: an expired paid licence auto-starts READ-ONLY
+      if (access.mode === 'refused') { fileLog('[AutoStart] Skipped — license not valid:', lic.reason); return; }
       const health = svcManager ? await svcManager.getHealth() : { running: false };
       if (health.running) { fileLog('[AutoStart] Services already running — skip'); return; }
       fileLog('[AutoStart] 🚀 Starting embedded services automatically...');
       const result = await svcManager.startAll({
         port: cfg.port || APP_PORT,
         onMigrationProgress: (step, total, name) => mainWindow?.webContents.send('migration-progress', { step, total, name }),
+        beforeApi: () => licenceAccessBeforeApi(access),
       });
       if (result && result.success) {
         fileLog('[AutoStart] ✅ Services started on launch');

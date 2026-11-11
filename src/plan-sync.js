@@ -136,8 +136,11 @@ async function applyLicenseOverrides(pgQuery, planId, license, pgTx) {
   return applied;
 }
 
-/** The subscription row's status and dates for a tier. `today` is injectable for tests (ISO date). */
-function subscriptionDates({ tier, license, today = new Date().toISOString().slice(0, 10) }) {
+/** The subscription row's status and dates for a tier. `today` is injectable for tests (ISO date).
+ *  ended (2.0.8, licence-access.js): the licence is READ-ONLY — the row must not entitle the tenant today whatever the licence's dates say (an
+ *  expired paid licence, or a clock set back): status 'expired' (pointTenantAtPlan clears grace_period_end), so fn_tenant_ended is true. */
+function subscriptionDates({ tier, license, today = new Date().toISOString().slice(0, 10), ended = false }) {
+  if (ended) return { ...subscriptionDates({ tier, license, today }), status: 'expired' };
   const date = (v) => { if (!v) return null; const d = new Date(v); return Number.isNaN(d.getTime()) ? null : d.toISOString().slice(0, 10); };
   const exp = date(license && license.expires_at);
   const start = date(license && license.activated_at) || today;
@@ -178,9 +181,10 @@ async function pointTenantAtPlan(pgQuery, tenantId, planId, dates) {
  * input: { tier, license, cloudPlans, tenantId? (default: every tenant), forceTier?, today? }
  *   cloudPlans — the control panel's plan rows when the cloud answered, else null/[] (offline: the local rows are used as they are)
  *   forceTier  — plan by tier only, ignoring the licence's plan_code/custom_limits (the user chose Free: a cloud 'trial' must not override it)
+ *   ended      — the licence is read-only (licence-access.js): the plan stays the licence's own (never Free), the subscription is written ended
  * Throws when no plan row exists at all; callers decide whether that is fatal (company creation: yes; a heartbeat: log and retry).
  */
-async function syncActivePlan({ pgQuery, pgTx, log = () => {} }, { tier, license = null, cloudPlans = null, tenantId = null, today, forceTier = false }) {
+async function syncActivePlan({ pgQuery, pgTx, log = () => {} }, { tier, license = null, cloudPlans = null, tenantId = null, today, forceTier = false, ended = false }) {
   let catalogue = 0;
   if (Array.isArray(cloudPlans)) {
     for (const row of cloudPlans) {
@@ -200,7 +204,7 @@ async function syncActivePlan({ pgQuery, pgTx, log = () => {} }, { tier, license
     if (!plan) throw new Error('no free plan row in this database');
   }
   const overrides = await applyLicenseOverrides(pgQuery, plan.id, forceTier ? null : license, pgTx);
-  const dates = subscriptionDates({ tier, license, today });
+  const dates = subscriptionDates({ tier, license, today, ended });
   const tenants = tenantId
     ? [{ id: tenantId }]
     : (await pgQuery('SELECT id FROM public.tenants WHERE deleted_at IS NULL')).rows;
