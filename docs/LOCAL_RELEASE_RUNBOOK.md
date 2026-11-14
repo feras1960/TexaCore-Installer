@@ -43,21 +43,16 @@ print('last order:', max(x.get('order',0) for x in migs))
 - إن وُجدت جملة غير idempotent، **كيّف نسخة الـinstaller فقط** (لا تلمس ملف المصدر في `supabase/migrations`) بلفّها في حارس.
 - **تكييف السحابي للمحلي**: هجرات تفترض سكيما سحابية (مثل `licensing.*ROWTYPE`، `auth.*`, `supabase_functions`, `cron`) تفشل محلياً. لفّها في `DO $guard$ BEGIN IF EXISTS(SELECT 1 FROM pg_namespace WHERE nspname='licensing') THEN … ELSE RAISE NOTICE 'skip on local'; END IF; END $guard$;` — تتخطى محلياً وتعمل سحابياً.
 - هجرة تُرقّع دالة غير مشحونة محلياً (مثل `direct_post_sale` نسخة v3) → **حارس تخطٍّ آمن** بدل `RAISE EXCEPTION` حين تغيب العلامات.
-### 1ه. الاختبار الإلزامي — dry-run مرتين على القاعدة الحية (صفر أثر)
-```
-PSQL="/Applications/TexaCore ERP.app/Contents/Resources/bin/pg/bin/psql"
-$PSQL -p 54322 -h localhost -U postgres -d postgres -v ON_ERROR_STOP=1 <<SQL
-BEGIN;
-\i <installer>/migrations/<mig1>.sql
-\i <installer>/migrations/<mig2>.sql
--- ... كل الجديدة
--- ثم كررها مرة ثانية بنفس المعاملة لإثبات idempotency:
-\i <installer>/migrations/<mig1>.sql
-\i ...
-ROLLBACK;
-SQL
-```
-يجب أن تكمل **بصفر أخطاء عبر الجولتين**. أصلِح وكرّر حتى تنظف. الـROLLBACK يضمن عدم تلويث قاعدة فراس.
+### 1ه. الاختبار الإلزامي — dry-run مرتين على **نسخة** من القاعدة الحية في المختبر
+⛔ **لا تلفّ الهجرات بـ`BEGIN; … ROLLBACK;` على 54322.** كل ملف هجرة فيه `BEGIN; … COMMIT;` خاص به، فالـ`COMMIT` الداخلي يُثبّت (psql يحذّر «there is already a transaction in progress») والـ`ROLLBACK` لا يلغي شيئاً، فتُطبَّق الهجرات فعلاً على بيانات فراس. أُثبت على المختبر في 2026-11-14. الطريقة السابقة هنا («الـROLLBACK يضمن عدم تلويث قاعدة فراس») **خاطئة**.
+
+الإجراء الصحيح في `SKILL.md`، المرحلة 1، الخطوة 5:
+1. نسخة بـ`pg_dump` من 54322 (قراءة فقط).
+2. استعادتها في قاعدة `installer_dryrun_<version>` على المختبر 54331.
+3. تطبيق كل هجرة جديدة بملفها ومعاملتها، جولتين، مع `ON_ERROR_STOP=1`.
+4. حذف النسخة دائماً، لأن فيها بيانات حقيقية سرية.
+
+يجب أن تكمل **بصفر أخطاء عبر الجولتين**. أصلِح وكرّر حتى تنظف.
 
 ## المرحلة 2 — بناء الفرونت إند
 ```
