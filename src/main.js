@@ -2,7 +2,7 @@
 // 🖥️ TexaCore Installer — Electron Main Process (Embedded v5)
 // ════════════════════════════════════════════════════════════════
 
-const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage } = require('electron');
+const { app, BrowserWindow, ipcMain, shell, dialog, Tray, Menu, nativeImage, session } = require('electron');
 const { exec, spawn, execSync } = require('child_process');
 const path = require('path');
 const fs = require('fs');
@@ -23,6 +23,7 @@ const liveFileMove = require('./live-file-move');   // 2.0.5 RC2: «تغيير �
 const locateFile = require('./locate-file');
 const folderAccessMod = require('./folder-access');   // 2.0.4: macOS «Files and Folders» permission - probed in a child process, never in the main loop
 const locateJobMod = require('./locate-job');
+const pdfRender = require('./pdf-render');
 const cloudFiles = require('./cloud-files');
 const { RsfReader, detectFileType } = require('./rsf-reader');
 const { RsfExporter, RsfSyncManager } = require('./rsf-exporter');
@@ -2086,6 +2087,15 @@ function liveCompanyFile() {
   } catch { return null; }
 }
 
+let pdfRendererInstance = null;
+/** The one local PDF renderer (pdf-render.js), created on first use. */
+function localPdfRenderer() {
+  if (!pdfRendererInstance) {
+    pdfRendererInstance = pdfRender.createPdfRenderer({ BrowserWindow, session, fs: fs.promises, tmpDir: app.getPath('temp') });
+  }
+  return pdfRendererInstance;
+}
+
 function sendJson(res, status, obj) {
   res.writeHead(status, { 'Content-Type': 'application/json' });
   res.end(JSON.stringify(obj));
@@ -2464,6 +2474,7 @@ const DESTRUCTIVE_API = new Set([
   // 2.0.4: the same search as a job (metadata first, permission-aware, placeholders downloaded with progress) + the folder-permission helpers
   '/api/locate-start', '/api/locate-status', '/api/locate-materialize', '/api/locate-cancel', '/api/locate-confirm',
   '/api/folder-access', '/api/open-privacy-settings', '/api/e2e-folder-access',
+  '/api/render-pdf',         // 2.0.8: runs a hidden Chromium window on this machine — same-machine pages only
 ]);
 // 2.0.0: every admin-API call except /api/ping must carry this install's secret (secrets.json → /config.js, same-origin only;
 // the Electron window gets it over IPC). It keeps other local programs and foreign web pages — which CORS "*" and a loopback
@@ -2959,6 +2970,25 @@ const httpServer = http.createServer(async (req, res) => {
     } catch (e) { sendJson(res, 400, { success: false, error: e.message }); }
     return;
   }
+  // ─── POST /api/render-pdf (2.0.8): the page's print document as a PDF with real text, made by this app's own Chromium ───
+  // (pdf-render.js: hidden sandboxed window, own in-memory session, no script, one document at a time.) Local-only like the rest
+  // of this API; an office PC's page gets 403 from the UI proxy and keeps its in-browser rendering.
+  if (req.method === 'POST' && (req.url || '').split('?')[0] === '/api/render-pdf') {
+    try {
+      const body = await readJsonBody(req, pdfRender.MAX_HTML_BYTES + 64 * 1024);
+      const pdf = await localPdfRenderer().render(body);
+      res.writeHead(200, { 'Content-Type': 'application/pdf', 'Content-Length': pdf.length, 'Cache-Control': 'no-store' });
+      res.end(pdf);
+    } catch (err) {
+      const code = err && err.code ? String(err.code) : 'RENDER_FAILED';
+      const status = pdfRender.pdfErrorStatus(code);
+      if (!res.headersSent) sendJson(res, status, { success: false, code, error: err.message });
+      else res.end();
+      if (status >= 500) console.error('[PdfRender] failed:', err.message);
+    }
+    return;
+  }
+
   if (await handleCompanyFileRoutes(req, res)) return;
 
   if (req.method === 'POST' && req.url === '/api/create-local-company') {
