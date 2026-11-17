@@ -813,14 +813,14 @@ async function inviteLocalUserAsCaller(deps, rawInput) {
         const f = one.status !== 200 ? inviteRpcFailure(one) : { success: false, code: 'INVITE_FAILED', reason: String((one.body && one.body.reason) || 'refused').replace(/[^a-z0-9_]/gi, '').slice(0, 60) || 'refused' };
         throw Object.assign(new Error(f.error || `the server refused the invitation (${f.reason})`), { failure: { ...f, error: f.error || `the server refused the invitation (${f.reason})` } });
       }
-      outcome = { created: 1, skipped: [], request_ids: [one.body.request_id] };
+      outcome = { created: 1, skipped: [], request_ids: [one.body.request_id], tokens: one.body.token ? [String(one.body.token)] : [] };
     } else {
       const real = await rpcAs(callerToken, 'fn_membership_invite_multi', { p_email: v.email, p_items: v.items, p_note: v.note, p_request_key: `local-invite:${crypto.randomUUID()}`, p_dry_run: false });
       if (real.status !== 200 || !real.body || real.body.ok !== true) {
         const f = inviteRpcFailure(real);
         throw Object.assign(new Error(f.error), { failure: f });
       }
-      outcome = { created: Number(real.body.created) || 0, skipped: Array.isArray(real.body.skipped) ? real.body.skipped.map((x) => ({ company_id: x && x.company_id, reason: x && x.reason })) : [], request_ids: Array.isArray(real.body.request_ids) ? real.body.request_ids.filter((x) => UUID_RE.test(String(x))) : [] };
+      outcome = { created: Number(real.body.created) || 0, skipped: Array.isArray(real.body.skipped) ? real.body.skipped.map((x) => ({ company_id: x && x.company_id, reason: x && x.reason })) : [], request_ids: Array.isArray(real.body.request_ids) ? real.body.request_ids.filter((x) => UUID_RE.test(String(x))) : [], tokens: Array.isArray(real.body.email_tokens) ? real.body.email_tokens.map((x) => x && x.token).filter(Boolean).map(String) : [] };
     }
     created.requestIds = outcome.request_ids.slice();
 
@@ -829,8 +829,14 @@ async function inviteLocalUserAsCaller(deps, rawInput) {
     if (ctx.isNew && outcome.request_ids.length) {
       const si = await httpJson('POST', `${deps.gotrueUrl}/token?grant_type=password`, { headers: { apikey: deps.anonKey }, body: { email: v.email, password } });
       if (si.status !== 200 || !si.body || !si.body.access_token) throw new ProvisioningError('EMPLOYEE_SIGN_IN_FAILED', `the new account could not sign in (${si.status})`);
-      for (const rid of outcome.request_ids) {
-        const acc = await rpcAs(si.body.access_token, 'fn_membership_invite_respond', { p_request_id: rid, p_accept: true });
+      // 2.0.8 (ERP 20270256e-k, the final invitation model): a pending request carries no user until it is accepted, and fn_membership_invite_respond accepts
+      // only an invitee whose mailbox is proven -> not_the_invitee for this brand-new account. The invitation TOKEN is that proof (fn_membership_invite_accept
+      // records it for a password session, then applies membership, roles and resources exactly as before). An older server returns no token: respond as before.
+      const steps = outcome.tokens && outcome.tokens.length
+        ? outcome.tokens.map((t) => ['fn_membership_invite_accept', { p_token: t }])
+        : outcome.request_ids.map((rid) => ['fn_membership_invite_respond', { p_request_id: rid, p_accept: true }]);
+      for (const [fn, args] of steps) {
+        const acc = await rpcAs(si.body.access_token, fn, args);
         if (acc.status !== 200 || !acc.body || acc.body.ok !== true) {
           throw new ProvisioningError('INVITE_NOT_APPLIED', `the server did not apply the membership: ${(acc.body && (acc.body.reason || acc.body.message)) || acc.status}`);
         }

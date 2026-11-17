@@ -73,10 +73,11 @@ async function world(script = {}) {
     if (fn === 'fn_membership_invite_multi') {
       if (body.p_dry_run) return send(200, { ok: true, dry_run: true });
       const ids = body.p_items.map((_, i) => U(700 + i));
-      return send(200, { ok: true, created: ids.length, skipped: [], request_ids: ids, target_exists: false, email_tokens: [{ company_id: body.p_items[0].company_id, token: 'RAW-INVITE-TOKEN' }] });
+      return send(200, { ok: true, created: ids.length, skipped: [], request_ids: ids, target_exists: false, email_tokens: body.p_items.map((it, i) => ({ company_id: it.company_id, token: `RAW-INVITE-TOKEN-${i}` })) });
     }
     if (fn === 'fn_membership_invite_create') return send(200, { ok: true, request_id: U(750), token: 'RAW-INVITE-TOKEN-2' });
     if (fn === 'fn_membership_invite_respond') return send(200, { ok: true, status: 'accepted' });
+    if (fn === 'fn_membership_invite_accept') return send(200, { ok: true, roles_set: 1 });
     return send(404, { message: 'no such function' });
   });
   const dbScript = script.db || {};
@@ -134,9 +135,10 @@ test('a NEW user: authorised as the CALLER, account created once, invitations cr
     assert.deepEqual(multi[1].body.p_items, [{ company_id: CO1, role_ids: [ROLE1] }, { company_id: CO2, role_ids: [ROLE1, ROLE2] }]);
     // the dry run happens BEFORE the account exists
     assert.ok(w.calls.indexOf(multi[0]) < w.calls.findIndex((c) => c.url === '/admin/users'));
-    // acceptance: the NEW account's own token, once per request
-    const resp = callsOf(w, 'fn_membership_invite_respond');
-    assert.deepEqual(resp.map((c) => c.body), [{ p_request_id: U(700), p_accept: true }, { p_request_id: U(701), p_accept: true }]);
+    // acceptance (2.0.8, the final invitation model): the NEW account's own session accepts with each invitation TOKEN (the mailbox proof), once per company
+    assert.equal(callsOf(w, 'fn_membership_invite_respond').length, 0, 'respond would answer not_the_invitee for a brand-new account');
+    const resp = callsOf(w, 'fn_membership_invite_accept');
+    assert.deepEqual(resp.map((c) => c.body), [{ p_token: 'RAW-INVITE-TOKEN-0' }, { p_token: 'RAW-INVITE-TOKEN-1' }]);
     for (const c of resp) assert.notEqual(c.auth, `Bearer ${CALLER_JWT}`);
     assert.equal(w.deleted.length, 0, 'nothing was cleaned up on success');
     // no secret in any log line
@@ -162,6 +164,7 @@ test('an EXISTING e-mail: no account is created or changed, no password, no sign
     assert.deepEqual(r.data.request_ids, [U(700)]);
     assert.equal(w.created.length, 0); assert.equal(w.calls.filter((c) => c.url && c.url.startsWith('/token')).length, 0);
     assert.equal(callsOf(w, 'fn_membership_invite_respond').length, 0);
+    assert.equal(callsOf(w, 'fn_membership_invite_accept').length, 0);
     assert.ok(!w.queries.some((q) => /check_plan_limits/.test(q.sql)), 'the plan limit concerns a NEW account only - an existing user does not count against it');
   } finally { await w.closeAll(); }
 });
@@ -252,7 +255,7 @@ test('PLAN_LIMIT_EXCEEDED: a NEW account over the plan is refused (with current/
 });
 
 test('CLEANUP: a failure after the account was created removes exactly what THIS call created - the requests it was handed and the user it created, by id', async () => {
-  const w = await world({ rest: (rec) => (rec.fn === 'fn_membership_invite_respond' && rec.body.p_request_id === U(701) ? { status: 200, body: { ok: false, reason: 'grant_refused' } } : null) });
+  const w = await world({ rest: (rec) => (rec.fn === 'fn_membership_invite_accept' && rec.body.p_token === 'RAW-INVITE-TOKEN-1' ? { status: 200, body: { ok: false, reason: 'grant_refused' } } : null) });
   try {
     const r = await P.inviteLocalUserAsCaller(w.deps, INPUT());
     assert.equal(r.success, false);

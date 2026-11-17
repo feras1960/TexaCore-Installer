@@ -44,7 +44,7 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await page.getByRole('tab', { name: 'المستخدمين', exact: true }).click(); await page.waitForTimeout(2000);
       await page.getByRole('button', { name: 'إضافة مستخدم', exact: true }).click(); await page.waitForTimeout(2500);
       const dlg = page.locator('[role="dialog"]').last();
-      await dlg.locator('input[type="email"]').fill(STAFF); await dlg.locator('input[placeholder="اسم المستخدم"]').fill('موظف الفحص النهائي');
+      await dlg.locator('input[placeholder="username"], input[type="email"]').first().fill(STAFF);   // 2.0.8: the desktop field is «username» (a real e-mail is accepted too) await dlg.locator('input[placeholder="اسم المستخدم"]').fill('موظف الفحص النهائي');
       await dlg.getByText('Multi One', { exact: true }).click(); await page.waitForTimeout(1500);
       const roles = await dlg.locator('button').evaluateAll((els) => els.map((e) => (e.textContent || '').trim()).filter(Boolean));
       if (roles.length < 8 || !roles.includes('محاسب')) throw new Error(`the add-user role list is not populated: ${roles.slice(0, 10).join(' | ')}`);
