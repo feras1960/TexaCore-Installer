@@ -1,13 +1,13 @@
 {
  "source": "production, read-only (BEGIN READ ONLY ... ROLLBACK)",
- "measuredAt": "2026-11-07T21:50Z",
+ "measuredAt": "2026-11-18T00:10Z",
  "definition": "global rows: tenant_id AND company_id NULL (both columns), else the one that exists, else the whole table",
  "tables": {
   "capability_catalog": {
-   "prod": 164,
-   "desktop": 160,
+   "prod": 241,
+   "desktop": 166,
    "scope": "whole",
-   "note": "2.0.7: desktop 160/941 BY DESIGN - bot-only capabilities of the excluded Telegram migrations are absent (bot.expense_draft, bot.opps_create, bot.opps_view, bot.payments_draft, bot.quote_create) and bot.report_handle (removed in production by the excluded 20270244a) is still present"
+   "note": "2.0.8: desktop 166/964 BY DESIGN. Every capability / role pair outside bot.*, pos.*, loyalty.*, pharmacy.settings.*, pharmacy.dispense.* equals production (set-diff empty both ways, 18-11). Absent here: 76 capabilities and 44 role pairs of the bot chain / POS / loyalty / factory-bot migrations this release does not ship (POS hidden until S17); present here only: bot.report_handle (removed in production by the excluded 20270244a) with its 3 role pairs. 241-76+1 = 166; 1005-44+3 = 964."
   },
   "capability_deny_presets": {
    "prod": 7,
@@ -21,10 +21,10 @@
    "note": "+ platform_admin (installer seed role, not in production's global set)"
   },
   "role_capabilities": {
-   "prod": 974,
-   "desktop": 941,
+   "prod": 1005,
+   "desktop": 964,
    "scope": "tenant",
-   "note": "2.0.7: desktop 160/941 BY DESIGN - bot-only capabilities of the excluded Telegram migrations are absent (bot.expense_draft, bot.opps_create, bot.opps_view, bot.payments_draft, bot.quote_create) and bot.report_handle (removed in production by the excluded 20270244a) is still present"
+   "note": "2.0.8: desktop 166/964 BY DESIGN. Every capability / role pair outside bot.*, pos.*, loyalty.*, pharmacy.settings.*, pharmacy.dispense.* equals production (set-diff empty both ways, 18-11). Absent here: 76 capabilities and 44 role pairs of the bot chain / POS / loyalty / factory-bot migrations this release does not ship (POS hidden until S17); present here only: bot.report_handle (removed in production by the excluded 20270244a) with its 3 role pairs. 241-76+1 = 166; 1005-44+3 = 964."
   },
   "business_industries": {
    "prod": 5,

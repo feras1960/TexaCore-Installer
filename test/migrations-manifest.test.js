@@ -119,7 +119,7 @@ test('2.0.7 ships the 111 migrations of 2.0.6 first (unchanged, 2.0.6 apply orde
     "20270243n_writeoff_gl_required",
     "20270243o_container_quantity_receipt_items"
 ]);
-  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 149 }, (_, i) => i + 1));
+  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 191 }, (_, i) => i + 1));   // 2.0.8: 149 of 2.0.7 + 42
   assert.ok(!pin.migrations.some((x) => /20270210l|20270217b/.test(x.name)));
   // the first 19 are exactly what 2.0.4 shipped (same names, same sha256): the upgrade from 2.0.4 applies ONLY the 34 after them
   assert.equal(require('crypto').createHash('sha256').update(JSON.stringify(pin.migrations.slice(0, 19).map((x) => [x.name, x.sha256]))).digest('hex'), '85744a0afb4dc0c7000a047e212257d8ae47158cd6736f431f4175b0a7ae137c', 'the first 19 entries (name + sha256) are byte-for-byte what 2.0.4 pinned');
@@ -128,7 +128,7 @@ test('2.0.7 ships the 111 migrations of 2.0.6 first (unchanged, 2.0.6 apply orde
 // 2.0.7: the 38 migrations production received after 2.0.6's set (29-10 .. 06-11), in PRODUCTION's apply order. Shipped although bot-named: 243k/l/m/q/r/x/y (drift gates of 245a/245b/246s need them; dormant on a desktop).
 // NOT shipped (the Telegram bot / portal / NexaLive / edge chain, no desktop use): 243p 243s-w 243z 244a-g 246b-d 246i 246k 246l 247a 248a-d 248f 249a 249b.
 test('2.0.7 adds exactly these 38 migrations after the 111 of 2.0.6', () => {
-  assert.deepEqual(pin.migrations.slice(111).map((x) => x.name), [
+  assert.deepEqual(pin.migrations.slice(111, 149).map((x) => x.name), [
     "20270243k_platform_telegram_bot",
     "20270243l_telegram_connections_server_writes",
     "20270243m_bot_security_tenant_bound",
@@ -168,6 +168,57 @@ test('2.0.7 adds exactly these 38 migrations after the 111 of 2.0.6', () => {
     "20270246v_retire_fc_balance_readers_acl",
     "20270248e_balance_readers_package2_insights_dashboard_botlist",
   ]);
+});
+
+// 2.0.8: the migrations production received after 2.0.7's set (07-11 .. 18-11), in PRODUCTION's apply order (merge order on main). Shipped although bot-named: 243v, 244b, 248f
+// (the read-only guard coverage self-checks and 20270250j need them; dormant on a desktop). NOT shipped: 249c and 254a/b/c + 256o (the Telegram bot / factory bot chain: drift gates need 248c/249a),
+// POS 225a-g + 249e-l (hidden until S17; 225d refuses on desktops whose old data has the pos module active), 250i (needs pos_checkout) and loyalty 251n/o/p/s (need 250i).
+test('2.0.8 adds exactly these 42 migrations after the 149 of 2.0.7', () => {
+  assert.deepEqual(pin.migrations.slice(149).map((x) => x.name), [
+    "20270243v_bot_rate_limit",
+    "20270244b_bot_single_router",
+    "20270248f_ro_guard_three_missing_tables",
+    "20270249d_direct_sale_return_stock_roll_at_own_cost",
+    "20270250a_efx_receipt_lot_hold",
+    "20270250d_mfg_unreleased_lot_ship_gate",
+    "20270250c_mfg_mix_size_settable",
+    "20270250e_mfg_premix_reserve_tail",
+    "20270250h_mfg_lot_follow_sales",
+    "20270250a_statement_period_opening_historical",
+    "20270250j_mfg_plan_requirements",
+    "20270250b_statement_context_reader",
+    "20270250c_statement_context_headers_only",
+    "20270250d_statement_summary_reader",
+    "20270250k_sales_document_contact_on_update",
+    "20270250m_promote_contact_customer_account",
+    "20270250l_purchase_contact_party",
+    "20270251a_mfg_multilot_backflush",
+    "20270250n_contact_promotion_no_duplicates",
+    "20270251b_inventory_accounts_by_item",
+    "20270250e_statement_rows_one_read",
+    "20270251d_pallet_journal",
+    "20270251m_loyalty_prize_codes",
+    "20270252a_country_wallets_sham_cash",
+    "20270252b_party_accounts_named_unique",
+    "20270252c_party_account_line_tag_search",
+    "20270253a_products_catalogue_guards",
+    "20270253b_import_opening_stock_atomic",
+    "20270253c_material_variants_barcode_delete",
+    "20270254a_companies_member_scoped_read",
+    "20270256m_auth_mail_recipient_language",
+    "20270256a_roles_hierarchy_p2",
+    "20270256b_company_admin_role_writes",
+    "20270256c_capability_override_rank",
+    "20270256e_invite_email_proofs",
+    "20270256f_invite_payload",
+    "20270256g_invite_apply_payload",
+    "20270256h_invite_proof_readers",
+    "20270256i_invite_precheck",
+    "20270256j_invitations_section",
+    "20270256k_guest_account_actions",
+    "20270256n_invite_password_clears_pending_reset",
+  ]);
+  assert.ok(!pin.migrations.some((x) => /^20270225|^20270249[ce-l]|^20270250i|^20270251[nops]|^20270254[abc]_efx|^20270256o/.test(x.name)));
 });
 
 test('the pin holds names, order, sha256 and sizes ONLY: no SQL, no tenant id, no function body (the repo is public)', () => {
@@ -248,7 +299,7 @@ test('the measured inventory delta (baseline/migrations.inventory.json, private)
   assert.deepEqual(r.problems, []);
   assert.ok(r.inventory.catalogDelta && r.inventory.functions);
   assert.ok(Object.keys(r.inventory.functions).length > 50);
-  assert.equal(r.inventory.catalogDelta.tables, 20, 'the runner\'s own bookkeeping table + the 14 tables the 79 migrations add (+ dashboard_user_layouts, voucher_invoice_allocations) (RC2: + journal_number_counters of 20270237b) (2.0.7: 20 = + the dormant Telegram tables of 243k/l/y and the tables of 244i/246a-era CRM and company settings)');
+  assert.equal(r.inventory.catalogDelta.tables, 33, '(2.0.8: 33 = + 13 tables of the 42 added migrations) the runner\'s own bookkeeping table + the 14 tables the 79 migrations add (+ dashboard_user_layouts, voucher_invoice_allocations) (RC2: + journal_number_counters of 20270237b) (2.0.7: 20 = + the dormant Telegram tables of 243k/l/y and the tables of 244i/246a-era CRM and company settings)');
   for (const sig of Object.keys(r.inventory.functions)) assert.match(sig, /^(public|licensing)\.[a-z_0-9]+\(.*\)$/, sig);   // 2.0.5: a licensing-schema trigger function is replaced too (the inventory schemas: public, licensing, newpost, tomgenerators)
 });
 
@@ -263,8 +314,12 @@ test('the generated ./migrations is exactly the pin (names, order, sha256, sizes
 test('every generated migration is ONE transaction (BEGIN … COMMIT), so a failed file leaves nothing behind, and carries no psql meta-command or baseline DDL of its own', { skip: !generated }, () => {
   for (const e of manifestOf().migrations) {
     const sql = fs.readFileSync(path.join(ROOT, 'migrations', e.file), 'utf8');
-    assert.match(sql, /^BEGIN;\s*$/m, `${e.file}: no BEGIN;`);
-    assert.match(sql, /^COMMIT;\s*$/m, `${e.file}: no COMMIT;`);
+    const body = sql.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n').trim();
+    const oneDo = /^DO (\$[a-z_]*\$)[\s\S]*\1;$/.test(body) && body.split(body.match(/^DO (\$[a-z_]*\$)/)[1]).length === 3 && !/\b(COMMIT|ROLLBACK)\b/i.test(body);   // 2.0.8 (20270256m): ONE top-level DO block is one statement, so atomic too
+    if (!oneDo) {
+      assert.match(sql, /^BEGIN;\s*$/m, `${e.file}: no BEGIN;`);
+      assert.match(sql, /^COMMIT;\s*$/m, `${e.file}: no COMMIT;`);
+    }
     assert.doesNotMatch(sql, /^\\(?!restrict|unrestrict)[a-z]/im, `${e.file}: a psql meta-command`);
     const code = sql.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n');   // comments may mention them
     assert.doesNotMatch(code, /DROP SCHEMA|DROP DATABASE|session_replication_role/i, `${e.file}: a statement a local install must never run`);

@@ -1,11 +1,6 @@
 {
- "note": "2.0.7: the local (desktop) md5(prosrc), SECURITY DEFINER flag and ACL of the 19 functions whose PRODUCTION body comes from a migration this release does not ship (the Telegram bot chain). migrations-check D fails if any of them drifts from this recording. Recorded on a fresh 149-migration install, 2026-11-08.",
+ "note": "2.0.8: the local (desktop) md5(prosrc), SECURITY DEFINER flag and ACL of the functions whose PRODUCTION body differs for a known reason: (a) the Telegram bot chain this release does not ship (fn_tg_send needs 20270249a; fn_tg_notify_user: grants differ (desktop stricter); the rest of the 2.0.7 list); (b) POS 20270225a-g / 20270249e-l not shipped (POS stays hidden until S17, and 20270225d refuses on desktops whose old data has the pos module active): the plan-limit / seat / console-plan functions keep their pre-POS bodies; (c) 20270250i (bag binding at delivery, needs POS) and 20270251n/o/p/s (loyalty R2-R4b, need 20270250i) not shipped: issue_sales_document, fn_lot_follow_movement, loyalty_settings_save keep the earlier bodies; (d) SAME CODE, different text: production holds ensure_country_wallet_groups / fn_tag_entry_party_accounts without their comments and fn_pfa_norm with the \\\\uXXXX escapes decoded to raw characters; auth_email_hook / request_email_verification: production embeds its anon key, the desktop holds the baseline placeholder (20270256m masks the literal when it compares). migrations-check D fails if any of them drifts from this recording. Recorded on a fresh 191-migration install, 2026-11-18.",
  "functions": {
-  "fn_attendance_reminders_run(timestamp with time zone,boolean)": {
-   "md5": "32d4bba84e91f98f61b4fe60a524ad52",
-   "secdef": true,
-   "acl": "postgres=X/postgres,service_role=X/postgres"
-  },
   "fn_attendance_set_site(bigint,uuid,numeric,numeric,numeric)": {
    "md5": "9de91dd47023fef6f934173d469f054b",
    "secdef": true,
@@ -16,28 +11,8 @@
    "secdef": true,
    "acl": "postgres=X/postgres,service_role=X/postgres"
   },
-  "fn_bot_payslip_receive(uuid,uuid,text)": {
-   "md5": "61d86c3133560092821f7a985d0d8d5a",
-   "secdef": true,
-   "acl": "postgres=X/postgres,service_role=X/postgres"
-  },
-  "fn_day_close_dispatch(uuid,date,boolean)": {
-   "md5": "f44b5188640c3c80b78c947f89f47dba",
-   "secdef": true,
-   "acl": "postgres=X/postgres,service_role=X/postgres"
-  },
   "fn_group_actor_admin(bigint,uuid)": {
    "md5": "f00d835fd66bec9ab248fac32eb80be4",
-   "secdef": true,
-   "acl": "postgres=X/postgres,service_role=X/postgres"
-  },
-  "fn_payroll_notify_accounting(uuid,text)": {
-   "md5": "60d27fcc01a312f20b1124b289988f5b",
-   "secdef": true,
-   "acl": "postgres=X/postgres,service_role=X/postgres"
-  },
-  "fn_payroll_remind_owner(uuid)": {
-   "md5": "58c542367582baa64b38488f4accbafa",
    "secdef": true,
    "acl": "postgres=X/postgres,service_role=X/postgres"
   },
@@ -45,11 +20,6 @@
    "md5": "c26d90dc8f897f310dd28566416b4b5f",
    "secdef": true,
    "acl": "postgres=X/postgres,service_role=X/postgres"
-  },
-  "fn_production_plan_create(uuid,uuid,numeric,date,uuid,text,uuid,text)": {
-   "md5": "937bbc64601a724712bb3d72eafa6666",
-   "secdef": true,
-   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
   },
   "fn_telegram_bots_for_me(uuid)": {
    "md5": "1a3f6fbf4067c1b75d82d5534bb9c043",
@@ -61,15 +31,10 @@
    "secdef": true,
    "acl": "postgres=X/postgres,service_role=X/postgres"
   },
-  "fn_tg_notify_company(uuid,text)": {
-   "md5": "a139a93f593172b99e01e2a4b612a101",
-   "secdef": true,
-   "acl": "postgres=X/postgres,service_role=X/postgres"
-  },
   "fn_tg_notify_user(uuid,uuid,text)": {
    "md5": "43f7196bce303017faa84a7aed2cd725",
    "secdef": true,
-   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+   "acl": "postgres=X/postgres,service_role=X/postgres"
   },
   "fn_tg_platform_cutover(uuid,bigint[],text)": {
    "md5": "9c7424a60552b51460088b3c1fcfdde5",
@@ -82,17 +47,92 @@
    "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
   },
   "fn_tg_send(uuid,uuid,text,jsonb)": {
-   "md5": "c982a488d5a679a81ea9a2522d500d86",
-   "secdef": true,
-   "acl": "postgres=X/postgres,service_role=X/postgres"
-  },
-  "fn_tg_send_route(uuid,uuid)": {
-   "md5": "b08469fc0b1b6eb96d90483c85051814",
+   "md5": "a1775c7b93dc6cd158cf8882a6184774",
    "secdef": true,
    "acl": "postgres=X/postgres,service_role=X/postgres"
   },
   "get_confirmation_inbox(uuid,text,text)": {
    "md5": "e45ea839d16aaef2e22bbc617e1fc171",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "auth_email_hook(jsonb)": {
+   "md5": "7ad91d1433d7a05d2eb0f70dd6acd3d3",
+   "secdef": true,
+   "acl": "postgres=X/postgres,service_role=X/postgres,supabase_auth_admin=X/postgres"
+  },
+  "request_email_verification()": {
+   "md5": "022d16a645d02133beda50aad4118611",
+   "secdef": true,
+   "acl": "=X/postgres,anon=X/postgres,authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_pfa_norm(text)": {
+   "md5": "390e934e5e7d420d645ace0e8b7dde9a",
+   "secdef": false,
+   "acl": "=X/postgres,authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "ensure_country_wallet_groups(uuid)": {
+   "md5": "ccf55e61efa1885f6e905baebb4d1c68",
+   "secdef": true,
+   "acl": "postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_tag_entry_party_accounts(uuid,jsonb)": {
+   "md5": "c056032350685e7612887aeb3d29c9a9",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "console_create_subscription_plan(uuid,jsonb)": {
+   "md5": "cd89d4e8ee305f7b15767655433847f4",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "console_plan_change_impact(uuid,jsonb)": {
+   "md5": "35c62b8cee4cdc2553de77b84e5d4b90",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "console_update_subscription_plan(uuid,jsonb,boolean)": {
+   "md5": "b864d2d499661720509562bcf3b7a5e7",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_enforce_user_seat()": {
+   "md5": "9224a8062d8467c24326e01800f0eccd",
+   "secdef": true,
+   "acl": "postgres=X/postgres"
+  },
+  "fn_plan_limits_core(uuid,text)": {
+   "md5": "2a3f5b94d8cc306eaaf88badf30dce60",
+   "secdef": true,
+   "acl": "postgres=X/postgres"
+  },
+  "fn_plan_seats_held(uuid)": {
+   "md5": "7dfca9f3a9fa24cf03f7460b91d2f0f8",
+   "secdef": true,
+   "acl": "postgres=X/postgres"
+  },
+  "fn_plan_user_holds_seat(uuid,uuid)": {
+   "md5": "d363ae15a5045621e4717d4030bf3aa4",
+   "secdef": true,
+   "acl": "postgres=X/postgres"
+  },
+  "get_all_plan_limits(uuid)": {
+   "md5": "a6c96790e17d44d899da7529a0f30306",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_lot_follow_movement()": {
+   "md5": "b6f4b57dca978b0040a274645de45dfe",
+   "secdef": true,
+   "acl": "postgres=X/postgres"
+  },
+  "issue_sales_document(uuid,jsonb,jsonb,text)": {
+   "md5": "d3fd63fa09058876a426f16094a0b67c",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "loyalty_settings_save(uuid,jsonb)": {
+   "md5": "3cf2035c4d68808c625f27d3713bedaa",
    "secdef": true,
    "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
   }

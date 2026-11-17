@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "5587a0f89973ff70047527c22169023e1b64c7e2",
+  "erpCommit": "1fa68f93a8835c828abf67daf3ea4d322d5ff3c9",
   "migrations": [
     {
       "order": 1,
@@ -1046,11 +1046,305 @@
       "file": "20270248e_balance_readers_package2_insights_dashboard_botlist.sql",
       "sha256": "d818355347fbaef69ca68478fe42ba11be82e5d9f3761979271b59f8abfa6c77",
       "bytes": 31444
+    },
+    {
+      "order": 150,
+      "name": "20270243v_bot_rate_limit",
+      "file": "20270243v_bot_rate_limit.sql",
+      "sha256": "240510c643d27f8d11c8ffd9559b36f6f41cee40e00159c0ade9e61ccb3b50f1",
+      "bytes": 9127
+    },
+    {
+      "order": 151,
+      "name": "20270244b_bot_single_router",
+      "file": "20270244b_bot_single_router.sql",
+      "sha256": "fba9068c86d19a414675270b077d0087391742be497d7d8419d8c10773b02e60",
+      "bytes": 71114
+    },
+    {
+      "order": 152,
+      "name": "20270248f_ro_guard_three_missing_tables",
+      "file": "20270248f_ro_guard_three_missing_tables.sql",
+      "sha256": "aa4942b7c6651a2403453aca64642b5952c568775e427b7f846e070cb60b9cb6",
+      "bytes": 11019
+    },
+    {
+      "order": 153,
+      "name": "20270249d_direct_sale_return_stock_roll_at_own_cost",
+      "file": "20270249d_direct_sale_return_stock_roll_at_own_cost.sql",
+      "sha256": "73c4448814cfa88dff5718d6a9393b90e4e6df74fab7e0dbfa5c4762a56c3e3a",
+      "bytes": 24637
+    },
+    {
+      "order": 154,
+      "name": "20270250a_efx_receipt_lot_hold",
+      "file": "20270250a_efx_receipt_lot_hold.sql",
+      "sha256": "1d69eea4413f6c4e68d7eda03c4f406394881494ec295b0c7d08ae1fc377c6ef",
+      "bytes": 41334
+    },
+    {
+      "order": 155,
+      "name": "20270250d_mfg_unreleased_lot_ship_gate",
+      "file": "20270250d_mfg_unreleased_lot_ship_gate.sql",
+      "sha256": "f04f6039cf546603cb92505b96e6ca7437e8f5cf6a2394c477a9f155cc29fcdb",
+      "bytes": 39217
+    },
+    {
+      "order": 156,
+      "name": "20270250c_mfg_mix_size_settable",
+      "file": "20270250c_mfg_mix_size_settable.sql",
+      "sha256": "8e39ed087ffd3fa53564e7c22a3422820ac3a5342dd55a4f7ad90a296a8b8201",
+      "bytes": 113780
+    },
+    {
+      "order": 157,
+      "name": "20270250e_mfg_premix_reserve_tail",
+      "file": "20270250e_mfg_premix_reserve_tail.sql",
+      "sha256": "bf08f3ca802cd392aaf293f6fd97100ebd57db4a578f37a24aca395d1392740a",
+      "bytes": 142424
+    },
+    {
+      "order": 158,
+      "name": "20270250h_mfg_lot_follow_sales",
+      "file": "20270250h_mfg_lot_follow_sales.sql",
+      "sha256": "8fd2324657519a79df98a8f8d53b5ed31c267ac25c1c0f992174f80d4bcf05c9",
+      "bytes": 59705
+    },
+    {
+      "order": 159,
+      "name": "20270250a_statement_period_opening_historical",
+      "file": "20270250a_statement_period_opening_historical.sql",
+      "sha256": "39d149eea8c27a85d523a644d3fa8c7df292bcc05a5ef191b54e65826bc25e80",
+      "bytes": 36375
+    },
+    {
+      "order": 160,
+      "name": "20270250j_mfg_plan_requirements",
+      "file": "20270250j_mfg_plan_requirements.sql",
+      "sha256": "c9d81ce2bd97dba87a120629fe376301c18e603e36ececf2ccbfa336af2653ea",
+      "bytes": 104443
+    },
+    {
+      "order": 161,
+      "name": "20270250b_statement_context_reader",
+      "file": "20270250b_statement_context_reader.sql",
+      "sha256": "a6ad6d10e21faac9b7d87627081bea2985347dba2401a215e359f542b2283eb0",
+      "bytes": 5725
+    },
+    {
+      "order": 162,
+      "name": "20270250c_statement_context_headers_only",
+      "file": "20270250c_statement_context_headers_only.sql",
+      "sha256": "0bcf2794d7121a48cd98b2547526aba796baa3fdf037a2cff745ef17142ce786",
+      "bytes": 5796
+    },
+    {
+      "order": 163,
+      "name": "20270250d_statement_summary_reader",
+      "file": "20270250d_statement_summary_reader.sql",
+      "sha256": "10c9fac843fbdffe073b674acf035b922463ab515b6874ef91f35064a6c02263",
+      "bytes": 5609
+    },
+    {
+      "order": 164,
+      "name": "20270250k_sales_document_contact_on_update",
+      "file": "20270250k_sales_document_contact_on_update.sql",
+      "sha256": "5709375692c7aa84d753dce4da6bc800c1a1ffd3ddd6b5178d9a0d702cf71373",
+      "bytes": 63211
+    },
+    {
+      "order": 165,
+      "name": "20270250m_promote_contact_customer_account",
+      "file": "20270250m_promote_contact_customer_account.sql",
+      "sha256": "761252c155c56152eb30ae0807c3ef1b5ee4e991de646d1539676518da862ea6",
+      "bytes": 9470
+    },
+    {
+      "order": 166,
+      "name": "20270250l_purchase_contact_party",
+      "file": "20270250l_purchase_contact_party.sql",
+      "sha256": "8b925bb5ff2d946997479487d426279363e6c9313ed29bc000d391fe8bc55f61",
+      "bytes": 51524
+    },
+    {
+      "order": 167,
+      "name": "20270251a_mfg_multilot_backflush",
+      "file": "20270251a_mfg_multilot_backflush.sql",
+      "sha256": "9dd4aa33d53e514bec0aff49f845b3bd5c94d5c0e12aea8d5d2ed3dc85971785",
+      "bytes": 201736
+    },
+    {
+      "order": 168,
+      "name": "20270250n_contact_promotion_no_duplicates",
+      "file": "20270250n_contact_promotion_no_duplicates.sql",
+      "sha256": "55a280a08369f7d2fb44436c7ac86286fb4e198408c14b8eae63bf7228eeb304",
+      "bytes": 27468
+    },
+    {
+      "order": 169,
+      "name": "20270251b_inventory_accounts_by_item",
+      "file": "20270251b_inventory_accounts_by_item.sql",
+      "sha256": "f573a382927c699c3701ef888443a6b9a963c48e807d1e6b5a39b53e5dc06196",
+      "bytes": 262207
+    },
+    {
+      "order": 170,
+      "name": "20270250e_statement_rows_one_read",
+      "file": "20270250e_statement_rows_one_read.sql",
+      "sha256": "d7e59805c401a9576e547d342b89820b319931ff27ff7b7096f4d65931a8ad1d",
+      "bytes": 4419
+    },
+    {
+      "order": 171,
+      "name": "20270251d_pallet_journal",
+      "file": "20270251d_pallet_journal.sql",
+      "sha256": "49973ef846c1d8fa279694ead3c58ee90b87268b9624d7865f9a01e36148fc6f",
+      "bytes": 40693
+    },
+    {
+      "order": 172,
+      "name": "20270251m_loyalty_prize_codes",
+      "file": "20270251m_loyalty_prize_codes.sql",
+      "sha256": "009eda180654801e8451206d8c96b14380fbcefafe6c41ac6d1228feffb63efa",
+      "bytes": 78561
+    },
+    {
+      "order": 173,
+      "name": "20270252a_country_wallets_sham_cash",
+      "file": "20270252a_country_wallets_sham_cash.sql",
+      "sha256": "fa0d4a9d77fa81bb90d886c9b995a3981a11d1dbfb839b13290e2150759065c1",
+      "bytes": 19152
+    },
+    {
+      "order": 174,
+      "name": "20270252b_party_accounts_named_unique",
+      "file": "20270252b_party_accounts_named_unique.sql",
+      "sha256": "ebd444d4bd7d52e9eebc21e12f9211d77b3efbc55bffb04ea2ee8f57ed3dc043",
+      "bytes": 8197
+    },
+    {
+      "order": 175,
+      "name": "20270252c_party_account_line_tag_search",
+      "file": "20270252c_party_account_line_tag_search.sql",
+      "sha256": "864c2e5566fe33353acf071cfddab7d85db20004fadc21f4a7b75c69fa058dc0",
+      "bytes": 13071
+    },
+    {
+      "order": 176,
+      "name": "20270253a_products_catalogue_guards",
+      "file": "20270253a_products_catalogue_guards.sql",
+      "sha256": "e00d175cb89de33c7cb27d4951513f294f7fd7f91a1519ac44e26907e52f6f2a",
+      "bytes": 33547
+    },
+    {
+      "order": 177,
+      "name": "20270253b_import_opening_stock_atomic",
+      "file": "20270253b_import_opening_stock_atomic.sql",
+      "sha256": "d6ac35b80c828dd365b537783ad481b27bcfc8e374d85c413e6ea7d491e7d7ad",
+      "bytes": 22944
+    },
+    {
+      "order": 178,
+      "name": "20270253c_material_variants_barcode_delete",
+      "file": "20270253c_material_variants_barcode_delete.sql",
+      "sha256": "a5fc160c9fdcea732230d8f1638b34e1f74052be96e5a2689313c773e1b205b3",
+      "bytes": 33596
+    },
+    {
+      "order": 179,
+      "name": "20270254a_companies_member_scoped_read",
+      "file": "20270254a_companies_member_scoped_read.sql",
+      "sha256": "d3c38720e58b5255e0eae3300ad4b976bdc28a6b626617f8a6993c39d1d9a28f",
+      "bytes": 25476
+    },
+    {
+      "order": 180,
+      "name": "20270256m_auth_mail_recipient_language",
+      "file": "20270256m_auth_mail_recipient_language.sql",
+      "sha256": "9d2b4ac273d876b956675c7b6113dcabd0e02499701f6d9d21890e9fd1cc8e99",
+      "bytes": 9967
+    },
+    {
+      "order": 181,
+      "name": "20270256a_roles_hierarchy_p2",
+      "file": "20270256a_roles_hierarchy_p2.sql",
+      "sha256": "b0238748916a3d2b539a5d710fcf84c38f8d23ca1f0ce2581b8b2cab34f6d346",
+      "bytes": 47043
+    },
+    {
+      "order": 182,
+      "name": "20270256b_company_admin_role_writes",
+      "file": "20270256b_company_admin_role_writes.sql",
+      "sha256": "4aa9932a08a5d1da736370322d4a5c050d43155417b11576c5a7f73e590273f3",
+      "bytes": 31155
+    },
+    {
+      "order": 183,
+      "name": "20270256c_capability_override_rank",
+      "file": "20270256c_capability_override_rank.sql",
+      "sha256": "5a3645eb3b6096f444bfb0e66746a6ae6c35493ee2937510ab457ba1cb94303e",
+      "bytes": 37405
+    },
+    {
+      "order": 184,
+      "name": "20270256e_invite_email_proofs",
+      "file": "20270256e_invite_email_proofs.sql",
+      "sha256": "5300876f4c80d86c493995570f0be1d36065260eb43eb7195dea94bc2368464f",
+      "bytes": 39155
+    },
+    {
+      "order": 185,
+      "name": "20270256f_invite_payload",
+      "file": "20270256f_invite_payload.sql",
+      "sha256": "935650764e125b73b230e2f8b7d81d5a650b1217c67df0ba3196441600d10b96",
+      "bytes": 41860
+    },
+    {
+      "order": 186,
+      "name": "20270256g_invite_apply_payload",
+      "file": "20270256g_invite_apply_payload.sql",
+      "sha256": "0d8a08ef16cb00f3759bbd894a2dc83910bc20143cfe508025be9b74cc1a7a2a",
+      "bytes": 24646
+    },
+    {
+      "order": 187,
+      "name": "20270256h_invite_proof_readers",
+      "file": "20270256h_invite_proof_readers.sql",
+      "sha256": "36386f033dc07e7398d21f16cdd9a6c81658a4d0e72f4f90da0bec33ffdafbd4",
+      "bytes": 16752
+    },
+    {
+      "order": 188,
+      "name": "20270256i_invite_precheck",
+      "file": "20270256i_invite_precheck.sql",
+      "sha256": "35d23f46dc20fc24566c53721c3124523436cdd3933384a6e51c5402cf77cd59",
+      "bytes": 12933
+    },
+    {
+      "order": 189,
+      "name": "20270256j_invitations_section",
+      "file": "20270256j_invitations_section.sql",
+      "sha256": "1d38072fb8b87089ae1101608cc6befb393ee7566faa77e467f8c7775a19ff9a",
+      "bytes": 9212
+    },
+    {
+      "order": 190,
+      "name": "20270256k_guest_account_actions",
+      "file": "20270256k_guest_account_actions.sql",
+      "sha256": "6ef590975256b9d60bd9b7f174ce3cb745a40317da192da20508a47dcd31c572",
+      "bytes": 13176
+    },
+    {
+      "order": 191,
+      "name": "20270256n_invite_password_clears_pending_reset",
+      "file": "20270256n_invite_password_clears_pending_reset.sql",
+      "sha256": "098fd0c9fd076409318e2bed7d4d0d316f6dfab755018dda40668ea33ea2767d",
+      "bytes": 14316
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "82a1c03dc2afac42b332796b013c158a47ff570a33ec7f234bffec514570045a",
-    "bytes": 64211
+    "sha256": "d7cb1b2cd75609aa89871dd5c468825c0287f81c50d28167fa2637469012d8e0",
+    "bytes": 81992
   }
 }

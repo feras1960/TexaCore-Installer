@@ -642,9 +642,9 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
       // the functions the migrations touched: new or changed vs the previous build's install (upgrade run); on a fresh-only run: those that differ from nothing known -> all
       const touched = before ? [...local.keys()].filter((s) => !before.has(s) || before.get(s).md5 !== local.get(s).md5 || before.get(s).acl !== local.get(s).acl || before.get(s).secdef !== local.get(s).secdef) : [...local.keys()];
       const bad = []; let same = 0; let sameMd5 = 0;
-      // 2.0.7: functions that production has a LATER body of, written by migrations this release deliberately does not ship (the Telegram bot chain 20270243p, 20270244b, 20270244e, 20270247a, 20270248b-c, 20270249a-b ...).
+      // 2.0.8: see excluded-chain-fixture.json for the four reasons (bot chain, POS, 20270250i/loyalty, same code with different text). 2.0.7: functions that production has a LATER body of, written by migrations this release deliberately does not ship (the Telegram bot chain 20270243p, 20270244b, 20270244e, 20270247a, 20270248b-c, 20270249a-b ...).
       // They are the bot's own senders / routers or bot-only readers, dormant on a desktop; listed by signature so any other difference still fails.
-      const EXCLUDED_CHAIN = new Set(['fn_attendance_reminders_run(timestamp with time zone,boolean)', 'fn_attendance_set_site(bigint,uuid,numeric,numeric,numeric)', 'fn_bot_capabilities(uuid,uuid)', 'fn_bot_payslip_receive(uuid,uuid,text)', 'fn_day_close_dispatch(uuid,date,boolean)', 'fn_group_actor_admin(bigint,uuid)', 'fn_payroll_notify_accounting(uuid,text)', 'fn_payroll_remind_owner(uuid)', 'fn_portal_account(bigint,uuid,integer)', 'fn_production_plan_create(uuid,uuid,numeric,date,uuid,text,uuid,text)', 'fn_telegram_bots_for_me(uuid)', 'fn_tg_assign_role(bigint,uuid,text,uuid)', 'fn_tg_notify_company(uuid,text)', 'fn_tg_notify_user(uuid,uuid,text)', /* same body, but 20270244b (not shipped) also revokes EXECUTE from authenticated: a bot sender, dormant on a desktop */ 'fn_tg_platform_cutover(uuid,bigint[],text)', 'fn_tg_platform_issue_code()', 'fn_tg_send(uuid,uuid,text,jsonb)', 'fn_tg_send_route(uuid,uuid)', 'get_confirmation_inbox(uuid,text,text)']);
+      const EXCLUDED_CHAIN = new Set(['fn_attendance_set_site(bigint,uuid,numeric,numeric,numeric)', 'fn_bot_capabilities(uuid,uuid)', 'fn_group_actor_admin(bigint,uuid)', 'fn_portal_account(bigint,uuid,integer)', 'fn_telegram_bots_for_me(uuid)', 'fn_tg_assign_role(bigint,uuid,text,uuid)', 'fn_tg_notify_user(uuid,uuid,text)', 'fn_tg_platform_cutover(uuid,bigint[],text)', 'fn_tg_platform_issue_code()', 'fn_tg_send(uuid,uuid,text,jsonb)', 'get_confirmation_inbox(uuid,text,text)', 'auth_email_hook(jsonb)', 'request_email_verification()', 'fn_pfa_norm(text)', 'ensure_country_wallet_groups(uuid)', 'fn_tag_entry_party_accounts(uuid,jsonb)', 'console_create_subscription_plan(uuid,jsonb)', 'console_plan_change_impact(uuid,jsonb)', 'console_update_subscription_plan(uuid,jsonb,boolean)', 'fn_enforce_user_seat()', 'fn_plan_limits_core(uuid,text)', 'fn_plan_seats_held(uuid)', 'fn_plan_user_holds_seat(uuid,uuid)', 'get_all_plan_limits(uuid)', 'fn_lot_follow_movement()', 'issue_sales_document(uuid,jsonb,jsonb,text)', 'loyalty_settings_save(uuid,jsonb)']);
       const expectedDiff = [];
       for (const s of touched) {
         const p = prod.get(s); const l = local.get(s);
@@ -655,13 +655,13 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         if (p.secdef !== l.secdef || p.acl !== l.acl) sink.push(`${s}: same body, but secdef/grants differ (here ${l.secdef} ${l.acl.slice(0, 60)} / production ${p.secdef} ${p.acl.slice(0, 60)})`);
         else same++;
       }
-      // the 19 allow-listed functions must still be EXACTLY what was recorded for 2.0.7 (md5, SECURITY DEFINER flag, ACL): an allowed difference from production is not an open door for further change
+      // the allow-listed functions (27 in 2.0.8) must still be EXACTLY what was recorded (excluded-chain-fixture.json) (md5, SECURITY DEFINER flag, ACL): an allowed difference from production is not an open door for further change
       const FIXTURE = JSON.parse(fs.readFileSync(path.join(__dirname, 'excluded-chain-fixture.json'), 'utf8')).functions;
       for (const sig of EXCLUDED_CHAIN) {
         const rec = FIXTURE[sig]; const l = local.get(sig);
         if (!rec) { bad.push(`${sig}: not in excluded-chain-fixture.json`); continue; }
         if (!l) { bad.push(`${sig}: missing on this database (recorded)`); continue; }
-        if (l.md5 !== rec.md5 || String(l.secdef) !== String(rec.secdef) || l.acl !== rec.acl) bad.push(`${sig}: drifted from the 2.0.7 recording (md5 ${l.md5.slice(0, 8)} / ${rec.md5.slice(0, 8)}, acl ${l.acl === rec.acl ? 'same' : 'different'})`);
+        if (l.md5 !== rec.md5 || String(l.secdef) !== String(rec.secdef) || l.acl !== rec.acl) bad.push(`${sig}: drifted from the recording (md5 ${l.md5.slice(0, 8)} / ${rec.md5.slice(0, 8)}, acl ${l.acl === rec.acl ? 'same' : 'different'})`);
       }
       // the rest of the functions: how far is this database from production overall (informational: the baseline's four redacted functions + the installer's local extras live here)
       const outside = [...local.keys()].filter((s) => !touched.includes(s) && (!prod.has(s) || prod.get(s).md5 !== local.get(s).md5));
