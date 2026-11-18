@@ -1,5 +1,5 @@
 {
- "note": "2.0.8: the local (desktop) md5(prosrc), SECURITY DEFINER flag and ACL of the functions whose PRODUCTION body differs for a known reason: (a) the Telegram bot chain this release does not ship (fn_tg_send needs 20270249a; fn_tg_notify_user: grants differ (desktop stricter); the rest of the 2.0.7 list); (b) POS 20270225a-g / 20270249e-l not shipped (POS stays hidden until S17, and 20270225d refuses on desktops whose old data has the pos module active): the plan-limit / seat / console-plan functions keep their pre-POS bodies; (c) 20270250i (bag binding at delivery, needs POS) and 20270251n/o/p/s (loyalty R2-R4b, need 20270250i) not shipped: issue_sales_document, fn_lot_follow_movement, loyalty_settings_save keep the earlier bodies; (d) SAME CODE, different text: production holds ensure_country_wallet_groups / fn_tag_entry_party_accounts without their comments and fn_pfa_norm with the \\\\uXXXX escapes decoded to raw characters; auth_email_hook / request_email_verification: production embeds its anon key, the desktop holds the baseline placeholder (20270256m masks the literal when it compares). (e) 20270261b (one price rule, needs POS) not shipped: fn_price_resolve keeps the 20270261a body. (f) the one-link invitation package 20270260* is cloud-only (its 260e refuses to revoke on a desktop database): fn_membership_invite_accept / _apply / _reject / _respond keep the 20270256 bodies the desktop add-user path relies on. migrations-check D fails if any of them drifts from this recording. Recorded on a fresh 191-migration install, 2026-11-18.",
+ "note": "2.0.8: the local (desktop) md5(prosrc), SECURITY DEFINER flag and ACL of the functions whose PRODUCTION body differs for a known reason: (a) the Telegram bot chain this release does not ship (fn_tg_send needs 20270249a; fn_tg_notify_user: grants differ (desktop stricter); the rest of the 2.0.7 list); (b) POS 20270225a-g / 20270249e-l not shipped (POS stays hidden until S17, and 20270225d refuses on desktops whose old data has the pos module active): the plan-limit / seat / console-plan functions keep their pre-POS bodies; (c) 20270250i (bag binding at delivery, needs POS) and 20270251n/o/p/s (loyalty R2-R4b, need 20270250i) not shipped: issue_sales_document, fn_lot_follow_movement, loyalty_settings_save keep the earlier bodies; (d) SAME CODE, different text: production holds ensure_country_wallet_groups / fn_tag_entry_party_accounts without their comments and fn_pfa_norm with the \\\\uXXXX escapes decoded to raw characters; auth_email_hook / request_email_verification: production embeds its anon key, the desktop holds the baseline placeholder (20270256m masks the literal when it compares). (e) 20270261b (one price rule, needs POS) not shipped: fn_price_resolve keeps the 20270261a body. (f) the one-link invitation package 20270260* is cloud-only (its 260e refuses to revoke on a desktop database): fn_membership_invite_accept / _apply / _reject / _respond keep the 20270256 bodies the desktop add-user path relies on. migrations-check D fails if any of them drifts from this recording. Recorded on a fresh 191-migration install, 2026-11-18. (f, build 5) 20270260e (the cloud one-link switch, applied on production 18-11) is skipped on a desktop by its own guard: fn_invite_payload_clean keeps its 20270256f body and fn_membership_invite_create / _multi / _reissue keep EXECUTE for authenticated, because the desktop UI calls them directly (desktopInviteClient; there is no invite Edge function on a desktop).",
  "functions": {
   "fn_attendance_set_site(bigint,uuid,numeric,numeric,numeric)": {
    "md5": "9de91dd47023fef6f934173d469f054b",
@@ -158,6 +158,26 @@
   },
   "fn_membership_invite_respond(uuid,boolean)": {
    "md5": "db27944f4614605b4828a36f0235e79f",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_invite_payload_clean(jsonb)": {
+   "md5": "0fc21bf0528f9494edb8f56a86851700",
+   "secdef": false,
+   "acl": "postgres=X/postgres"
+  },
+  "fn_membership_invite_create(uuid,text,uuid[],text,jsonb)": {
+   "md5": "c842a045b8f328e987317a0f6226b063",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_membership_invite_multi(text,jsonb,text,text,boolean)": {
+   "md5": "7f6c9c8b6969c9e93eae87c2441394c8",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_membership_invite_reissue(uuid)": {
+   "md5": "edbc253e3379658125870d009ff71957",
    "secdef": true,
    "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
   }
