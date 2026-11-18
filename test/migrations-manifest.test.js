@@ -119,7 +119,7 @@ test('2.0.7 ships the 111 migrations of 2.0.6 first (unchanged, 2.0.6 apply orde
     "20270243n_writeoff_gl_required",
     "20270243o_container_quantity_receipt_items"
 ]);
-  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 201 }, (_, i) => i + 1));   // 2.0.8: 149 of 2.0.7 + 52
+  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 204 }, (_, i) => i + 1));   // 2.0.8: 149 of 2.0.7 + 55
   assert.ok(!pin.migrations.some((x) => /20270210l|20270217b/.test(x.name)));
   // the first 19 are exactly what 2.0.4 shipped (same names, same sha256): the upgrade from 2.0.4 applies ONLY the 34 after them
   assert.equal(require('crypto').createHash('sha256').update(JSON.stringify(pin.migrations.slice(0, 19).map((x) => [x.name, x.sha256]))).digest('hex'), '85744a0afb4dc0c7000a047e212257d8ae47158cd6736f431f4175b0a7ae137c', 'the first 19 entries (name + sha256) are byte-for-byte what 2.0.4 pinned');
@@ -173,7 +173,7 @@ test('2.0.7 adds exactly these 38 migrations after the 111 of 2.0.6', () => {
 // 2.0.8: the migrations production received after 2.0.7's set (07-11 .. 18-11), in PRODUCTION's apply order (merge order on main). Shipped although bot-named: 243v, 244b, 248f
 // (the read-only guard coverage self-checks and 20270250j need them; dormant on a desktop). NOT shipped: 249c and 254a/b/c + 256o (the Telegram bot / factory bot chain: drift gates need 248c/249a),
 // POS 225a-g + 249e-l (hidden until S17; 225d refuses on desktops whose old data has the pos module active), 250i (needs pos_checkout) and loyalty 251n/o/p/s (need 250i).
-test('2.0.8 adds exactly these 52 migrations after the 149 of 2.0.7', () => {
+test('2.0.8 adds exactly these 55 migrations after the 149 of 2.0.7', () => {
   assert.deepEqual(pin.migrations.slice(149).map((x) => x.name), [
     "20270243v_bot_rate_limit",
     "20270244b_bot_single_router",
@@ -227,6 +227,9 @@ test('2.0.8 adds exactly these 52 migrations after the 149 of 2.0.7', () => {
     "20270262a_stock_cost_column_privileges",
     "20270259d_audit_log_reader",
     "20270262c_company_admin_labels_print",
+    "20270259e_login_readers_leavers",
+    "20270261c_price_list_approval",
+    "20270261d_price_change_log",
   ]);
   assert.ok(!pin.migrations.some((x) => /^20270225|^20270249[ce-l]|^20270250i|^20270251[nops]|^20270254[abc]_efx|^20270256o|^20270260|^20270261b/.test(x.name)));
 });
@@ -309,7 +312,7 @@ test('the measured inventory delta (baseline/migrations.inventory.json, private)
   assert.deepEqual(r.problems, []);
   assert.ok(r.inventory.catalogDelta && r.inventory.functions);
   assert.ok(Object.keys(r.inventory.functions).length > 50);
-  assert.equal(r.inventory.catalogDelta.tables, 35, '(2.0.8: 35 = + 15 tables of the 50 added migrations) the runner\'s own bookkeeping table + the 14 tables the 79 migrations add (+ dashboard_user_layouts, voucher_invoice_allocations) (RC2: + journal_number_counters of 20270237b) (2.0.7: 20 = + the dormant Telegram tables of 243k/l/y and the tables of 244i/246a-era CRM and company settings)');
+  assert.equal(r.inventory.catalogDelta.tables, 38, '(2.0.8 build 6: 38 = + price_list_settings, price_change_requests, price_change_log of 20270261c/d) (2.0.8: 35 = + 15 tables of the 50 added migrations) the runner\'s own bookkeeping table + the 14 tables the 79 migrations add (+ dashboard_user_layouts, voucher_invoice_allocations) (RC2: + journal_number_counters of 20270237b) (2.0.7: 20 = + the dormant Telegram tables of 243k/l/y and the tables of 244i/246a-era CRM and company settings)');
   for (const sig of Object.keys(r.inventory.functions)) assert.match(sig, /^(public|licensing)\.[a-z_0-9]+\(.*\)$/, sig);   // 2.0.5: a licensing-schema trigger function is replaced too (the inventory schemas: public, licensing, newpost, tomgenerators)
 });
 

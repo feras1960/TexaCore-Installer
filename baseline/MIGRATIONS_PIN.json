@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "bf1a72bb92a6c4a5866cdf0a10628dde25897fcf",
+  "erpCommit": "467d979fc77ded62871fc3ab37ace139052a32bd",
   "migrations": [
     {
       "order": 1,
@@ -1366,8 +1366,8 @@
       "order": 195,
       "name": "20270259b_login_history_manager_screen",
       "file": "20270259b_login_history_manager_screen.sql",
-      "sha256": "ef382c2ea7792ebf6a8b1b8584c9670b6d65a2ba31492f8417ceab937b076b2d",
-      "bytes": 16504
+      "sha256": "3cdf4634571b17869832cdd0dbf2f0e9c71d966616196bc80b769007752bbc89",
+      "bytes": 17884
     },
     {
       "order": 196,
@@ -1387,8 +1387,8 @@
       "order": 198,
       "name": "20270259c_login_history_online_now",
       "file": "20270259c_login_history_online_now.sql",
-      "sha256": "e1a750a55d70f2eb3f9afb03f09ecdd96070c1d04bfb89af768ea9fc18a6c9b1",
-      "bytes": 37789
+      "sha256": "fa2165e35c516551cb869ead295476f48b991bd3072879037accd47ee9125f5b",
+      "bytes": 39479
     },
     {
       "order": 199,
@@ -1410,11 +1410,32 @@
       "file": "20270262c_company_admin_labels_print.sql",
       "sha256": "be93e0e0c98e51af279a4e74593df37abb052830d73fdf0567e49b26cbdd4137",
       "bytes": 3483
+    },
+    {
+      "order": 202,
+      "name": "20270259e_login_readers_leavers",
+      "file": "20270259e_login_readers_leavers.sql",
+      "sha256": "33bac7aa5b69e0d1b5aa84aedc605e239e4c8d0e77ee4f991fe9148fff119f1c",
+      "bytes": 30123
+    },
+    {
+      "order": 203,
+      "name": "20270261c_price_list_approval",
+      "file": "20270261c_price_list_approval.sql",
+      "sha256": "329728955a20c63f371b89f74bff81942e24f64a242acbe008ca2114b4c4d55e",
+      "bytes": 63101
+    },
+    {
+      "order": 204,
+      "name": "20270261d_price_change_log",
+      "file": "20270261d_price_change_log.sql",
+      "sha256": "c2d6bc7a342bea3895ef87aa27d4573332c569675d06b48f69f6a7d4667cf9ae",
+      "bytes": 32034
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "b0c8df5e50386266b50c98b01eb9698dd1a1536ca60bc70f4e50d37c19cc3c59",
-    "bytes": 85831
+    "sha256": "26f52f55a2b824da5598ab01fc7bafe2fef7cbb033bd36d1f0061e5d9d7be1a1",
+    "bytes": 86940
   }
 }
