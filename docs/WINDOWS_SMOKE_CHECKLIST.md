@@ -27,7 +27,7 @@ code paths). Nothing could be RUN. This list is the first run. ~30 minutes. Stop
 3. Wait for the first start (1-3 minutes: database creation). The window must reach "running"; no error box. *This is the PostgreSQL + VC++ runtime test.*
 4. Create a company (name, your e-mail, a password of 6+ characters, currency). It must succeed; the ERP page opens in the browser at `http://localhost`.
 5. Sign in on that page with the e-mail/password. The dashboard opens, fonts look right (Arabic, no boxes).
-6. Open the ERP's subscription/plan screen: plan = Free, with the control panel's limits (1 user, 1 company, 1 branch, 1 warehouse, 200 customers, 200 invoices/month).
+6. Open the ERP's subscription/plan screen: plan = Free, with the control panel's limits (1 user, unlimited companies, 1 branch, 1 warehouse, 200 customers, 200 invoices/month).
 7. Windows Firewall: when asked, allow TexaCore ERP on **private** networks. From ANOTHER PC/phone on the same network open the **employee link** shown in the
    installer's *Employees* box (`http://<this PC's IP>/login?c=…`). The login page must load and the owner can sign in from there. Then open
    `http://<this PC's IP>/config.js` in that other PC's browser: it must NOT contain the word "localApiSecret".

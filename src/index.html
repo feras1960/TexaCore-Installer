@@ -259,6 +259,8 @@
             <!-- no usable licence (never activated, or expired / revoked): activate, or start the trial / free plan -->
             <div class="panel" id="panel-license" style="display:none;">
               <div class="alert alert-down alert-row" id="license-expired-note" style="display:none;"><svg class="icon icon-16 icon-lead" aria-hidden="true" focusable="false"><use href="#i-triangle-alert"></use></svg><span data-i18n="ui.license.expiredNote">انتهى الترخيص أو لم يُفعَّل بعد. فعّل مفتاحاً، أو ابدأ تجربة أو الباقة المجانية.</span></div>
+              <!-- 2.0.8: an expired paid licence runs read-only: the books can be read, printed and exported; the key below renews -->
+              <div class="alert alert-down alert-row" id="license-readonly-note" role="status" style="display:none;"><svg class="icon icon-16 icon-lead" aria-hidden="true" focusable="false"><use href="#i-triangle-alert"></use></svg><span id="license-readonly-text"></span></div>
               <label class="lbl" for="input-license" data-i18n="license.enterKey">أدخل مفتاح الترخيص الذي حصلت عليه:</label>
               <div class="linkline">
                 <input type="text" id="input-license" placeholder="LIC-2026-XXXXX-XXXXX" class="ctl url-input" dir="ltr" spellcheck="false" autocomplete="off">
