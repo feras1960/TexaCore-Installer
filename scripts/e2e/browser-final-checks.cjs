@@ -44,12 +44,17 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await page.getByRole('tab', { name: 'المستخدمين', exact: true }).click(); await page.waitForTimeout(2000);
       await page.getByRole('button', { name: 'إضافة مستخدم', exact: true }).click(); await page.waitForTimeout(2500);
       const dlg = page.locator('[role="dialog"]').last();
-      await dlg.locator('input[placeholder="username"], input[type="email"]').first().fill(STAFF);   // 2.0.8: the desktop field is «username» (a real e-mail is accepted too) await dlg.locator('input[placeholder="اسم المستخدم"]').fill('موظف الفحص النهائي');
+      await dlg.locator('input[placeholder="username"], input[type="email"]').first().fill(STAFF);   // 2.0.8: the desktop field is «username» (a real e-mail is accepted too)
+      await dlg.locator('input[placeholder="اسم المستخدم"]').fill('موظف الفحص');   // the full name is required (the route answers 400 full_name without it)
       await dlg.getByText('Multi One', { exact: true }).click(); await page.waitForTimeout(1500);
-      const roles = await dlg.locator('button').evaluateAll((els) => els.map((e) => (e.textContent || '').trim()).filter(Boolean));
-      if (roles.length < 8 || !roles.includes('محاسب')) throw new Error(`the add-user role list is not populated: ${roles.slice(0, 10).join(' | ')}`);
-      await dlg.getByRole('button', { name: 'محاسب', exact: true }).click(); await page.waitForTimeout(400);
-      await dlg.getByRole('button', { name: 'إرسال الدعوة', exact: true }).click();
+      // 2.0.8 (#1385): ONE role picker - a primary role (radios) + specialised roles (checkboxes) per company, no longer buttons; the desktop submit is «إضافة المستخدم»
+      const roles = await dlg.locator('[role="radio"], [role="checkbox"], input[type="radio"], input[type="checkbox"]').evaluateAll((els) => els.map((e) => {
+        const l = e.closest('label') || e.parentElement?.closest('label, div'); return ((l && l.textContent) || e.getAttribute('aria-label') || '').trim().split('\n')[0].slice(0, 30);
+      }).filter(Boolean));
+      const text = await dlg.innerText();
+      if (roles.length < 8 || !/محاسب/.test(text) || !/مدير الشركة/.test(text)) throw new Error(`the add-user role list is not populated: ${roles.length} choices; ${text.replace(/\s+/g, ' ').slice(-300)}`);
+      await dlg.getByText('محاسب', { exact: true }).first().click(); await page.waitForTimeout(400);
+      await dlg.getByRole('button', { name: /^(إضافة المستخدم|إرسال الدعوة)$/ }).click();
       let toast = '';
       for (let i = 0; i < 12 && !/أُنشئ حساب|معلَّق|معلق/.test(toast); i++) {
         await sleep(700);
@@ -108,7 +113,10 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
       await sleep(1500);
       const sent = writes.slice(before);
       if (!sent.length) throw new Error(`no write request reached the server after «حفظ» (toast: ${toast.slice(0, 160) || 'none'})`);
-      if (sent.some((w) => !/ 2\d\d$/.test(w))) throw new Error(`a write was refused: ${sent.join(' | ')}`);
+      // 2.0.8: the stock-cost phase-2 readers (20270262b, cloud first, desktop in 2.0.9) answer 404 on this desktop: the page then reads the columns as before
+      // (fabricCostReader isReaderMissing, by design). A READ through rpc, not a write: never counted as a refusal.
+      const readerFallback = (w) => /\/rest\/v1\/rpc\/fn_(material|roll)_costs 404$/.test(w);
+      if (sent.some((w) => !/ 2\d\d$/.test(w) && !readerFallback(w))) throw new Error(`a write was refused: ${sent.join(' | ')}`);
       out.materialSave = { toast: toast.slice(0, 100), writes: sent };
     }
 
@@ -118,6 +126,9 @@ const sleep = (ms) => new Promise((r) => setTimeout(r, ms));
         for (const collapsed of [false, true]) {
           await page.setViewportSize({ width: w, height: h });
           await page.evaluate((v) => localStorage.setItem('company_sidebar_collapsed', v), String(collapsed));
+          // the support widget's one-time intro bubble (SupportChatWidget: once per browser, 8 s after start, 12 s on screen, dismissible) floats over the
+          // bottom of a list; a fresh test browser meets it on every run. A returning user has seen it: what is measured here is the company rail.
+          await page.evaluate(() => localStorage.setItem('support_chat_intro_seen', new Date().toISOString()));
           await goto('/warehouse/materials');
           await page.getByRole('button', { name: 'جدول', exact: true }).click(); await page.waitForTimeout(2500);
           const r = await page.evaluate(() => {
