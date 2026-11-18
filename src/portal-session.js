@@ -11,6 +11,10 @@
 //   POST /portal-api/login      {password}  → the SAME database check; right → a session (HttpOnly cookie), wrong → 401, nothing else changes
 //   GET  /portal-api/companies              → id + name of every company, ONLY with a valid session; otherwise 401 and no list at all
 //   POST /portal-api/logout                 → ends the session
+//   GET  /portal-api/company-name?c=<code>  → 2.0.8: the NAME of the one company whose employee-link code (the first 8 hex digits of its id) is <code>, nothing else, no
+//                                             session needed - the heading of the employee link «/login?c=<code>» on a PC of the office network or through the tunnel.
+//                                             The owner decided (18-11) that a company's name may be seen by whoever holds its link. Exactly one match or 404 (an unknown,
+//                                             malformed or ambiguous code all answer the same); a lookup budget per client address keeps it from being a directory.
 //
 // The session is a random 256-bit token kept in this process's memory (only its SHA-256 is stored), valid for 30 minutes, gone when the program restarts and
 // whenever the portal password changes. It authorises nothing but the read-only company list: not the admin API, not the admin secret, not a company's data
@@ -28,6 +32,8 @@ const COOKIE_PATH = '/portal-api';
 const SESSION_TTL_MS = 30 * 60 * 1000;
 const MAX_SESSIONS = 20;
 const MAX_BODY_BYTES = 2048;
+const NAME_LOOKUPS_PER_MIN = 20;
+const NAME_LOOKUPS_TOTAL_PER_MIN = 120;
 const MAX_PASSWORD_LENGTH = 256;
 
 function sha256(s) { return crypto.createHash('sha256').update(String(s)).digest('hex'); }
@@ -122,8 +128,29 @@ function isCrossOrigin(req) {
  * @param {(password: string) => Promise<boolean>} o.verifyPassword  the database check (public.verify_admin_password) - throttled and locked by the database itself
  * @param {() => Promise<Array<{id: string, name: string}>>} o.listCompanies
  * @param {(msg: string) => void} [o.log]  never receives a password or a token
+ * @param {(code: string) => Promise<string|null>} [o.companyNameByCode]  2.0.8: the name of the ONE company whose id starts with the 8-hex code, else null
+ * @param {() => number} [o.now]
  */
-function createPortalRoutes({ sessions, verifyPassword, listCompanies, log = () => {} }) {
+function createPortalRoutes({ sessions, verifyPassword, listCompanies, companyNameByCode = null, log = () => {}, now = () => Date.now() }) {
+  // 2.0.8: the employee-link heading lookup - a budget of NAME_LOOKUPS_PER_MIN per client address per minute (a link is opened, not scanned)
+  // The key is the peer address; through the tunnel every peer is cloudflared on loopback, so there the visitor is Cloudflare's cf-connecting-ip (set at the edge).
+  // A global ceiling (NAME_LOOKUPS_TOTAL_PER_MIN for everyone together) caps a scan whatever addresses it comes from.
+  const nameBudget = new Map(); let total = { minute: -1, n: 0 };
+  const nameLookupAllowed = (req) => {
+    const peer = String((req.socket && req.socket.remoteAddress) || '');
+    const loopback = /^(127\.|::1$|::ffff:127\.)/.test(peer);
+    const key = loopback ? 'cf|' + String(req.headers['cf-connecting-ip'] || '') : peer;
+    const minute = Math.floor(now() / 60000);
+    if (total.minute !== minute) total = { minute, n: 0 };
+    total.n += 1;
+    if (total.n > NAME_LOOKUPS_TOTAL_PER_MIN) return false;
+    const b = nameBudget.get(key);
+    if (!b || b.minute !== minute) {
+      if (nameBudget.size > 1000) nameBudget.clear();
+      nameBudget.set(key, { minute, n: 1 }); return true;
+    }
+    b.n += 1; return b.n <= NAME_LOOKUPS_PER_MIN;
+  };
   // same-origin only: see isCrossOrigin() (shared with the local invite route)
   const crossOrigin = isCrossOrigin;
   const tokenOf = (req) => readCookie(req.headers.cookie, COOKIE_NAME);
@@ -153,6 +180,16 @@ function createPortalRoutes({ sessions, verifyPassword, listCompanies, log = () 
         if (!sessions.isValid(tokenOf(req))) { send(res, 401, { success: false, code: 'PORTAL_AUTH_REQUIRED' }); return true; }   // no list for anybody else, not even a count
         const rows = await listCompanies();
         send(res, 200, { success: true, companies: (rows || []).map((c) => ({ id: String(c.id), name: String(c.name == null ? '' : c.name) })) });   // id + name only
+        return true;
+      }
+
+      if (req.method === 'GET' && path === '/portal-api/company-name' && companyNameByCode) {
+        const code = String(new URLSearchParams(String(req.url || '').split('?')[1] || '').get('c') || '').trim().toLowerCase();
+        if (!nameLookupAllowed(req)) { send(res, 429, { success: false, code: 'TOO_MANY' }); return true; }
+        if (!/^[0-9a-f]{8}$/.test(code)) { send(res, 404, { success: false, code: 'NOT_FOUND' }); return true; }
+        const name = await companyNameByCode(code);
+        if (typeof name !== 'string' || !name.trim()) { send(res, 404, { success: false, code: 'NOT_FOUND' }); return true; }
+        send(res, 200, { success: true, name: name.trim() });   // the name only: no id, no count, no other company
         return true;
       }
 

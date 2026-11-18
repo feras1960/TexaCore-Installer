@@ -37,7 +37,10 @@ function setup({ password = 'correct horse', clock = { t: 1_000_000 }, listCalls
     sessions,
     verifyPassword: async (pw) => { checks.push(pw); return pw === password; },
     listCompanies: async () => { listCalls.push(1); return COMPANIES; },
+    // the same rule as service-manager.companyNameForEmployeeLink: exactly one company whose id starts with the code
+    companyNameByCode: async (code) => { const hits = COMPANIES.filter((c) => c.id.slice(0, 8) === code); return hits.length === 1 ? hits[0].name : null; },
     log: () => {},
+    now: () => clock.t,
   });
   const call = async (opts) => { const req = fakeReq(opts); const res = fakeRes(); const handled = await routes.handle(req, res); return { handled, res }; };
   const login = async (pw = password, headers = {}) => call({ method: 'POST', url: '/portal-api/login', headers: { 'content-type': 'application/json', ...headers }, body: { password: pw } });
@@ -209,9 +212,69 @@ test('wiring: /portal-api is mounted BEFORE /api/*; /api/* and REMOTE_API_ALLOW 
   assert.match(main, /req\.method === 'GET' && req\.url === '\/api\/companies'/);   // the local list is as before (secret + loopback)
 });
 
-test('what the portal session does NOT open: only the three portal routes exist - no admin API, no secret, no company data', () => {
+test('what the portal session does NOT open: only the four portal routes exist - no admin API, no secret, no company data', () => {
   const portal = CODE('portal-session.js');
-  const routes = [...portal.matchAll(/path === '(\/portal-api\/[a-z]+)'/g)].map((m) => m[1]).sort();
-  assert.deepEqual(routes, ['/portal-api/companies', '/portal-api/login', '/portal-api/logout']);
+  const routes = [...portal.matchAll(/path === '(\/portal-api\/[a-z-]+)'/g)].map((m) => m[1]).sort();
+  assert.deepEqual(routes, ['/portal-api/companies', '/portal-api/company-name', '/portal-api/login', '/portal-api/logout']);
   assert.doesNotMatch(portal, /localApiSecret|x-texacore-local-secret|\/api\//);
+});
+
+// 2.0.8 (owner's decision 18-11): the employee link's heading - the NAME of the one company a link code names, to anybody who holds the link; nothing else
+test('company-name: a known code answers the name only, with no session and without reading the list', async () => {
+  const s = setup();
+  const r = await s.call({ url: '/portal-api/company-name?c=17249EED' });
+  assert.equal(r.res.status, 200);
+  assert.deepEqual(r.res.json, { success: true, name: '2023 مطور بعد الصيانة' });
+  assert.doesNotMatch(r.res.raw, /SECRET|owner@|a91c03de|بروفة|17249eed-/);
+  assert.equal(s.listCalls.length, 0);
+});
+
+test('company-name: unknown, malformed, a full uuid or a missing code all answer the same 404', async () => {
+  const s = setup();
+  for (const q of ['?c=deadbeef', '?c=17249ee', '?c=17249eedd', '?c=17249eed-1c2a-4b7e-9d0a-6f3b2c1d4e5f', '?c=%27%20or%201=1', '', '?c=']) {
+    const r = await s.call({ url: '/portal-api/company-name' + q });
+    assert.equal(r.res.status, 404, q);
+    assert.deepEqual(r.res.json, { success: false, code: 'NOT_FOUND' }, q);
+  }
+});
+
+test('company-name: two companies sharing the short code -> 404 (an ambiguous link never names one at random)', async () => {
+  const sessions = P.createPortalSessions();
+  const twins = [{ id: '17249eed-0000-4000-8000-000000000001', name: 'A' }, { id: '17249eed-0000-4000-8000-000000000002', name: 'B' }];
+  const routes = P.createPortalRoutes({ sessions, verifyPassword: async () => false, listCompanies: async () => twins,
+    companyNameByCode: async (code) => { const h = twins.filter((c) => c.id.slice(0, 8) === code); return h.length === 1 ? h[0].name : null; } });
+  const res = fakeRes(); await routes.handle(fakeReq({ url: '/portal-api/company-name?c=17249eed' }), res);
+  assert.equal(res.status, 404);
+});
+
+test('company-name: a lookup budget per visitor (20 a minute) and for everybody together (120 a minute), back after the minute', async () => {
+  const s = setup();
+  const ask = (headers = {}, socket) => { const req = fakeReq({ url: '/portal-api/company-name?c=deadbeef', headers }); if (socket) req.socket = socket; const res = fakeRes(); return s.routes.handle(req, res).then(() => res.status); };
+  const lan = { remoteAddress: '192.168.1.40' };
+  for (let i = 0; i < 20; i++) assert.equal(await ask({}, lan), 404);
+  assert.equal(await ask({}, lan), 429);
+  assert.equal(await ask({ 'x-forwarded-for': '10.9.9.' + Math.random() }, lan), 429, 'a made-up forwarding header does not buy a new budget on the office network');
+  // through the tunnel every peer is cloudflared on loopback: the visitor is cf-connecting-ip
+  const tunnel = { remoteAddress: '127.0.0.1' };
+  for (let i = 0; i < 20; i++) assert.equal(await ask({ 'cf-connecting-ip': '203.0.113.7' }, tunnel), 404);
+  assert.equal(await ask({ 'cf-connecting-ip': '203.0.113.7' }, tunnel), 429);
+  assert.equal(await ask({ 'cf-connecting-ip': '203.0.113.8' }, tunnel), 404, 'another visitor has its own budget');
+  // the global ceiling: many addresses together stop at 120
+  let last = 0; for (let i = 0; i < 120; i++) last = await ask({}, { remoteAddress: '192.168.2.' + i });
+  assert.equal(last, 429);
+  s.clock.t += 60_000;
+  assert.equal(await ask({}, lan), 404, 'a new minute, a new budget');
+});
+
+test('company-name: cross-site requests are refused like every portal route', async () => {
+  const s = setup();
+  const r = await s.call({ url: '/portal-api/company-name?c=17249eed', headers: { 'sec-fetch-site': 'cross-site' } });
+  assert.equal(r.res.status, 403);
+});
+
+test('company-name is wired to ONE exact-prefix database read of the name (service-manager)', () => {
+  const sm = SRC('service-manager.js');   // (CODE() would cut it: '/portal-api/*' in a route string reads as a comment start)
+  assert.match(sm, /companyNameByCode: \(code\) => this\.companyNameForEmployeeLink\(code\)/);
+  assert.match(sm, /SELECT name FROM public\.companies WHERE left\(id::text, 8\) = \$1 LIMIT 2/);
+  assert.match(sm, /r\.rows\.length === 1 \?/);
 });

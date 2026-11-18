@@ -1473,6 +1473,7 @@ window.__TEXACORE_CONFIG__ = {
         sessions: this.portalSessions,
         verifyPassword: (pw) => this.verifyAdminPortalPassword(pw),
         listCompanies: () => this.listCompaniesForPortal(),
+        companyNameByCode: (code) => this.companyNameForEmployeeLink(code),
         log: (m) => console.log(m),
       });
       app.all('/portal-api/*', (req, res, next) => { portalRoutes.handle(req, res).then((done) => { if (!done) next(); }, next); });
@@ -2154,6 +2155,15 @@ window.__TEXACORE_CONFIG__ = {
     return this._withPgClient(async (client) => {
       const r = await client.query('SELECT id, name FROM public.companies ORDER BY created_at DESC LIMIT 500');
       return r.rows;
+    });
+  }
+
+  // 2.0.8: the heading of the employee link /login?c=<code> (code = the first 8 hex digits of the company id): the name of exactly ONE company, else null.
+  async companyNameForEmployeeLink(code) {
+    if (!/^[0-9a-f]{8}$/.test(String(code || ''))) return null;
+    return this._withPgClient(async (client) => {
+      const r = await client.query("SELECT name FROM public.companies WHERE left(id::text, 8) = $1 LIMIT 2", [String(code)]);
+      return r.rows.length === 1 ? String(r.rows[0].name == null ? '' : r.rows[0].name) : null;
     });
   }
 
