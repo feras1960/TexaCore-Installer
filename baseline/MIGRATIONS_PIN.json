@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "1fa68f93a8835c828abf67daf3ea4d322d5ff3c9",
+  "erpCommit": "58b7f8436f660938a6a282ed657d9f1ac0b36807",
   "migrations": [
     {
       "order": 1,
@@ -1121,8 +1121,8 @@
       "order": 160,
       "name": "20270250j_mfg_plan_requirements",
       "file": "20270250j_mfg_plan_requirements.sql",
-      "sha256": "c9d81ce2bd97dba87a120629fe376301c18e603e36ececf2ccbfa336af2653ea",
-      "bytes": 104443
+      "sha256": "3fdadd3fda726c8ca1c391091f03fb62166f737197e5b29dff464bee03ec31ad",
+      "bytes": 104613
     },
     {
       "order": 161,
@@ -1170,8 +1170,8 @@
       "order": 167,
       "name": "20270251a_mfg_multilot_backflush",
       "file": "20270251a_mfg_multilot_backflush.sql",
-      "sha256": "9dd4aa33d53e514bec0aff49f845b3bd5c94d5c0e12aea8d5d2ed3dc85971785",
-      "bytes": 201736
+      "sha256": "0e225d0b98d7b42e535a499aec8b53a94c42c209465bddd09c9771b7ccba1b31",
+      "bytes": 202164
     },
     {
       "order": 168,
@@ -1184,8 +1184,8 @@
       "order": 169,
       "name": "20270251b_inventory_accounts_by_item",
       "file": "20270251b_inventory_accounts_by_item.sql",
-      "sha256": "f573a382927c699c3701ef888443a6b9a963c48e807d1e6b5a39b53e5dc06196",
-      "bytes": 262207
+      "sha256": "5c703745426f69dcce4583b150d8f71c608d97ad196c561013c3831cd342d440",
+      "bytes": 263630
     },
     {
       "order": 170,
@@ -1340,11 +1340,67 @@
       "file": "20270256n_invite_password_clears_pending_reset.sql",
       "sha256": "098fd0c9fd076409318e2bed7d4d0d316f6dfab755018dda40668ea33ea2767d",
       "bytes": 14316
+    },
+    {
+      "order": 192,
+      "name": "20270251e_mfg_issue_auto_fefo",
+      "file": "20270251e_mfg_issue_auto_fefo.sql",
+      "sha256": "0728906045857ec8f27a865d812a4474df136b22fbff6e8fd7828ac79e2a5c93",
+      "bytes": 91991
+    },
+    {
+      "order": 193,
+      "name": "20270251f_mfg_label_qr_and_pallet_sheet",
+      "file": "20270251f_mfg_label_qr_and_pallet_sheet.sql",
+      "sha256": "c1fc19599c5fb01a406c80122500f7640aa05911ed35c7707fc269ae2d1b8bb8",
+      "bytes": 66876
+    },
+    {
+      "order": 194,
+      "name": "20270259a_login_history_server_writer",
+      "file": "20270259a_login_history_server_writer.sql",
+      "sha256": "a09ca5dfda7cb31a90239ac4ef8af7eaf4dbd982acd4dc33f5116d743096e4d2",
+      "bytes": 36913
+    },
+    {
+      "order": 195,
+      "name": "20270259b_login_history_manager_screen",
+      "file": "20270259b_login_history_manager_screen.sql",
+      "sha256": "ef382c2ea7792ebf6a8b1b8584c9670b6d65a2ba31492f8417ceab937b076b2d",
+      "bytes": 16504
+    },
+    {
+      "order": 196,
+      "name": "20270261a_price_lists_editor",
+      "file": "20270261a_price_lists_editor.sql",
+      "sha256": "ef50c75f7b0a038a959a4b706d3ce99609f81b9b5314d1bcc29648903598a089",
+      "bytes": 54187
+    },
+    {
+      "order": 197,
+      "name": "20270259c_document_activity_actor_index",
+      "file": "20270259c_document_activity_actor_index.sql",
+      "sha256": "39c1d58630dbfce7dbe9392408a59f5f6df84d5b280a234fc5ba7d6e5b8fa19d",
+      "bytes": 1739
+    },
+    {
+      "order": 198,
+      "name": "20270259c_login_history_online_now",
+      "file": "20270259c_login_history_online_now.sql",
+      "sha256": "e1a750a55d70f2eb3f9afb03f09ecdd96070c1d04bfb89af768ea9fc18a6c9b1",
+      "bytes": 37789
+    },
+    {
+      "order": 199,
+      "name": "20270262a_stock_cost_column_privileges",
+      "file": "20270262a_stock_cost_column_privileges.sql",
+      "sha256": "6d77cc123b0aa7693da059b684682c0be24538fd94e10e7305acf866d001d8a4",
+      "bytes": 36668
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "d7cb1b2cd75609aa89871dd5c468825c0287f81c50d28167fa2637469012d8e0",
-    "bytes": 81992
+    "sha256": "ce24a0bf172aa8ce0bd1bbc9be6c81ee3ddcd4a2d9fba745169d548439b71dff",
+    "bytes": 85538
   }
 }

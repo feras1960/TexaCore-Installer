@@ -119,7 +119,7 @@ test('2.0.7 ships the 111 migrations of 2.0.6 first (unchanged, 2.0.6 apply orde
     "20270243n_writeoff_gl_required",
     "20270243o_container_quantity_receipt_items"
 ]);
-  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 191 }, (_, i) => i + 1));   // 2.0.8: 149 of 2.0.7 + 42
+  assert.deepEqual(pin.migrations.map((x) => x.order), Array.from({ length: 199 }, (_, i) => i + 1));   // 2.0.8: 149 of 2.0.7 + 50
   assert.ok(!pin.migrations.some((x) => /20270210l|20270217b/.test(x.name)));
   // the first 19 are exactly what 2.0.4 shipped (same names, same sha256): the upgrade from 2.0.4 applies ONLY the 34 after them
   assert.equal(require('crypto').createHash('sha256').update(JSON.stringify(pin.migrations.slice(0, 19).map((x) => [x.name, x.sha256]))).digest('hex'), '85744a0afb4dc0c7000a047e212257d8ae47158cd6736f431f4175b0a7ae137c', 'the first 19 entries (name + sha256) are byte-for-byte what 2.0.4 pinned');
@@ -173,7 +173,7 @@ test('2.0.7 adds exactly these 38 migrations after the 111 of 2.0.6', () => {
 // 2.0.8: the migrations production received after 2.0.7's set (07-11 .. 18-11), in PRODUCTION's apply order (merge order on main). Shipped although bot-named: 243v, 244b, 248f
 // (the read-only guard coverage self-checks and 20270250j need them; dormant on a desktop). NOT shipped: 249c and 254a/b/c + 256o (the Telegram bot / factory bot chain: drift gates need 248c/249a),
 // POS 225a-g + 249e-l (hidden until S17; 225d refuses on desktops whose old data has the pos module active), 250i (needs pos_checkout) and loyalty 251n/o/p/s (need 250i).
-test('2.0.8 adds exactly these 42 migrations after the 149 of 2.0.7', () => {
+test('2.0.8 adds exactly these 50 migrations after the 149 of 2.0.7', () => {
   assert.deepEqual(pin.migrations.slice(149).map((x) => x.name), [
     "20270243v_bot_rate_limit",
     "20270244b_bot_single_router",
@@ -217,8 +217,16 @@ test('2.0.8 adds exactly these 42 migrations after the 149 of 2.0.7', () => {
     "20270256j_invitations_section",
     "20270256k_guest_account_actions",
     "20270256n_invite_password_clears_pending_reset",
+    "20270251e_mfg_issue_auto_fefo",
+    "20270251f_mfg_label_qr_and_pallet_sheet",
+    "20270259a_login_history_server_writer",
+    "20270259b_login_history_manager_screen",
+    "20270261a_price_lists_editor",
+    "20270259c_document_activity_actor_index",
+    "20270259c_login_history_online_now",
+    "20270262a_stock_cost_column_privileges",
   ]);
-  assert.ok(!pin.migrations.some((x) => /^20270225|^20270249[ce-l]|^20270250i|^20270251[nops]|^20270254[abc]_efx|^20270256o/.test(x.name)));
+  assert.ok(!pin.migrations.some((x) => /^20270225|^20270249[ce-l]|^20270250i|^20270251[nops]|^20270254[abc]_efx|^20270256o|^20270260|^20270261b/.test(x.name)));
 });
 
 test('the pin holds names, order, sha256 and sizes ONLY: no SQL, no tenant id, no function body (the repo is public)', () => {
@@ -299,7 +307,7 @@ test('the measured inventory delta (baseline/migrations.inventory.json, private)
   assert.deepEqual(r.problems, []);
   assert.ok(r.inventory.catalogDelta && r.inventory.functions);
   assert.ok(Object.keys(r.inventory.functions).length > 50);
-  assert.equal(r.inventory.catalogDelta.tables, 33, '(2.0.8: 33 = + 13 tables of the 42 added migrations) the runner\'s own bookkeeping table + the 14 tables the 79 migrations add (+ dashboard_user_layouts, voucher_invoice_allocations) (RC2: + journal_number_counters of 20270237b) (2.0.7: 20 = + the dormant Telegram tables of 243k/l/y and the tables of 244i/246a-era CRM and company settings)');
+  assert.equal(r.inventory.catalogDelta.tables, 35, '(2.0.8: 35 = + 15 tables of the 50 added migrations) the runner\'s own bookkeeping table + the 14 tables the 79 migrations add (+ dashboard_user_layouts, voucher_invoice_allocations) (RC2: + journal_number_counters of 20270237b) (2.0.7: 20 = + the dormant Telegram tables of 243k/l/y and the tables of 244i/246a-era CRM and company settings)');
   for (const sig of Object.keys(r.inventory.functions)) assert.match(sig, /^(public|licensing)\.[a-z_0-9]+\(.*\)$/, sig);   // 2.0.5: a licensing-schema trigger function is replaced too (the inventory schemas: public, licensing, newpost, tomgenerators)
 });
 
@@ -316,7 +324,9 @@ test('every generated migration is ONE transaction (BEGIN … COMMIT), so a fail
     const sql = fs.readFileSync(path.join(ROOT, 'migrations', e.file), 'utf8');
     const body = sql.split('\n').filter((l) => !/^\s*--/.test(l)).join('\n').trim();
     const oneDo = /^DO (\$[a-z_]*\$)[\s\S]*\1;$/.test(body) && body.split(body.match(/^DO (\$[a-z_]*\$)/)[1]).length === 3 && !/\b(COMMIT|ROLLBACK)\b/i.test(body);   // 2.0.8 (20270256m): ONE top-level DO block is one statement, so atomic too
-    if (!oneDo) {
+    // 2.0.8 (20270259c_document_activity_actor_index): ONE `CREATE INDEX CONCURRENTLY IF NOT EXISTS` statement - it cannot run inside a transaction, and alone it changes nothing else
+    const oneConcurrentIndex = /^CREATE (UNIQUE )?INDEX CONCURRENTLY IF NOT EXISTS [^;]+;$/i.test(body);
+    if (!oneDo && !oneConcurrentIndex) {
       assert.match(sql, /^BEGIN;\s*$/m, `${e.file}: no BEGIN;`);
       assert.match(sql, /^COMMIT;\s*$/m, `${e.file}: no COMMIT;`);
     }
