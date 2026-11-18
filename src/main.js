@@ -2798,8 +2798,7 @@ async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '', confirm
       // Restart GoTrue
       if (svcManager.processes.gotrue) {
         console.log('[OpenTCDB] Restarting GoTrue...');
-        try { svcManager.processes.gotrue.kill(); } catch {}
-        svcManager.processes.gotrue = null;
+        svcManager._killProcess('gotrue'); // flagged as deliberate: the supervisor must not restart it too
         await new Promise(r => setTimeout(r, 1000));
       }
       await svcManager.startGoTrue();
@@ -2808,8 +2807,7 @@ async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '', confirm
       // Restart PostgREST  
       if (svcManager.processes.postgrest) {
         console.log('[OpenTCDB] Restarting PostgREST...');
-        try { svcManager.processes.postgrest.kill(); } catch {}
-        svcManager.processes.postgrest = null;
+        svcManager._killProcess('postgrest'); // flagged as deliberate: the supervisor must not restart it too
         await new Promise(r => setTimeout(r, 1000));
       }
       await svcManager.startPostgREST();

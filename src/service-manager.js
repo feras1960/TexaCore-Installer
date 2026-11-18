@@ -6,6 +6,7 @@
 const fs = require('fs');
 const path = require('path');
 const { spawn, execSync } = require('child_process');
+const { createSupervisor } = require('./child-supervisor');
 const http = require('http');
 const express = require('express');
 const net = require('net');
@@ -66,6 +67,11 @@ class ServiceManager {
     }
 
     this.processes = {};
+    // an unexpected death of PostgREST / GoTrue is restarted with backoff (child-supervisor.js); Postgres is only logged
+    this.supervisors = {
+      postgrest: createSupervisor({ name: 'PostgREST', log: (m) => console.log(m), restart: () => this._superviseRestart('postgrest') }),
+      gotrue: createSupervisor({ name: 'GoTrue', log: (m) => console.log(m), restart: () => this._superviseRestart('gotrue') }),
+    };
     this.status = 'stopped'; // stopped | starting | running | error
     this.tunnel = new TunnelMonitor();   // the honest state of the Cloudflare connector (tunnel-monitor.js)
     this.logger = null;                  // main.js passes its file logger (heartbeat.log) so tunnel events are diagnosable from the log the owner sends
@@ -947,11 +953,12 @@ class ServiceManager {
 
     proc.on('error', err => {
       console.error('[ServiceManager] PostgREST spawn error:', err.message);
-      this.processes.postgrest = null;
+      if (this.processes.postgrest === proc) this.processes.postgrest = null;
     });
-    proc.on('exit', code => {
-      console.log('[ServiceManager] PostgREST exited with code', code);
-      this.processes.postgrest = null;
+    proc.on('exit', (code, signal) => {
+      console.log('[ServiceManager] PostgREST exited with code', code, signal ? `signal ${signal}` : '');
+      if (this.processes.postgrest === proc) this.processes.postgrest = null; // never clear a newer process
+      this._onSupervisedExit('postgrest', proc, code, signal);
     });
 
     this.processes.postgrest = proc;
@@ -969,6 +976,7 @@ class ServiceManager {
 
       if (await this._checkHttp(this.activePostgrestPort, '/')) {
         console.log('[ServiceManager] PostgREST is ready on port', this.activePostgrestPort);
+        proc.texaReady = true; this.supervisors.postgrest.reset();
         return;
       }
     }
@@ -1022,11 +1030,12 @@ class ServiceManager {
 
     proc.on('error', err => {
       console.error('[ServiceManager] GoTrue error:', err.message);
-      this.processes.gotrue = null;
+      if (this.processes.gotrue === proc) this.processes.gotrue = null;
     });
-    proc.on('exit', code => {
-      console.log('[ServiceManager] GoTrue exited with code', code);
-      this.processes.gotrue = null;
+    proc.on('exit', (code, signal) => {
+      console.log('[ServiceManager] GoTrue exited with code', code, signal ? `signal ${signal}` : '');
+      if (this.processes.gotrue === proc) this.processes.gotrue = null;
+      this._onSupervisedExit('gotrue', proc, code, signal);
     });
 
     this.processes.gotrue = proc;
@@ -1036,6 +1045,7 @@ class ServiceManager {
       await this._sleep(500);
       if (await this._checkHttp(this.activeGotruePort, '/health')) {
         console.log('[ServiceManager] GoTrue is ready');
+        proc.texaReady = true; this.supervisors.gotrue.reset();
         return;
       }
     }
@@ -1207,6 +1217,7 @@ class ServiceManager {
   }
 
   async _startAllInner(options = {}) {
+    this._resumeSupervision();
     if (this.status === 'running') return { success: true };
     this.status = 'starting';
     // NB: options.dbPassword (a 1.x leftover in config.json) is deliberately ignored — the DB password is the per-install
@@ -1975,6 +1986,8 @@ window.__TEXACORE_CONFIG__ = {
   // ─── Stop All Services ───────────────────────────────────────
   async stopAll() {
     console.log('[ServiceManager] Stopping all services...');
+    this._stopping = true;                       // deliberate: no supervised restart from here on
+    for (const sv of Object.values(this.supervisors)) sv.cancel();
 
     // Stop cloudflared
     this._killProcess('cloudflared');
@@ -2013,6 +2026,22 @@ window.__TEXACORE_CONFIG__ = {
     console.log('[ServiceManager] All services stopped');
     return { success: true };
   }
+
+  // ─── Supervised restart (PostgREST, GoTrue) ──────────────────
+  // An exit we asked for (_killProcess sets texaStopRequested; stopAll sets _stopping) never restarts. A child that had not yet answered its
+  // first request is left to the start function's own "exited unexpectedly" error.
+  _onSupervisedExit(name, proc, code, signal) {
+    if (proc.texaStopRequested || this._stopping || !proc.texaReady) return;
+    if (this.processes[name]) return; // already replaced by a deliberate start
+    this.supervisors[name].onUnexpectedExit(`code ${code}, signal ${signal}`);
+  }
+  async _superviseRestart(name) {
+    if (this._stopping || this.processes[name]) return;
+    if (!this.processes.postgres) return; // the database is gone: nothing to reconnect to (Postgres itself is not auto-restarted)
+    if (name === 'postgrest') await this.startPostgREST(); else await this.startGoTrue();
+  }
+  /** Allow supervision again after a deliberate stop (startAll). */
+  _resumeSupervision() { this._stopping = false; }
 
   // ─── Kill a child process ────────────────────────────────────
   _killProcess(name) {
