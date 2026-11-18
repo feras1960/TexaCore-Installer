@@ -2057,6 +2057,23 @@ window.__TEXACORE_CONFIG__ = {
     }
   }
 
+  // 2.0.8: stop a child and WAIT until it has really exited (its port is free again), at most `timeoutMs`. Opening a company file used to kill
+  // PostgREST and wait a fixed second: on a busy machine the old process still held 47392, the new start failed with «port in use», the old one
+  // then died mid-request (ECONNRESET) and the app was left with no PostgREST at all (launch-check 9.1, 18-11). SIGKILL after 3 s, as before.
+  _stopProcessAndWait(name, timeoutMs = 8000) {
+    const proc = this.processes[name];
+    if (!proc) return Promise.resolve(true);
+    const gone = () => proc.exitCode !== null || proc.signalCode !== null;
+    return new Promise((resolve) => {
+      if (gone()) { this.processes[name] = null; resolve(true); return; }
+      let done = false;
+      const finish = (ok) => { if (done) return; done = true; clearTimeout(t); resolve(ok); };
+      const t = setTimeout(() => finish(gone()), timeoutMs);
+      proc.once('exit', () => finish(true));
+      this._killProcess(name);
+    });
+  }
+
   // ─── Utility: Sleep ──────────────────────────────────────────
   _sleep(ms) { return new Promise(r => setTimeout(r, ms)); }
 

@@ -2661,6 +2661,19 @@ async function restoreTcdbFromPath(selectedPath, opts = {}) {
   restoreInFlight = true;
   try { return await openTcdbFromPathUnlocked(selectedPath, opts); } finally { restoreInFlight = false; }
 }
+// 2.0.8: a restart after a company file is opened must not leave the app without the service: «port … is in use» (the old process not gone yet)
+// is retried for up to ~10 s; any other error is thrown as before.
+async function startWithPortRetry(start, attempts = 5) {
+  for (let i = 1; ; i++) {
+    try { return await start(); }
+    catch (e) {
+      if (i >= attempts || !/is in use/.test(String(e && e.message))) throw e;
+      console.warn(`[OpenTCDB] ${e.message} - retrying (${i}/${attempts - 1})`);
+      await new Promise((r) => setTimeout(r, 2000));
+    }
+  }
+}
+
 async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '', confirmReplaceAll = false } = {}) {
   const fileName = path.basename(selectedPath);
   const fileDir = path.dirname(selectedPath);
@@ -2798,19 +2811,19 @@ async function openTcdbFromPathUnlocked(selectedPath, { passphrase = '', confirm
       // Restart GoTrue
       if (svcManager.processes.gotrue) {
         console.log('[OpenTCDB] Restarting GoTrue...');
-        svcManager._killProcess('gotrue'); // flagged as deliberate: the supervisor must not restart it too
-        await new Promise(r => setTimeout(r, 1000));
+        // flagged as deliberate (the supervisor must not restart it too), and WAITED for: its port must be free before the new one starts
+        if (!(await svcManager._stopProcessAndWait('gotrue'))) console.warn('[OpenTCDB] the old gotrue did not exit in time');
       }
-      await svcManager.startGoTrue();
+      await startWithPortRetry(() => svcManager.startGoTrue());   // a port still held by the old process is waited for, not given up on
       console.log('[OpenTCDB] ✅ GoTrue restarted');
 
       // Restart PostgREST  
       if (svcManager.processes.postgrest) {
         console.log('[OpenTCDB] Restarting PostgREST...');
-        svcManager._killProcess('postgrest'); // flagged as deliberate: the supervisor must not restart it too
-        await new Promise(r => setTimeout(r, 1000));
+        // flagged as deliberate (the supervisor must not restart it too), and WAITED for: its port must be free before the new one starts
+        if (!(await svcManager._stopProcessAndWait('postgrest'))) console.warn('[OpenTCDB] the old postgrest did not exit in time');
       }
-      await svcManager.startPostgREST();
+      await startWithPortRetry(() => svcManager.startPostgREST());   // a port still held by the old process is waited for, not given up on
       console.log('[OpenTCDB] ✅ PostgREST restarted');
 
       // 2.0.0: NOTHING here widens access any more. 1.x disabled RLS on every table and granted ALL to anon after a restore — the
