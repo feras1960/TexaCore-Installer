@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "58b7f8436f660938a6a282ed657d9f1ac0b36807",
+  "erpCommit": "bf1a72bb92a6c4a5866cdf0a10628dde25897fcf",
   "migrations": [
     {
       "order": 1,
@@ -1396,11 +1396,25 @@
       "file": "20270262a_stock_cost_column_privileges.sql",
       "sha256": "6d77cc123b0aa7693da059b684682c0be24538fd94e10e7305acf866d001d8a4",
       "bytes": 36668
+    },
+    {
+      "order": 200,
+      "name": "20270259d_audit_log_reader",
+      "file": "20270259d_audit_log_reader.sql",
+      "sha256": "671ea6bbe59bfe0a4cebe67f1ed9dd9929e789cd9497004cd468b202b118daa4",
+      "bytes": 39323
+    },
+    {
+      "order": 201,
+      "name": "20270262c_company_admin_labels_print",
+      "file": "20270262c_company_admin_labels_print.sql",
+      "sha256": "be93e0e0c98e51af279a4e74593df37abb052830d73fdf0567e49b26cbdd4137",
+      "bytes": 3483
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "ce24a0bf172aa8ce0bd1bbc9be6c81ee3ddcd4a2d9fba745169d548439b71dff",
-    "bytes": 85538
+    "sha256": "b0c8df5e50386266b50c98b01eb9698dd1a1536ca60bc70f4e50d37c19cc3c59",
+    "bytes": 85831
   }
 }

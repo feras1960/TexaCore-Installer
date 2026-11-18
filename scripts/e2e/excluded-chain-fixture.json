@@ -1,5 +1,5 @@
 {
- "note": "2.0.8: the local (desktop) md5(prosrc), SECURITY DEFINER flag and ACL of the functions whose PRODUCTION body differs for a known reason: (a) the Telegram bot chain this release does not ship (fn_tg_send needs 20270249a; fn_tg_notify_user: grants differ (desktop stricter); the rest of the 2.0.7 list); (b) POS 20270225a-g / 20270249e-l not shipped (POS stays hidden until S17, and 20270225d refuses on desktops whose old data has the pos module active): the plan-limit / seat / console-plan functions keep their pre-POS bodies; (c) 20270250i (bag binding at delivery, needs POS) and 20270251n/o/p/s (loyalty R2-R4b, need 20270250i) not shipped: issue_sales_document, fn_lot_follow_movement, loyalty_settings_save keep the earlier bodies; (d) SAME CODE, different text: production holds ensure_country_wallet_groups / fn_tag_entry_party_accounts without their comments and fn_pfa_norm with the \\\\uXXXX escapes decoded to raw characters; auth_email_hook / request_email_verification: production embeds its anon key, the desktop holds the baseline placeholder (20270256m masks the literal when it compares). (e) 20270261b (one price rule, needs POS) not shipped: fn_price_resolve keeps the 20270261a body. migrations-check D fails if any of them drifts from this recording. Recorded on a fresh 191-migration install, 2026-11-18.",
+ "note": "2.0.8: the local (desktop) md5(prosrc), SECURITY DEFINER flag and ACL of the functions whose PRODUCTION body differs for a known reason: (a) the Telegram bot chain this release does not ship (fn_tg_send needs 20270249a; fn_tg_notify_user: grants differ (desktop stricter); the rest of the 2.0.7 list); (b) POS 20270225a-g / 20270249e-l not shipped (POS stays hidden until S17, and 20270225d refuses on desktops whose old data has the pos module active): the plan-limit / seat / console-plan functions keep their pre-POS bodies; (c) 20270250i (bag binding at delivery, needs POS) and 20270251n/o/p/s (loyalty R2-R4b, need 20270250i) not shipped: issue_sales_document, fn_lot_follow_movement, loyalty_settings_save keep the earlier bodies; (d) SAME CODE, different text: production holds ensure_country_wallet_groups / fn_tag_entry_party_accounts without their comments and fn_pfa_norm with the \\\\uXXXX escapes decoded to raw characters; auth_email_hook / request_email_verification: production embeds its anon key, the desktop holds the baseline placeholder (20270256m masks the literal when it compares). (e) 20270261b (one price rule, needs POS) not shipped: fn_price_resolve keeps the 20270261a body. (f) the one-link invitation package 20270260* is cloud-only (its 260e refuses to revoke on a desktop database): fn_membership_invite_accept / _apply / _reject / _respond keep the 20270256 bodies the desktop add-user path relies on. migrations-check D fails if any of them drifts from this recording. Recorded on a fresh 191-migration install, 2026-11-18.",
  "functions": {
   "fn_attendance_set_site(bigint,uuid,numeric,numeric,numeric)": {
    "md5": "9de91dd47023fef6f934173d469f054b",
@@ -139,6 +139,26 @@
   "fn_price_resolve(uuid,uuid,uuid,numeric,numeric,date)": {
    "md5": "470a22ae6585bee63babace8eab398e1",
    "secdef": false,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_membership_invite_accept(uuid)": {
+   "md5": "7918a4439c70b4da28808c093c378483",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_membership_invite_apply(uuid,uuid)": {
+   "md5": "5db57aef98b4e9f9a1671e10203d747a",
+   "secdef": true,
+   "acl": "postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_membership_invite_reject(uuid)": {
+   "md5": "53869743c303d934d9123dc40bc92a28",
+   "secdef": true,
+   "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
+  },
+  "fn_membership_invite_respond(uuid,boolean)": {
+   "md5": "db27944f4614605b4828a36f0235e79f",
+   "secdef": true,
    "acl": "authenticated=X/postgres,postgres=X/postgres,service_role=X/postgres"
   }
  }
