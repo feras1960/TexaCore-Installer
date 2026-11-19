@@ -2,7 +2,7 @@
   "schema": 1,
   "note": "The ERP repo (private) supabase/migrations files production received after the baseline cut: names, order, sha256, bytes. NO SQL here - scripts/sync-migrations.js fetches the files at build time and checks them against this pin; scripts/pack-baseline.js packs them into the encrypted container.",
   "baselineSha256": "d09398afffe495540d8314c1882b68902b04b89c3fa1997f8bf6a4bb37e39642",
-  "erpCommit": "467d979fc77ded62871fc3ab37ace139052a32bd",
+  "erpCommit": "c8755a9284e560736cc0db8404c7924e8e67faf1",
   "migrations": [
     {
       "order": 1,
@@ -1431,11 +1431,39 @@
       "file": "20270261d_price_change_log.sql",
       "sha256": "c2d6bc7a342bea3895ef87aa27d4573332c569675d06b48f69f6a7d4667cf9ae",
       "bytes": 32034
+    },
+    {
+      "order": 205,
+      "name": "20270262b_fabric_cost_column_privileges",
+      "file": "20270262b_fabric_cost_column_privileges.sql",
+      "sha256": "8f3682a7142c14e38aad1ef8a685e5fa670dce2048b43d3a3c8e04b0c0a4198a",
+      "bytes": 23096
+    },
+    {
+      "order": 206,
+      "name": "20270262d_cost_returning_definer_masks",
+      "file": "20270262d_cost_returning_definer_masks.sql",
+      "sha256": "e55a1d6be1498fe745d66228c83f0bb1b2cdc2266acaeb88685d79080dc6b02c",
+      "bytes": 7828
+    },
+    {
+      "order": 207,
+      "name": "20270263a_stock_history_imports",
+      "file": "20270263a_stock_history_imports.sql",
+      "sha256": "259efd85ddce8c7e3e332d19f6fe2252270d59776fb7470226b89d7f5fcc1820",
+      "bytes": 33127
+    },
+    {
+      "order": 208,
+      "name": "20270261e_price_list_delete_and_seed",
+      "file": "20270261e_price_list_delete_and_seed.sql",
+      "sha256": "3a4a780772c79929eecf0e05a5a79c74f3e4bc2b7cceb656d2c20aa5b9d37a84",
+      "bytes": 23953
     }
   ],
   "inventory": {
     "file": "migrations.inventory.json",
-    "sha256": "26f52f55a2b824da5598ab01fc7bafe2fef7cbb033bd36d1f0061e5d9d7be1a1",
-    "bytes": 86940
+    "sha256": "ef6852bdd669c61e337779486090a8815dd2ad59fe3c0b1b26299db12ef96de0",
+    "bytes": 88455
   }
 }

@@ -191,7 +191,9 @@ async function multiCompanyChecks(R, ctx) {
     const mg = await materialCapabilityGrants(pg);
     if (mg.length) throw new Error(`material capability grants differ from production's: ${mg.join(' | ')}`);
     const ownerTok = (await signIn()).access_token;
-    const rest = async (tok, method, p, body, prefer = 'return=representation') => request(method, `${API}/rest/v1/${p}`, { headers: { apikey: anonKey, Authorization: `Bearer ${tok}`, Prefer: prefer }, body });
+    // 2.0.9: 20270262b closes the cost columns to clients - a write on a material / roll that returns its row asks only for columns a client may read
+    const withSelect = (p) => (/^fabric_(materials|rolls)\b/.test(p) && !/[?&]select=/.test(p) ? `${p}${p.includes('?') ? '&' : '?'}select=id` : p);
+    const rest = async (tok, method, p, body, prefer = 'return=representation') => request(method, `${API}/rest/v1/${withSelect(p)}`, { headers: { apikey: anonKey, Authorization: `Bearer ${tok}`, Prefer: prefer }, body });
     const row = async (id) => (await pg('SELECT code, name_ar, selling_price::numeric AS sp, avg_cost_per_unit::numeric AS ac, last_cost_per_unit::numeric AS lc FROM public.fabric_materials WHERE id = $1', [id])).rows[0];
     const refused = (r) => r.status >= 400 || (r.status < 300 && Array.isArray(r.json) && r.json.length === 0);
     const base = { tenant_id: S.tenantId, company_id: co };

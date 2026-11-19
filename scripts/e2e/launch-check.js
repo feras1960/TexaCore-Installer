@@ -375,7 +375,7 @@ async function main() {
       const withCompany = async (t, row) => ((await colsOf(t)).includes('company_id') ? { ...row, company_id: A.companyId } : row);
       const cust = await request('POST', `${API}/rest/v1/customers`, { headers: { ...authA, Prefer: 'return=representation' }, body: await withCompany('customers', { tenant_id: A.tenantId, code: 'LC-CUST-1', name_ar: 'عميل فحص الإطلاق' }) });
       if (cust.status !== 201) throw new Error(`insert customer → ${cust.status} ${cust.text.slice(0, 240)}`);
-      const mat = await request('POST', `${API}/rest/v1/fabric_materials`, { headers: { ...authA, Prefer: 'return=representation' }, body: await withCompany('fabric_materials', { tenant_id: A.tenantId, code: 'LC-MAT-1', name_ar: 'مادة فحص الإطلاق' }) });
+      const mat = await request('POST', `${API}/rest/v1/fabric_materials?select=id,code,name_ar,material_type,tracking_mode,selling_price`, { headers: { ...authA, Prefer: 'return=representation' }, body: await withCompany('fabric_materials', { tenant_id: A.tenantId, code: 'LC-MAT-1', name_ar: 'مادة فحص الإطلاق' }) });
       if (mat.status !== 201) throw new Error(`insert fabric_materials → ${mat.status} ${mat.text.slice(0, 240)}`);
       const leaf = (await pg(`SELECT id FROM chart_of_accounts WHERE company_id=$1 AND COALESCE(is_group,false)=false AND COALESCE(is_active,true) ORDER BY account_code LIMIT 2`, [A.companyId])).rows;
       if (leaf.length < 2) throw new Error(`the chart has ${leaf.length} postable accounts`);

@@ -77,7 +77,7 @@ const multipart = (file, filename, fields0 = {}) => {
 };
 // production's post-image of the functions of 20270210v (coordinator, from production after the apply of 2026-10-15)
 const V_MD5 = {
-  'fn_guard_material_card()': '2fe6c0a6da6a31ca45e5c810ad8038cc',   // 20270210v's body ff6c7cfc… was replaced by 20270240l (production's post-image, 27-10)
+  'fn_guard_material_card()': 'dcd8b0f1dd92492bec328d48b7f10242',   // 20270210v's body ff6c7cfc… was replaced by 20270240l (2fe6c0a6…, 27-10), then by 20270262b (the parent's purchase price via fn_material_parent_price_ok; production's post-image, 19-11)
    'fn_material_tracking_sync()': 'db9d6ce5a94060f3d226916ec28b4969', 'fn_material_base_unit_guard()': 'f8e16d1cd348b37965396d14aa240fe0',
   'fn_material_mode_derive(text,boolean,boolean,boolean)': '521081d97f20ee86078bc13b9cd3b78f', 'fn_material_stock_lock_reasons(uuid,boolean,boolean)': 'af15bdf8b84ddda0040b21de0eda3a59',
   'fn_material_tracking_mode(uuid)': 'e8ad0124e16ef96dbd5f00ae7ed1be7b',
@@ -320,8 +320,9 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
 
     acc = await createCompany(a.secrets, 'a');
     const authA = { apikey: a.secrets.anonKey, Authorization: `Bearer ${acc.accessToken}`, Prefer: 'return=representation' };
+    // 2.9: 20270262b closes the cost columns to clients; a write that returns the row asks for the columns it may read (the screens do the same: MATERIAL_PUBLIC_COLUMNS)
     await R.check('A3 the material card (readiness bug 1.1-F6): two cards with an EMPTY code get M-000001 / M-000002 over REST as the admin; a typed code is kept; a nameless card is refused (23514)', async () => {
-      const post = (row) => request('POST', `${API}/rest/v1/fabric_materials`, { headers: authA, body: { tenant_id: acc.tenantId, company_id: acc.companyId, ...row } });
+      const post = (row) => request('POST', `${API}/rest/v1/fabric_materials?select=id,code,name_ar,material_type,tracking_mode,selling_price`, { headers: authA, body: { tenant_id: acc.tenantId, company_id: acc.companyId, ...row } });
       const r1 = await post({ code: null, name_ar: 'قماش تجريبي 1' });
       const r2 = await post({ code: '', name_ar: 'قماش تجريبي 2' });
       if (r1.status !== 201 || r2.status !== 201) throw new Error(`insert → ${r1.status} ${r1.text.slice(0, 200)} / ${r2.status} ${r2.text.slice(0, 200)}`);
@@ -366,7 +367,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
     await R.check('A6 20270210v: one tracking mode per material — fabric -> roll, a serial flag -> serial, a plain card -> quantity; a mode change on a card with stock is refused (tracking_mode_locked); a trigger-OFF load leaves the default "quantity" and the server\'s repair `UPDATE fabric_materials SET tracking_mode = NULL WHERE material_type = \'fabric\'` works and makes the cards roll', async () => {
       const mode = async (id) => (await pg('SELECT tracking_mode FROM public.fabric_materials WHERE id = $1', [id])).rows[0].tracking_mode;
       if ((await mode(cardIds[0])) !== 'roll') throw new Error(`a fabric card (default type) is ${await mode(cardIds[0])}`);
-      const mk = async (code, extra = {}) => { const r = await request('POST', `${API}/rest/v1/fabric_materials`, { headers: authA, body: { tenant_id: acc.tenantId, company_id: acc.companyId, code, name_ar: `بطاقة ${code}`, ...extra } }); if (r.status !== 201) throw new Error(`insert ${code} → ${r.status} ${r.text.slice(0, 200)}`); return r.json[0].id; };
+      const mk = async (code, extra = {}) => { const r = await request('POST', `${API}/rest/v1/fabric_materials?select=id,code,name_ar,material_type,tracking_mode,selling_price`, { headers: authA, body: { tenant_id: acc.tenantId, company_id: acc.companyId, code, name_ar: `بطاقة ${code}`, ...extra } }); if (r.status !== 201) throw new Error(`insert ${code} → ${r.status} ${r.text.slice(0, 200)}`); return r.json[0].id; };
       const std = await mk('TM-STD', { material_type: 'standard' }); const ser = await mk('TM-SER', { material_type: 'standard', track_serial: true });
       if ((await mode(std)) !== 'quantity' || (await mode(ser)) !== 'serial') throw new Error(`standard ${await mode(std)}, serial-flag ${await mode(ser)}`);
       // stock on the plain card -> its mode is locked
@@ -462,7 +463,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         if (plan.status !== 200 || !plan.json || plan.json.error || !plan.json.plan_code || !Array.isArray(plan.json.modules) || !plan.json.modules.length) throw new Error(`the old admin's plan answer: ${plan.status} ${plan.text.slice(0, 200)}`);
         // a new card on the upgraded company: M-000001 (the typed OLD-1 is not an M-<digits> code)
         const auth = { apikey: upg.secrets.anonKey, Authorization: `Bearer ${login.json.access_token}`, Prefer: 'return=representation' };
-        const r1 = await request('POST', `${API}/rest/v1/fabric_materials`, { headers: auth, body: { tenant_id: oc.tenantId, company_id: oc.companyId, code: null, name_ar: 'بطاقة جديدة' } });
+        const r1 = await request('POST', `${API}/rest/v1/fabric_materials?select=id,code,name_ar,material_type,tracking_mode,selling_price`, { headers: auth, body: { tenant_id: oc.tenantId, company_id: oc.companyId, code: null, name_ar: 'بطاقة جديدة' } });
         if (r1.status !== 201 || r1.json[0].code !== 'M-000001') throw new Error(`new card on the upgraded install → ${r1.status} ${r1.text.slice(0, 200)}`);
         postFp = await fingerprint(); catPost = await catalog(); invPost = await invFns();
         return `${got.length} applied on start; counts ${JSON.stringify(counts1)} unchanged; OLD-1 intact and readable by its admin, who still gets his plan answer (${plan.json.plan_code}, ${plan.json.modules.length} modules); new card ${r1.json[0].code}; migrations.log ${ok} ✅`;
@@ -557,7 +558,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
         if (rest.status !== 200 || !rest.json.length || rest.json[0].code !== 'OLD-1') throw new Error(`REST read of the old card → ${rest.status} ${rest.text.slice(0, 160)}`);
         const plan = await request('POST', `${API}/rest/v1/rpc/get_all_plan_limits`, { headers: auth, body: { p_tenant_id: oc.tenantId } });
         if (plan.status !== 200 || !plan.json || plan.json.error || !plan.json.plan_code || !Array.isArray(plan.json.modules) || !plan.json.modules.length) throw new Error(`the old admin's plan answer: ${plan.status} ${plan.text.slice(0, 200)}`);
-        const r1 = await request('POST', `${API}/rest/v1/fabric_materials`, { headers: auth, body: { tenant_id: oc.tenantId, company_id: oc.companyId, code: null, name_ar: 'بطاقة جديدة' } });
+        const r1 = await request('POST', `${API}/rest/v1/fabric_materials?select=id,code,name_ar,material_type,tracking_mode,selling_price`, { headers: auth, body: { tenant_id: oc.tenantId, company_id: oc.companyId, code: null, name_ar: 'بطاقة جديدة' } });
         if (r1.status !== 201 || r1.json[0].code !== 'M-000001') throw new Error(`new card on the upgraded install → ${r1.status} ${r1.text.slice(0, 200)}`);
         n1 = now;
         cPostFp = await fingerprint();
@@ -677,7 +678,7 @@ const mlog = (userData) => { try { return fs.readFileSync(path.join(userData, 't
     const local = fnMap(post);
     const bad = Object.entries(V_MD5).filter(([sig, md5]) => !local.has(sig) || local.get(sig).md5 !== md5).map(([sig]) => `${sig}: ${local.has(sig) ? local.get(sig).md5.slice(0, 8) : 'missing'}`);
     if (bad.length) throw new Error(`${bad.join('; ')}`);
-    return `${Object.keys(V_MD5).length}/${Object.keys(V_MD5).length} md5 equal (fn_guard_material_card 2fe6c0a6… = 20270240l, fn_material_tracking_sync db9d6ce5…, …)`;
+    return `${Object.keys(V_MD5).length}/${Object.keys(V_MD5).length} md5 equal (fn_guard_material_card dcd8b0f1… = 20270262b, fn_material_tracking_sync db9d6ce5…, …)`;
   });
 
   await R.check('V2 20270243n: resolve_writeoff_expense_account / post_inventory_writeoff / reverse_inventory_writeoff have production\'s post-image md5 (2de4abe2…, 312b2192…, 8c34fc7f…)', async () => {
